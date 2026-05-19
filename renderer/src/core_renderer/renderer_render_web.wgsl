@@ -76,7 +76,7 @@ struct VertexOutput {
 @group(1) @binding(1) var<storage, read> all_stencils: array<StencilData>;
 @group(1) @binding(2) var<storage, read> visible_instances: array<u32>;
 
-var<push_constant> normalize_matrix: mat4x4<f32>;
+@group(2) @binding(0) var<uniform> normalize_matrix: mat4x4<f32>;
 
 // vertices (y-axis is down, matches public UI unit-quad ordering):
 // 0 - 2

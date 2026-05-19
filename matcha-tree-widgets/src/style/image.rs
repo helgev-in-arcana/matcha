@@ -342,6 +342,7 @@ impl Style for Image {
 
             let texture_copy = TextureCopy::default();
             texture_copy.render(
+                ctx.gpu_queue(),
                 &mut render_pass,
                 TargetData {
                     target_size,

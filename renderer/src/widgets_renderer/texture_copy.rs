@@ -1,3 +1,5 @@
+use crate::pipeline_cache::PipelineCache;
+use crate::push_constant_buffer::PcBuffer;
 use nalgebra::Matrix4;
 use utils::rwoption::RwOption;
 use wgpu::PipelineCompilationOptions;
@@ -14,9 +16,6 @@ push constants (as PushConstant struct):
     color_transformation: mat4x4<f32>
     color_offset: vec4<f32>
 */
-
-// vertex position will be calculated in the vertex shader (`vs_main`)
-// color will be calculated in the fragment shader (`fs_main`)
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -44,13 +43,12 @@ pub struct TextureCopy {
     inner: RwOption<TextureCopyImpl>,
 }
 
-const PIPELINE_CACHE_SIZE: u64 = 4;
-
 struct TextureCopyImpl {
     texture_bind_group_layout: wgpu::BindGroupLayout,
     texture_sampler: wgpu::Sampler,
     pipeline_layout: wgpu::PipelineLayout,
-    pipeline: moka::sync::Cache<wgpu::TextureFormat, wgpu::RenderPipeline, fxhash::FxBuildHasher>,
+    pipeline: PipelineCache<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    pc_buffer: PcBuffer<PushConstant>,
 }
 
 impl TextureCopyImpl {
@@ -91,23 +89,34 @@ impl TextureCopyImpl {
             ..Default::default()
         });
 
+        let pc_layout = PcBuffer::<PushConstant>::bind_group_layout(device);
+        let pc_ranges = PcBuffer::<PushConstant>::push_constant_ranges(
+            wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            PUSH_CONSTANTS_SIZE,
+        );
+
+        // On native: texture at group 0, no UBO group.
+        // On WASM: texture at group 0, UBO at group 1.
+        #[cfg(not(target_arch = "wasm32"))]
+        let bgl: &[&wgpu::BindGroupLayout] = &[&texture_bind_group_layout];
+        #[cfg(target_arch = "wasm32")]
+        let bgl: &[&wgpu::BindGroupLayout] = &[&texture_bind_group_layout, &pc_layout];
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("texture_copy_pipeline_layout"),
-            bind_group_layouts: &[&texture_bind_group_layout],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                range: 0..PUSH_CONSTANTS_SIZE,
-            }],
+            bind_group_layouts: bgl,
+            push_constant_ranges: &pc_ranges,
         });
 
-        let pipeline = moka::sync::CacheBuilder::new(PIPELINE_CACHE_SIZE)
-            .build_with_hasher(fxhash::FxBuildHasher::default());
+        let pc_buffer = PcBuffer::new(device, &pc_layout);
+        let pipeline = PipelineCache::new();
 
         TextureCopyImpl {
             texture_bind_group_layout,
             texture_sampler,
             pipeline_layout,
             pipeline,
+            pc_buffer,
         }
     }
 }
@@ -128,6 +137,7 @@ pub struct RenderData<'a> {
 impl TextureCopy {
     pub fn render(
         &self,
+        queue: &wgpu::Queue,
         render_pass: &mut wgpu::RenderPass<'_>,
         TargetData {
             target_size,
@@ -147,13 +157,22 @@ impl TextureCopy {
             texture_sampler,
             pipeline_layout,
             pipeline,
+            pc_buffer,
         } = &*self
             .inner
             .get_or_insert_with(|| TextureCopyImpl::setup(device));
 
-        let render_pipeline = pipeline.get_with(target_format, || {
+        let render_pipeline = pipeline.get_or_insert(target_format, || {
             make_pipeline(device, target_format, pipeline_layout)
         });
+
+        let push_constants = PushConstant {
+            target_texture_size: [target_size[0] as f32, target_size[1] as f32],
+            source_texture_position_min,
+            source_texture_position_max,
+            color_transformation: color_transformation.unwrap_or_else(Matrix4::identity),
+            color_offset: color_offset.unwrap_or([0.0; 4]),
+        };
 
         render_pass.set_pipeline(&render_pipeline);
         render_pass.set_bind_group(
@@ -174,17 +193,13 @@ impl TextureCopy {
             }),
             &[],
         );
-        let push_constants = PushConstant {
-            target_texture_size: [target_size[0] as f32, target_size[1] as f32],
-            source_texture_position_min,
-            source_texture_position_max,
-            color_transformation: color_transformation.unwrap_or_else(Matrix4::identity),
-            color_offset: color_offset.unwrap_or([0.0; 4]),
-        };
-        render_pass.set_push_constants(
+        pc_buffer.apply_to_render_pass(
+            queue,
+            render_pass,
+            1,
             wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
             0,
-            bytemuck::cast_slice(&[push_constants]),
+            &push_constants,
         );
         render_pass.draw(0..4, 0..1);
     }
@@ -195,9 +210,14 @@ fn make_pipeline(
     target_format: wgpu::TextureFormat,
     pipeline_layout: &wgpu::PipelineLayout,
 ) -> wgpu::RenderPipeline {
+    #[cfg(not(target_arch = "wasm32"))]
+    let src = include_str!("texture_copy.wgsl");
+    #[cfg(target_arch = "wasm32")]
+    let src = include_str!("texture_copy_web.wgsl");
+
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("texture_copy_shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("texture_copy.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
     });
 
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

@@ -60,6 +60,7 @@ impl AtlasManager {
 
         let atlas = TextureAtlas::new(
             &self.device,
+            &self.queue,
             wgpu::Extent3d {
                 width: self.max_size_of_3d_texture.width,
                 height: self.max_size_of_3d_texture.height,

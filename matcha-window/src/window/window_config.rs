@@ -91,6 +91,10 @@ pub struct WindowConfig {
     pub resize_increments: Option<Size>,
     pub active: bool,
     pub surface_config: wgpu::SurfaceConfiguration,
+    /// HTML canvas element id to attach to on WASM.
+    /// If `None`, a new canvas is appended to the document body.
+    #[cfg(target_arch = "wasm32")]
+    pub canvas_id: Option<String>,
 }
 
 impl Default for WindowConfig {
@@ -121,6 +125,8 @@ impl Default for WindowConfig {
                 desired_maximum_frame_latency: 1,
                 alpha_mode: wgpu::CompositeAlphaMode::Auto,
             },
+            #[cfg(target_arch = "wasm32")]
+            canvas_id: None,
         }
     }
 }
@@ -239,6 +245,28 @@ impl WindowConfig {
         attr.preferred_theme = self.preferred_theme.map(Into::into);
         attr.resize_increments = self.resize_increments.map(Into::into);
         attr.active = self.active;
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            use winit::platform::web::WindowAttributesExtWebSys;
+            if let Some(ref id) = self.canvas_id {
+                let canvas = web_sys::window()
+                    .and_then(|w| w.document())
+                    .and_then(|d| d.get_element_by_id(id))
+                    .and_then(|e| {
+                        use wasm_bindgen::JsCast;
+                        e.dyn_into::<web_sys::HtmlCanvasElement>().ok()
+                    });
+                if let Some(canvas) = canvas {
+                    attr = attr.with_canvas(Some(canvas));
+                } else {
+                    attr = attr.with_append(true);
+                }
+            } else {
+                attr = attr.with_append(true);
+            }
+        }
+
         attr
     }
 }

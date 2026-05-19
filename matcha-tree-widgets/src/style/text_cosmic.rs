@@ -413,6 +413,7 @@ impl Style for TextCosmic<'static> {
         // Use TextureCopy to render the temporary texture into the atlas region.
         let texture_copy = TextureCopy::default();
         texture_copy.render(
+            ctx.gpu_queue(),
             &mut render_pass,
             TexTargetData {
                 target_size: target.size(),

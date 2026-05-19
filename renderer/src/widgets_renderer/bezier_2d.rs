@@ -1,13 +1,18 @@
+use crate::pipeline_cache::PipelineCache;
+use crate::push_constant_buffer::PcBuffer;
 use gpu_utils::texture_atlas;
 use std::sync::Arc;
 use utils::rwoption::RwOption;
 use wgpu::util::DeviceExt;
 
+#[cfg(not(target_arch = "wasm32"))]
+const WGSL_DRAW: &str = include_str!("./bezier_2d_draw.wgsl");
+#[cfg(target_arch = "wasm32")]
+const WGSL_DRAW: &str = include_str!("./bezier_2d_draw_web.wgsl");
+
 const WGSL_COMPUTE: &str = include_str!("./bezier_2d_compute.wgsl");
 const WGSL_COMMAND: &str = include_str!("./bezier_2d_command.wgsl");
-const WGSL_DRAW: &str = include_str!("./bezier_2d_draw.wgsl");
 
-const PIPELINE_CACHE_SIZE: u64 = 4;
 const COMPUTE_WORKGROUP_SIZE: u32 = 64;
 
 const VERTEX_DESC: wgpu::VertexBufferLayout = wgpu::VertexBufferLayout {
@@ -20,18 +25,6 @@ const VERTEX_DESC: wgpu::VertexBufferLayout = wgpu::VertexBufferLayout {
     }],
 };
 
-/*
-
-# in compute shader
-
-1. anchors:
-Vec<[f32; 2]> (len: n)
-
-2. vertices:
-[f32; 2] + Vec<[f32; 2]> + [f32; 2] (len: div + 2)
-
-*/
-
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct BezierInfo {
@@ -39,6 +32,14 @@ struct BezierInfo {
     div: u32,
     width: f32,
     _padding: u32,
+}
+
+/// Combined affine_transform + color for the draw pass (native: split push constants; WASM: single UBO).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct DrawPushConstants {
+    affine_transform: nalgebra::Matrix4<f32>,
+    color: [f32; 4],
 }
 
 #[derive(Default)]
@@ -58,12 +59,13 @@ struct Bezier2dImpl {
     // Pipelines
     compute_pipeline: wgpu::ComputePipeline,
     command_pipeline: wgpu::ComputePipeline,
-    draw_pipeline:
-        moka::sync::Cache<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>, fxhash::FxBuildHasher>,
+    draw_pipeline: PipelineCache<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>>,
 
     // reusable resources
     draw_command_buffer: wgpu::Buffer,
     draw_command_storage: wgpu::Buffer,
+
+    draw_pc_buffer: PcBuffer<DrawPushConstants>,
 }
 
 pub struct TargetData {
@@ -135,11 +137,13 @@ impl Bezier2dImpl {
             make_compute_pipeline(device, &data_bind_group_layout);
         let (command_pipeline_layout, command_pipeline) =
             make_command_pipeline(device, &data_bind_group_layout);
-        let draw_pipeline_layout = make_draw_pipeline_layout(device);
 
-        let draw_pipeline = moka::sync::Cache::builder()
-            .max_capacity(PIPELINE_CACHE_SIZE)
-            .build_with_hasher(fxhash::FxBuildHasher::default());
+        let draw_pc_layout = PcBuffer::<DrawPushConstants>::bind_group_layout(device);
+        let draw_pipeline_layout = make_draw_pipeline_layout(device, &draw_pc_layout);
+
+        let draw_pc_buffer = PcBuffer::new(device, &draw_pc_layout);
+
+        let draw_pipeline = PipelineCache::new();
 
         let draw_command_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("bezier_2d_draw_command_buffer"),
@@ -165,6 +169,7 @@ impl Bezier2dImpl {
             draw_pipeline,
             draw_command_buffer,
             draw_command_storage,
+            draw_pc_buffer,
         })
     }
 }
@@ -172,6 +177,7 @@ impl Bezier2dImpl {
 impl Bezier2d {
     pub fn render(
         &self,
+        queue: &wgpu::Queue,
         command_encoder: &mut wgpu::CommandEncoder,
         TargetData { atlas_region }: TargetData,
         RenderData {
@@ -184,11 +190,9 @@ impl Bezier2d {
         device: &wgpu::Device,
     ) {
         if anchors.len() < 2 || div == 0 {
-            // Not enough anchors or divisions to compute Bezier curve
             return;
         }
 
-        // info
         let num_anchors = anchors.len() as u32;
         let compute_vertices = div + 1;
         let num_vertices = compute_vertices + 2;
@@ -196,12 +200,11 @@ impl Bezier2d {
         let target_format = atlas_region.format();
         let target_size = atlas_region.texture_size();
 
-        // Setup Bezier implementation
         let bezier_impl = self
             .inner
             .get_or_insert_with(|| Bezier2dImpl::setup(device));
 
-        let draw_pipeline = bezier_impl.draw_pipeline.get_with(target_format, || {
+        let draw_pipeline = bezier_impl.draw_pipeline.get_or_insert(target_format, || {
             Arc::new(make_draw_pipeline(
                 device,
                 target_format,
@@ -209,7 +212,6 @@ impl Bezier2d {
             ))
         });
 
-        // Create Buffers and Bind Groups
         let info = BezierInfo {
             num_anchors,
             div,
@@ -298,21 +300,41 @@ impl Bezier2d {
             return;
         };
 
-        // Render Pass
-        let affine_transform =
-            affine_transform([target_size[0] as f32, target_size[1] as f32], position);
+        let affine = affine_transform([target_size[0] as f32, target_size[1] as f32], position);
+        let draw_pc = DrawPushConstants {
+            affine_transform: affine,
+            color,
+        };
 
         render_pass.set_pipeline(&draw_pipeline);
-        render_pass.set_push_constants(
-            wgpu::ShaderStages::VERTEX,
-            0,
-            bytemuck::cast_slice(affine_transform.as_slice()),
-        );
-        render_pass.set_push_constants(
-            wgpu::ShaderStages::FRAGMENT,
-            std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32,
-            bytemuck::cast_slice(&color),
-        );
+
+        // Native: two separate push constant ranges (VERTEX + FRAGMENT).
+        // WASM: single UBO at group 0 via PcBuffer.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            render_pass.set_push_constants(
+                wgpu::ShaderStages::VERTEX,
+                0,
+                bytemuck::cast_slice(affine.as_slice()),
+            );
+            render_pass.set_push_constants(
+                wgpu::ShaderStages::FRAGMENT,
+                std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32,
+                bytemuck::cast_slice(&color),
+            );
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            bezier_impl.draw_pc_buffer.apply_to_render_pass(
+                queue,
+                &mut render_pass,
+                0,
+                wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                0,
+                &draw_pc,
+            );
+        }
+
         render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
         render_pass.draw_indirect(&bezier_impl.draw_command_buffer, 0);
     }
@@ -366,22 +388,39 @@ fn make_command_pipeline(
     (pipeline_layout, pipeline)
 }
 
-fn make_draw_pipeline_layout(device: &wgpu::Device) -> wgpu::PipelineLayout {
+fn make_draw_pipeline_layout(
+    device: &wgpu::Device,
+    pc_layout: &wgpu::BindGroupLayout,
+) -> wgpu::PipelineLayout {
+    let matrix_size = std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32;
+    let color_size = std::mem::size_of::<[f32; 4]>() as u32;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let pc_ranges: &[wgpu::PushConstantRange] = &[
+        wgpu::PushConstantRange {
+            stages: wgpu::ShaderStages::VERTEX,
+            range: 0..matrix_size,
+        },
+        wgpu::PushConstantRange {
+            stages: wgpu::ShaderStages::FRAGMENT,
+            range: matrix_size..(matrix_size + color_size),
+        },
+    ];
+    #[cfg(not(target_arch = "wasm32"))]
+    let bgl: &[&wgpu::BindGroupLayout] = &[];
+
+    #[cfg(target_arch = "wasm32")]
+    let pc_ranges: &[wgpu::PushConstantRange] = &[];
+    #[cfg(target_arch = "wasm32")]
+    let bgl: &[&wgpu::BindGroupLayout] = &[pc_layout];
+
+    // suppress unused warning on native
+    let _ = pc_layout;
+
     device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("bezier_2d_draw_pipeline_layout"),
-        bind_group_layouts: &[],
-        push_constant_ranges: &[
-            wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::VERTEX,
-                range: 0..(std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32),
-            },
-            wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::FRAGMENT,
-                range: (std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32)
-                    ..(std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32
-                        + std::mem::size_of::<[f32; 4]>() as u32),
-            },
-        ],
+        bind_group_layouts: bgl,
+        push_constant_ranges: pc_ranges,
     })
 }
 

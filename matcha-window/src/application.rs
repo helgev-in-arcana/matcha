@@ -1,4 +1,5 @@
 use crate::{
+    RuntimeHandle,
     adapter::{EventLoop, EventLoopProxy},
     event::{
         device_event::DeviceEvent,
@@ -8,26 +9,27 @@ use crate::{
     window::WindowId,
 };
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait Application: Send + Sync + 'static {
     type Command: Send + 'static;
 
     // lifecycle methods
     fn init(
         &mut self,
-        runtime: &tokio::runtime::Handle,
+        runtime: &RuntimeHandle,
         proxy: Box<dyn EventLoopProxy<Self> + Send>,
         event_loop: &impl EventLoop,
     );
-    fn resumed(&self, runtime: &tokio::runtime::Handle, event_loop: &impl EventLoop);
-    fn create_surface(&self, runtime: &tokio::runtime::Handle, event_loop: &impl EventLoop);
-    fn destroy_surface(&self, runtime: &tokio::runtime::Handle, event_loop: &impl EventLoop);
-    fn suspended(&self, runtime: &tokio::runtime::Handle, event_loop: &impl EventLoop);
-    fn exiting(&self, runtime: &tokio::runtime::Handle, event_loop: &impl EventLoop);
+    fn resumed(&self, runtime: &RuntimeHandle, event_loop: &impl EventLoop);
+    fn create_surface(&self, runtime: &RuntimeHandle, event_loop: &impl EventLoop);
+    fn destroy_surface(&self, runtime: &RuntimeHandle, event_loop: &impl EventLoop);
+    fn suspended(&self, runtime: &RuntimeHandle, event_loop: &impl EventLoop);
+    fn exiting(&self, runtime: &RuntimeHandle, event_loop: &impl EventLoop);
 
     // rendering methods — no event_loop, spawnable in parallel
-    async fn render(&self, runtime: &tokio::runtime::Handle, window_id: WindowId);
-    fn request_redraw(&self, runtime: &tokio::runtime::Handle, window_id: WindowId) {
+    async fn render(&self, runtime: &RuntimeHandle, window_id: WindowId);
+    fn request_redraw(&self, runtime: &RuntimeHandle, window_id: WindowId) {
         let _ = runtime;
         let _ = window_id;
     }
@@ -35,27 +37,27 @@ pub trait Application: Send + Sync + 'static {
     // event methods
     fn window_event(
         &self,
-        runtime: &tokio::runtime::Handle,
+        runtime: &RuntimeHandle,
         event_loop: &impl EventLoop,
         window_id: WindowId,
         event: WindowEvent,
     );
     fn window_destroyed(
         &self,
-        runtime: &tokio::runtime::Handle,
+        runtime: &RuntimeHandle,
         event_loop: &impl EventLoop,
         window_id: WindowId,
     );
     fn device_event(
         &self,
-        runtime: &tokio::runtime::Handle,
+        runtime: &RuntimeHandle,
         event_loop: &impl EventLoop,
         window_id: WindowId,
         event: DeviceEvent,
     );
     fn ui_command(
         &self,
-        runtime: &tokio::runtime::Handle,
+        runtime: &RuntimeHandle,
         event_loop: &impl EventLoop,
         command: Self::Command,
     );
@@ -63,7 +65,7 @@ pub trait Application: Send + Sync + 'static {
     // Default Methods
     fn raw_device_event(
         &self,
-        runtime: &tokio::runtime::Handle,
+        runtime: &RuntimeHandle,
         event_loop: &impl EventLoop,
         raw_device_id: RawDeviceId,
         raw_event: RawDeviceEvent,
@@ -73,13 +75,13 @@ pub trait Application: Send + Sync + 'static {
         let _ = raw_device_id;
         let _ = raw_event;
     }
-    fn poll(&self, runtime: &tokio::runtime::Handle, event_loop: &impl EventLoop) {
+    fn poll(&self, runtime: &RuntimeHandle, event_loop: &impl EventLoop) {
         let _ = runtime;
         let _ = event_loop;
     }
     fn resume_time_reached(
         &self,
-        runtime: &tokio::runtime::Handle,
+        runtime: &RuntimeHandle,
         event_loop: &impl EventLoop,
         start: std::time::Instant,
         requested_resume: std::time::Instant,
@@ -91,7 +93,7 @@ pub trait Application: Send + Sync + 'static {
     }
     fn wait_cancelled(
         &self,
-        runtime: &tokio::runtime::Handle,
+        runtime: &RuntimeHandle,
         event_loop: &impl EventLoop,
         start: std::time::Instant,
         requested_resume: Option<std::time::Instant>,
@@ -101,11 +103,11 @@ pub trait Application: Send + Sync + 'static {
         let _ = start;
         let _ = requested_resume;
     }
-    fn about_to_wait(&self, runtime: &tokio::runtime::Handle, event_loop: &impl EventLoop) {
+    fn about_to_wait(&self, runtime: &RuntimeHandle, event_loop: &impl EventLoop) {
         let _ = runtime;
         let _ = event_loop;
     }
-    fn memory_warning(&self, runtime: &tokio::runtime::Handle, event_loop: &impl EventLoop) {
+    fn memory_warning(&self, runtime: &RuntimeHandle, event_loop: &impl EventLoop) {
         let _ = runtime;
         let _ = event_loop;
     }

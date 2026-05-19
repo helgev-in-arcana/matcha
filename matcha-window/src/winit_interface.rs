@@ -30,7 +30,16 @@ pub(crate) fn run<App: Application>(
         adapter,
         event_loop_proxy,
     };
-    event_loop.run_app(&mut interface)
+
+    #[cfg(not(target_arch = "wasm32"))]
+    return event_loop.run_app(&mut interface);
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        use winit::platform::web::EventLoopExtWebSys;
+        event_loop.spawn_app(interface);
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

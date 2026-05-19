@@ -3,6 +3,8 @@ push constants:
     [[f32; 4]; 4] // composed affine matrix
 */
 
+use crate::pipeline_cache::PipelineCache;
+use crate::push_constant_buffer::PcBuffer;
 use crate::vertex::colored_vertex::ColorVertex;
 use utils::rwoption::RwOption;
 use wgpu::{PipelineCompilationOptions, util::DeviceExt};
@@ -11,30 +13,38 @@ pub struct VertexColor {
     inner: RwOption<VertexColorImpl>,
 }
 
-const PIPELINE_CACHE_SIZE: u64 = 4;
-
 struct VertexColorImpl {
     pipeline_layout: wgpu::PipelineLayout,
-    pipeline: moka::sync::Cache<wgpu::TextureFormat, wgpu::RenderPipeline, fxhash::FxBuildHasher>,
+    pipeline: PipelineCache<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    pc_buffer: PcBuffer<nalgebra::Matrix4<f32>>,
 }
 
 impl VertexColorImpl {
     fn setup(device: &wgpu::Device) -> Self {
+        let pc_layout = PcBuffer::<nalgebra::Matrix4<f32>>::bind_group_layout(device);
+        let pc_ranges = PcBuffer::<nalgebra::Matrix4<f32>>::push_constant_ranges(
+            wgpu::ShaderStages::VERTEX,
+            std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32,
+        );
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let bgl: &[&wgpu::BindGroupLayout] = &[];
+        #[cfg(target_arch = "wasm32")]
+        let bgl: &[&wgpu::BindGroupLayout] = &[&pc_layout];
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("vertex_color_pipeline_layout"),
-            bind_group_layouts: &[],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::VERTEX,
-                range: 0..(std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32),
-            }],
+            bind_group_layouts: bgl,
+            push_constant_ranges: &pc_ranges,
         });
 
-        let pipeline = moka::sync::CacheBuilder::new(PIPELINE_CACHE_SIZE)
-            .build_with_hasher(fxhash::FxBuildHasher::default());
+        let pc_buffer = PcBuffer::new(device, &pc_layout);
+        let pipeline = PipelineCache::new();
 
         Self {
             pipeline_layout,
             pipeline,
+            pc_buffer,
         }
     }
 }
@@ -61,6 +71,7 @@ impl Default for VertexColor {
 impl VertexColor {
     pub fn render(
         &self,
+        queue: &wgpu::Queue,
         render_pass: &mut wgpu::RenderPass<'_>,
         TargetData {
             target_size,
@@ -76,16 +87,17 @@ impl VertexColor {
         let VertexColorImpl {
             pipeline_layout,
             pipeline,
+            pc_buffer,
         } = &*self
             .inner
             .get_or_insert_with(|| VertexColorImpl::setup(device));
 
-        let render_pipeline = pipeline.get_with(target_format, || {
+        let render_pipeline = pipeline.get_or_insert(target_format, || {
             make_pipeline(device, target_format, pipeline_layout)
         });
 
         let view_port_affine_transform =
-            viewport_transform([target_size[0] as f32, target_size[1] as f32]) * transform; // compose adaptive affine (style-provided) after viewport transform
+            viewport_transform([target_size[0] as f32, target_size[1] as f32]) * transform;
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vertex_color_vertex_buffer"),
@@ -100,10 +112,13 @@ impl VertexColor {
         });
 
         render_pass.set_pipeline(&render_pipeline);
-        render_pass.set_push_constants(
+        pc_buffer.apply_to_render_pass(
+            queue,
+            render_pass,
+            0,
             wgpu::ShaderStages::VERTEX,
             0,
-            bytemuck::cast_slice(view_port_affine_transform.as_slice()),
+            &view_port_affine_transform,
         );
         render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
         render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
@@ -128,9 +143,14 @@ fn make_pipeline(
     target_format: wgpu::TextureFormat,
     pipeline_layout: &wgpu::PipelineLayout,
 ) -> wgpu::RenderPipeline {
+    #[cfg(not(target_arch = "wasm32"))]
+    let src = include_str!("vertex_color.wgsl");
+    #[cfg(target_arch = "wasm32")]
+    let src = include_str!("vertex_color_web.wgsl");
+
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("vertex_color_shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("vertex_color.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
     });
 
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

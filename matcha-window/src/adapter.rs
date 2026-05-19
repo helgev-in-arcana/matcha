@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
+    RuntimeHandle,
     application::Application,
     event::{
         EventStateConfig,
@@ -8,6 +9,7 @@ use crate::{
         raw_device_event::{RawDeviceEvent, RawDeviceId},
         window_event::{WindowEvent, WindowEventState},
     },
+    task_handle::TaskHandle,
     window::{WindowConfig, WindowError, WindowId, WindowSurface},
 };
 
@@ -35,9 +37,10 @@ impl PerWindowState {
 // ---------------------------------------------------------------------------
 
 pub struct Adapter<App: Application> {
+    #[cfg(not(target_arch = "wasm32"))]
     tokio_runtime: tokio::runtime::Runtime,
 
-    rendering_window: HashMap<WindowId, tokio::task::JoinHandle<()>>,
+    rendering_window: HashMap<WindowId, TaskHandle<()>>,
 
     /// Per-window event state machines, keyed by WindowId.
     /// Created lazily on the first event for a window;
@@ -52,10 +55,17 @@ pub struct Adapter<App: Application> {
 
 /// Construction
 impl<App: Application> Adapter<App> {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(app: App) -> Self {
         Self::with_tokio_runtime(app, tokio::runtime::Runtime::new().unwrap())
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn new(app: App) -> Self {
+        Self::wasm_new(app, EventStateConfig::default())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_event_config(app: App, event_config: EventStateConfig) -> Self {
         Self::with_tokio_runtime_and_event_config(
             app,
@@ -64,10 +74,17 @@ impl<App: Application> Adapter<App> {
         )
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn with_event_config(app: App, event_config: EventStateConfig) -> Self {
+        Self::wasm_new(app, event_config)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_tokio_runtime(app: App, runtime: tokio::runtime::Runtime) -> Self {
         Self::with_tokio_runtime_and_event_config(app, runtime, EventStateConfig::default())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_tokio_runtime_and_event_config(
         app: App,
         runtime: tokio::runtime::Runtime,
@@ -75,6 +92,16 @@ impl<App: Application> Adapter<App> {
     ) -> Self {
         Self {
             tokio_runtime: runtime,
+            rendering_window: HashMap::new(),
+            window_states: HashMap::new(),
+            event_config,
+            app: Arc::new(app),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn wasm_new(app: App, event_config: EventStateConfig) -> Self {
+        Self {
             rendering_window: HashMap::new(),
             window_states: HashMap::new(),
             event_config,
@@ -107,40 +134,44 @@ impl<App: Application> Adapter<App> {
         proxy: Box<dyn EventLoopProxy<App> + Send>,
         event_loop: &impl EventLoop,
     ) {
+        let runtime = self.runtime_handle();
+        let _guard = runtime.enter();
         let app = Arc::get_mut(&mut self.app)
             .expect("Adapter::init must be called before any Arc clones are created");
-        let _guard = self.tokio_runtime.enter();
-        app.init(self.tokio_runtime.handle(), proxy, event_loop);
+        app.init(&runtime, proxy, event_loop);
     }
 
     pub fn resumed(&mut self, event_loop: &impl EventLoop) {
-        let _guard = self.tokio_runtime.enter();
-        self.app.resumed(self.tokio_runtime.handle(), event_loop);
+        let runtime = self.runtime_handle();
+        let _guard = runtime.enter();
+        self.app.resumed(&runtime, event_loop);
     }
 
     pub fn create_surface(&mut self, event_loop: &impl EventLoop) {
-        let _guard = self.tokio_runtime.enter();
-        self.app
-            .create_surface(self.tokio_runtime.handle(), event_loop);
+        let runtime = self.runtime_handle();
+        let _guard = runtime.enter();
+        self.app.create_surface(&runtime, event_loop);
     }
 
     pub fn destroy_surface(&mut self, event_loop: &impl EventLoop) {
         // ensure all rendering tasks are finished
         self.abort_all_rendering_tasks();
 
-        let _guard = self.tokio_runtime.enter();
-        self.app
-            .destroy_surface(self.tokio_runtime.handle(), event_loop);
+        let runtime = self.runtime_handle();
+        let _guard = runtime.enter();
+        self.app.destroy_surface(&runtime, event_loop);
     }
 
     pub fn suspended(&mut self, event_loop: &impl EventLoop) {
-        let _guard = self.tokio_runtime.enter();
-        self.app.suspended(self.tokio_runtime.handle(), event_loop);
+        let runtime = self.runtime_handle();
+        let _guard = runtime.enter();
+        self.app.suspended(&runtime, event_loop);
     }
 
     pub fn exiting(&mut self, event_loop: &impl EventLoop) {
-        let _guard = self.tokio_runtime.enter();
-        self.app.exiting(self.tokio_runtime.handle(), event_loop);
+        let runtime = self.runtime_handle();
+        let _guard = runtime.enter();
+        self.app.exiting(&runtime, event_loop);
     }
 }
 
@@ -152,18 +183,17 @@ impl<App: Application> Adapter<App> {
                 self.rendering_window.remove(&window_id);
             } else {
                 // request redraw again to catch up latest redraw request
-                self.app
-                    .request_redraw(self.tokio_runtime.handle(), window_id);
+                self.app.request_redraw(&self.runtime_handle(), window_id);
                 return;
             }
         }
 
         let app = self.app.clone();
-        let runtime_handle = self.tokio_runtime.handle().clone();
+        let runtime_handle = self.runtime_handle();
+        let runtime_in_task = runtime_handle.clone();
 
-        let handle = self.tokio_runtime.spawn(async move {
-            let handle = runtime_handle;
-            app.render(&handle, window_id).await;
+        let handle = runtime_handle.spawn(async move {
+            app.render(&runtime_in_task, window_id).await;
         });
 
         self.rendering_window.insert(window_id, handle);
@@ -175,10 +205,10 @@ impl<App: Application> Adapter<App> {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        let _guard = self.tokio_runtime.enter();
+        let runtime = self.runtime_handle();
+        let _guard = runtime.enter();
         let event = self.window_state_mut(window_id).window.process(event);
-        self.app
-            .window_event(self.tokio_runtime.handle(), event_loop, window_id, event);
+        self.app.window_event(&runtime, event_loop, window_id, event);
     }
 
     pub fn window_destroyed(&mut self, event_loop: &impl EventLoop, window_id: WindowId) {
@@ -187,9 +217,9 @@ impl<App: Application> Adapter<App> {
         // Clean up the rendering task for the window.
         self.remove_rendering_task(window_id);
         // Notify the Application that the window is gone.
-        let _guard = self.tokio_runtime.enter();
-        self.app
-            .window_destroyed(self.tokio_runtime.handle(), event_loop, window_id);
+        let runtime = self.runtime_handle();
+        let _guard = runtime.enter();
+        self.app.window_destroyed(&runtime, event_loop, window_id);
     }
 
     pub fn device_event(
@@ -199,13 +229,10 @@ impl<App: Application> Adapter<App> {
         event: DeviceEvent,
     ) {
         if let Some(processed) = self.window_state_mut(window_id).device.process(event) {
-            let _guard = self.tokio_runtime.enter();
-            self.app.device_event(
-                self.tokio_runtime.handle(),
-                event_loop,
-                window_id,
-                processed,
-            );
+            let runtime = self.runtime_handle();
+            let _guard = runtime.enter();
+            self.app
+                .device_event(&runtime, event_loop, window_id, processed);
         }
     }
 
@@ -215,30 +242,28 @@ impl<App: Application> Adapter<App> {
         raw_device_id: RawDeviceId,
         raw_event: RawDeviceEvent,
     ) {
-        let _guard = self.tokio_runtime.enter();
-        self.app.raw_device_event(
-            self.tokio_runtime.handle(),
-            event_loop,
-            raw_device_id,
-            raw_event,
-        );
+        let runtime = self.runtime_handle();
+        let _guard = runtime.enter();
+        self.app
+            .raw_device_event(&runtime, event_loop, raw_device_id, raw_event);
     }
 }
 
 /// Ui commands
 impl<App: Application> Adapter<App> {
     pub fn ui_command(&mut self, event_loop: &impl EventLoop, command: App::Command) {
-        let _guard = self.tokio_runtime.enter();
-        self.app
-            .ui_command(self.tokio_runtime.handle(), event_loop, command);
+        let runtime = self.runtime_handle();
+        let _guard = runtime.enter();
+        self.app.ui_command(&runtime, event_loop, command);
     }
 }
 
 /// Polling
 impl<App: Application> Adapter<App> {
     pub fn poll(&mut self, event_loop: &impl EventLoop) {
-        let _guard = self.tokio_runtime.enter();
-        self.app.poll(self.tokio_runtime.handle(), event_loop);
+        let runtime = self.runtime_handle();
+        let _guard = runtime.enter();
+        self.app.poll(&runtime, event_loop);
     }
 
     pub fn resume_time_reached(
@@ -247,13 +272,10 @@ impl<App: Application> Adapter<App> {
         start: std::time::Instant,
         requested_resume: std::time::Instant,
     ) {
-        let _guard = self.tokio_runtime.enter();
-        self.app.resume_time_reached(
-            self.tokio_runtime.handle(),
-            event_loop,
-            start,
-            requested_resume,
-        );
+        let runtime = self.runtime_handle();
+        let _guard = runtime.enter();
+        self.app
+            .resume_time_reached(&runtime, event_loop, start, requested_resume);
     }
 
     pub fn wait_cancelled(
@@ -262,27 +284,24 @@ impl<App: Application> Adapter<App> {
         start: std::time::Instant,
         requested_resume: Option<std::time::Instant>,
     ) {
-        let _guard = self.tokio_runtime.enter();
-        self.app.wait_cancelled(
-            self.tokio_runtime.handle(),
-            event_loop,
-            start,
-            requested_resume,
-        );
+        let runtime = self.runtime_handle();
+        let _guard = runtime.enter();
+        self.app
+            .wait_cancelled(&runtime, event_loop, start, requested_resume);
     }
 
     pub fn about_to_wait(&mut self, event_loop: &impl EventLoop) {
-        let _guard = self.tokio_runtime.enter();
-        self.app
-            .about_to_wait(self.tokio_runtime.handle(), event_loop);
+        let runtime = self.runtime_handle();
+        let _guard = runtime.enter();
+        self.app.about_to_wait(&runtime, event_loop);
     }
 }
 
 impl<App: Application> Adapter<App> {
     pub fn memory_warning(&mut self, event_loop: &impl EventLoop) {
-        let _guard = self.tokio_runtime.enter();
-        self.app
-            .memory_warning(self.tokio_runtime.handle(), event_loop);
+        let runtime = self.runtime_handle();
+        let _guard = runtime.enter();
+        self.app.memory_warning(&runtime, event_loop);
     }
 }
 
@@ -291,15 +310,31 @@ impl<App: Application> Adapter<App> {
 // -------------------
 
 impl<App: Application> Adapter<App> {
+    fn runtime_handle(&self) -> RuntimeHandle {
+        #[cfg(not(target_arch = "wasm32"))]
+        return RuntimeHandle::from_tokio(self.tokio_runtime.handle().clone());
+        #[cfg(target_arch = "wasm32")]
+        return RuntimeHandle;
+    }
+
     fn abort_all_rendering_tasks(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
         self.tokio_runtime.block_on(async {
             for handle in self.rendering_window.values() {
                 handle.abort();
             }
             for (_, handle) in self.rendering_window.drain() {
-                let _ = handle.await;
+                let _ = handle.join().await;
             }
         });
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for handle in self.rendering_window.values() {
+                handle.abort();
+            }
+            self.rendering_window.clear();
+        }
     }
 
     fn remove_rendering_task(&mut self, window_id: WindowId) {

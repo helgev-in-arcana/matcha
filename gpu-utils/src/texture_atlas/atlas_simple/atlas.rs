@@ -302,9 +302,10 @@ impl AtlasRegion {
                 allocation_height,
             );
             atlas.viewport_clear.render(
-                &atlas.device(),
+                &atlas.queue(),
                 &mut clear_pass,
                 atlas.format(),
+                &atlas.device(),
                 [0.0, 0.0, 0.0, 0.0],
             );
         }
@@ -477,6 +478,7 @@ pub struct TextureAtlas {
     state: Mutex<TextureAtlasState>,
     resources: RwLock<TextureAtlasResources>,
     device: RwLock<wgpu::Device>,
+    queue: RwLock<wgpu::Queue>,
     viewport_clear: ViewportClear,
     margin: u32,
     weak_self: Weak<Self>,
@@ -502,6 +504,7 @@ impl TextureAtlas {
 
     pub fn new(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         size: wgpu::Extent3d,
         format: wgpu::TextureFormat,
         margin: u32,
@@ -533,6 +536,7 @@ impl TextureAtlas {
             state: Mutex::new(state),
             resources: RwLock::new(resources),
             device: RwLock::new(device.clone()),
+            queue: RwLock::new(queue.clone()),
             viewport_clear: ViewportClear::default(),
             margin,
             weak_self: weak_self.clone(),
@@ -541,7 +545,7 @@ impl TextureAtlas {
 }
 
 impl DeviceLossRecoverable for TextureAtlas {
-    fn recover(&self, device: &wgpu::Device, _: &wgpu::Queue) {
+    fn recover(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
         let format = self.format;
         let size = self.size();
         let id = self.id;
@@ -574,6 +578,7 @@ impl DeviceLossRecoverable for TextureAtlas {
         *resources_lock = resources;
 
         *self.device.write() = device.clone();
+        *self.queue.write() = queue.clone();
         self.viewport_clear.reset();
 
         trace!(
@@ -593,6 +598,10 @@ impl TextureAtlas {
 
     fn device(&self) -> wgpu::Device {
         self.device.read().clone()
+    }
+
+    fn queue(&self) -> wgpu::Queue {
+        self.queue.read().clone()
     }
 
     pub fn margin(&self) -> u32 {
@@ -954,7 +963,7 @@ mod tests {
         margin: u32,
     ) -> (wgpu::Device, wgpu::Queue, Arc<TextureAtlas>) {
         let (_, _, device, queue) = crate::wgpu_utils::noop_wgpu().await;
-        let atlas = TextureAtlas::new(&device, size, format, margin);
+        let atlas = TextureAtlas::new(&device, &queue, size, format, margin);
         (device, queue, atlas)
     }
 

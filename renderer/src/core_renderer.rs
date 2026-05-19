@@ -6,9 +6,17 @@ use gpu_utils::{device_loss_recoverable::DeviceLossRecoverable, texture_atlas};
 use texture_atlas::RegionError;
 use thiserror::Error;
 
+#[cfg(not(target_arch = "wasm32"))]
 const WGSL_CULL: &str = include_str!("core_renderer/renderer_cull.wgsl");
+#[cfg(target_arch = "wasm32")]
+const WGSL_CULL: &str = include_str!("core_renderer/renderer_cull_web.wgsl");
+
 const WGSL_COMMAND: &str = include_str!("core_renderer/renderer_command.wgsl");
+
+#[cfg(not(target_arch = "wasm32"))]
 const WGSL_RENDER: &str = include_str!("core_renderer/renderer_render.wgsl");
+#[cfg(target_arch = "wasm32")]
+const WGSL_RENDER: &str = include_str!("core_renderer/renderer_render_web.wgsl");
 
 const PIPELINE_CACHE_SIZE: u64 = 3;
 const COMPUTE_WORKGROUP_SIZE: u32 = 64;
@@ -182,8 +190,11 @@ pub struct CoreRendererInner {
     // Pipelines
     culling_pipeline: wgpu::ComputePipeline,
     command_pipeline: wgpu::ComputePipeline,
-    render_pipeline:
-        moka::sync::Cache<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>, fxhash::FxBuildHasher>, // key: surface format
+    render_pipeline: crate::pipeline_cache::PipelineCache<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>>,
+
+    // Push-constant buffers (zero-size on native, UBO on WASM)
+    cull_pc_buffer: crate::push_constant_buffer::PcBuffer<CullingPushConstants>,
+    render_pc_buffer: crate::push_constant_buffer::PcBuffer<nalgebra::Matrix4<f32>>,
 
     // reusable buffers
     atomic_counter: wgpu::Buffer,
@@ -308,8 +319,16 @@ impl CoreRendererInner {
                 ],
             });
 
+        let cull_pc_layout =
+            crate::push_constant_buffer::PcBuffer::<CullingPushConstants>::bind_group_layout(
+                device,
+            );
+        let render_pc_layout = crate::push_constant_buffer::PcBuffer::<
+            nalgebra::Matrix4<f32>,
+        >::bind_group_layout(device);
+
         let (culling_pipeline_layout, culling_pipeline) =
-            Self::create_culling_pipeline(device, &data_bind_group_layout);
+            Self::create_culling_pipeline(device, &data_bind_group_layout, &cull_pc_layout);
 
         let (command_pipeline_layout, command_pipeline) =
             Self::create_command_pipeline(device, &data_bind_group_layout);
@@ -319,12 +338,16 @@ impl CoreRendererInner {
                 device,
                 &texture_bind_group_layout,
                 &data_bind_group_layout,
+                &render_pc_layout,
             );
         trace!("CoreRenderer::new: pipeline layouts created");
 
-        let render_pipeline = moka::sync::Cache::builder()
-            .max_capacity(PIPELINE_CACHE_SIZE)
-            .build_with_hasher(fxhash::FxBuildHasher::default());
+        let render_pipeline = crate::pipeline_cache::PipelineCache::new();
+
+        let cull_pc_buffer =
+            crate::push_constant_buffer::PcBuffer::new(device, &cull_pc_layout);
+        let render_pc_buffer =
+            crate::push_constant_buffer::PcBuffer::new(device, &render_pc_layout);
 
         // Create buffers
         let atomic_counter = device.create_buffer(&wgpu::BufferDescriptor {
@@ -360,6 +383,8 @@ impl CoreRendererInner {
             culling_pipeline,
             command_pipeline,
             render_pipeline,
+            cull_pc_buffer,
+            render_pc_buffer,
             atomic_counter,
             draw_command,
             draw_command_storage,
@@ -369,6 +394,7 @@ impl CoreRendererInner {
     fn create_culling_pipeline(
         device: &wgpu::Device,
         bind_group_layout: &wgpu::BindGroupLayout,
+        pc_layout: &wgpu::BindGroupLayout,
     ) -> (wgpu::PipelineLayout, wgpu::ComputePipeline) {
         trace!("CoreRenderer::create_culling_pipeline: creating pipeline");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -376,13 +402,21 @@ impl CoreRendererInner {
             source: wgpu::ShaderSource::Wgsl(WGSL_CULL.into()),
         });
 
+        let pc_ranges =
+            crate::push_constant_buffer::PcBuffer::<CullingPushConstants>::push_constant_ranges(
+                wgpu::ShaderStages::COMPUTE,
+                std::mem::size_of::<CullingPushConstants>() as u32,
+            );
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let bgl: &[&wgpu::BindGroupLayout] = &[bind_group_layout];
+        #[cfg(target_arch = "wasm32")]
+        let bgl: &[&wgpu::BindGroupLayout] = &[bind_group_layout, pc_layout];
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Culling Pipeline Layout"),
-            bind_group_layouts: &[bind_group_layout],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::COMPUTE,
-                range: 0..std::mem::size_of::<CullingPushConstants>() as u32,
-            }],
+            bind_group_layouts: bgl,
+            push_constant_ranges: &pc_ranges,
         });
 
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -431,6 +465,7 @@ impl CoreRendererInner {
         device: &wgpu::Device,
         texture_bind_group_layout: &wgpu::BindGroupLayout,
         data_bind_group_layout: &wgpu::BindGroupLayout,
+        pc_layout: &wgpu::BindGroupLayout,
     ) -> (wgpu::PipelineLayout, wgpu::ShaderModule) {
         trace!("CoreRenderer::create_render_pipeline_layout: creating pipeline layout");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -438,13 +473,24 @@ impl CoreRendererInner {
             source: wgpu::ShaderSource::Wgsl(WGSL_RENDER.into()),
         });
 
+        let pc_ranges = crate::push_constant_buffer::PcBuffer::<
+            nalgebra::Matrix4<f32>,
+        >::push_constant_ranges(
+            wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32,
+        );
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let bgl: &[&wgpu::BindGroupLayout] =
+            &[texture_bind_group_layout, data_bind_group_layout];
+        #[cfg(target_arch = "wasm32")]
+        let bgl: &[&wgpu::BindGroupLayout] =
+            &[texture_bind_group_layout, data_bind_group_layout, pc_layout];
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[texture_bind_group_layout, data_bind_group_layout],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                range: 0..std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32,
-            }],
+            bind_group_layouts: bgl,
+            push_constant_ranges: &pc_ranges,
         });
 
         (pipeline_layout, module)
@@ -552,7 +598,7 @@ impl CoreRendererInner {
         }
 
         // get or create render pipeline that matches given surface format
-        let render_pipeline = self.render_pipeline.get_with(surface_format, || {
+        let render_pipeline = self.render_pipeline.get_or_insert(surface_format, || {
             trace!("CoreRenderer::render: creating render pipeline for format {surface_format:?}");
             Arc::new(Self::create_render_pipeline(
                 device,
@@ -694,7 +740,7 @@ impl CoreRendererInner {
                 });
             culling_pass.set_pipeline(&self.culling_pipeline);
             culling_pass.set_bind_group(0, &data_bind_group, &[]);
-            culling_pass.set_push_constants(0, bytemuck::bytes_of(&cull_pc));
+            self.cull_pc_buffer.apply_to_compute_pass(queue, &mut culling_pass, 1, &cull_pc);
             culling_pass.dispatch_workgroups(
                 (instances.len() as u32).div_ceil(COMPUTE_WORKGROUP_SIZE),
                 1,
@@ -745,10 +791,13 @@ impl CoreRendererInner {
             render_pass.set_pipeline(render_pipeline.as_ref());
             render_pass.set_bind_group(0, &texture_bind_group, &[]);
             render_pass.set_bind_group(1, &data_bind_group, &[]);
-            render_pass.set_push_constants(
+            self.render_pc_buffer.apply_to_render_pass(
+                queue,
+                &mut render_pass,
+                2,
                 wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 0,
-                bytemuck::cast_slice(normalize_matrix.as_slice()),
+                &normalize_matrix,
             );
             render_pass.draw_indirect(&self.draw_command, 0);
         }

@@ -373,6 +373,7 @@ impl crate::style::Style for TextRenderer {
         };
 
         self.texture_copy.render(
+            ctx.gpu_queue(),
             &mut render_pass,
             renderer::texture_copy::TargetData {
                 target_size: target.texture_size(),

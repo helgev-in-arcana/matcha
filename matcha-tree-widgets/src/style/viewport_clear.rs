@@ -53,6 +53,7 @@ impl Style for ViewportClear {
         };
 
         self.renderer.render(
+            ctx.gpu_queue(),
             &mut render_pass,
             target_format,
             ctx.gpu_device(),

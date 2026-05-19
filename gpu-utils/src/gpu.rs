@@ -19,9 +19,19 @@ pub struct GpuDescriptor {
 impl Default for GpuDescriptor {
     fn default() -> Self {
         Self {
+            #[cfg(not(target_arch = "wasm32"))]
             backends: wgpu::Backends::PRIMARY,
+            #[cfg(target_arch = "wasm32")]
+            backends: wgpu::Backends::BROWSER_WEBGPU,
+
             power_preference: wgpu::PowerPreference::LowPower,
-            required_features: wgpu::Features::PUSH_CONSTANTS | wgpu::Features::VERTEX_WRITABLE_STORAGE,
+
+            #[cfg(not(target_arch = "wasm32"))]
+            required_features: wgpu::Features::PUSH_CONSTANTS
+                | wgpu::Features::VERTEX_WRITABLE_STORAGE,
+            #[cfg(target_arch = "wasm32")]
+            required_features: wgpu::Features::empty(),
+
             required_limits: None,
             preferred_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
         }
@@ -165,6 +175,7 @@ impl Gpu {
     /// Using `spawn_blocking` at the call site also acts as the single-recovery
     /// guard: the caller is responsible for not invoking this concurrently
     /// (e.g. by checking a flag before spawning, or via an outer `Mutex`).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn recover(&self) -> Result<(wgpu::Device, wgpu::Queue), GpuError> {
         debug!("Gpu::recover: requesting new device");
         let mut device_queue = self.device_queue.write();

@@ -1,18 +1,13 @@
+use crate::pipeline_cache::PipelineCache;
+use crate::push_constant_buffer::PcBuffer;
+use crate::vertex::uv_vertex::UvVertex;
 use utils::rwoption::RwOption;
 use wgpu::util::DeviceExt;
 
-use crate::vertex::uv_vertex::UvVertex;
 /* NOTE: This renderer assumes textures use top-origin UV coordinates (v = 0 at the top).
 UvVertex.tex_coords passed to this pipeline must have v = 0 at the top of the image.
 If your texture data uses bottom-origin coordinates, invert the v component before
 rendering (e.g. use 1.0 - v). */
-
-// API similar to line_strip.rs:
-// - TextureColor is Default and lazily initializes inner impl on first render
-// - Pipeline cached per target format using moka::sync::Cache
-// - Push constants used for affine matrix (vertex stage)
-
-const PIPELINE_CACHE_SIZE: u64 = 4;
 
 pub struct TextureColor {
     inner: RwOption<TextureColorImpl>,
@@ -21,8 +16,9 @@ pub struct TextureColor {
 struct TextureColorImpl {
     texture_bind_group_layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
-    pipeline: moka::sync::Cache<wgpu::TextureFormat, wgpu::RenderPipeline, fxhash::FxBuildHasher>,
+    pipeline: PipelineCache<wgpu::TextureFormat, wgpu::RenderPipeline>,
     texture_sampler: wgpu::Sampler,
+    pc_buffer: PcBuffer<nalgebra::Matrix4<f32>>,
 }
 
 impl TextureColorImpl {
@@ -50,17 +46,27 @@ impl TextureColorImpl {
                 ],
             });
 
+        let pc_layout = PcBuffer::<nalgebra::Matrix4<f32>>::bind_group_layout(device);
+        let pc_ranges = PcBuffer::<nalgebra::Matrix4<f32>>::push_constant_ranges(
+            wgpu::ShaderStages::VERTEX,
+            std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32,
+        );
+
+        // On native: texture at group 0, no UBO group.
+        // On WASM: texture at group 0, UBO at group 1.
+        #[cfg(not(target_arch = "wasm32"))]
+        let bgl: &[&wgpu::BindGroupLayout] = &[&texture_bind_group_layout];
+        #[cfg(target_arch = "wasm32")]
+        let bgl: &[&wgpu::BindGroupLayout] = &[&texture_bind_group_layout, &pc_layout];
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("TextureColor: Pipeline Layout"),
-            bind_group_layouts: &[&texture_bind_group_layout],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::VERTEX,
-                range: 0..(std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32),
-            }],
+            bind_group_layouts: bgl,
+            push_constant_ranges: &pc_ranges,
         });
 
-        let pipeline = moka::sync::CacheBuilder::new(PIPELINE_CACHE_SIZE)
-            .build_with_hasher(fxhash::FxBuildHasher::default());
+        let pc_buffer = PcBuffer::new(device, &pc_layout);
+        let pipeline = PipelineCache::new();
 
         let texture_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("TextureColor: Texture Sampler"),
@@ -78,6 +84,7 @@ impl TextureColorImpl {
             pipeline_layout,
             pipeline,
             texture_sampler,
+            pc_buffer,
         }
     }
 }
@@ -105,6 +112,7 @@ impl Default for TextureColor {
 impl TextureColor {
     pub fn render(
         &self,
+        queue: &wgpu::Queue,
         render_pass: &mut wgpu::RenderPass<'_>,
         TargetData {
             target_size,
@@ -122,31 +130,25 @@ impl TextureColor {
             .inner
             .get_or_insert_with(|| TextureColorImpl::setup(device));
 
-        // get or create pipeline for this target format
-        let render_pipeline = inner.pipeline.get_with(target_format, || {
+        let render_pipeline = inner.pipeline.get_or_insert(target_format, || {
             make_pipeline(device, target_format, &inner.pipeline_layout)
         });
 
-        // compute viewport affine transform
         let view_port_affine_transform =
             affine_transform([target_size[0] as f32, target_size[1] as f32], position);
 
-        // push constant (affine matrix) - must be set after pipeline is set
-        // create vertex buffer
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("texture_color_vertex_buffer"),
             contents: bytemuck::cast_slice(vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        // create index buffer
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("texture_color_index_buffer"),
             contents: bytemuck::cast_slice(indices),
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        // texture bind group
         let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("TextureColor: Texture Bind Group"),
             layout: &inner.texture_bind_group_layout,
@@ -162,14 +164,16 @@ impl TextureColor {
             ],
         });
 
-        // set pipeline and resources
         render_pass.set_pipeline(&render_pipeline);
-        render_pass.set_push_constants(
+        render_pass.set_bind_group(0, &texture_bind_group, &[]);
+        inner.pc_buffer.apply_to_render_pass(
+            queue,
+            render_pass,
+            1,
             wgpu::ShaderStages::VERTEX,
             0,
-            bytemuck::cast_slice(view_port_affine_transform.as_slice()),
+            &view_port_affine_transform,
         );
-        render_pass.set_bind_group(0, &texture_bind_group, &[]);
         render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
         render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
         render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
@@ -181,9 +185,14 @@ fn make_pipeline(
     target_format: wgpu::TextureFormat,
     pipeline_layout: &wgpu::PipelineLayout,
 ) -> wgpu::RenderPipeline {
+    #[cfg(not(target_arch = "wasm32"))]
+    let src = include_str!("texture_color.wgsl");
+    #[cfg(target_arch = "wasm32")]
+    let src = include_str!("texture_color_web.wgsl");
+
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("texture_color_shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("texture_color.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
     });
 
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

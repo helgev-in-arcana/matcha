@@ -455,6 +455,7 @@ impl Style for Polygon {
 
         // Pass adaptive_affine through RenderData so renderer can compose final push-constant matrix.
         self.renderer.render(
+            ctx.gpu_queue(),
             &mut render_pass,
             TargetData {
                 target_size,

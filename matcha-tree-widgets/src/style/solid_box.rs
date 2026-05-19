@@ -81,6 +81,7 @@ impl Style for SolidBox {
         let indices: [u16; 6] = [0, 1, 2, 0, 2, 3];
 
         self.renderer.render(
+            ctx.gpu_queue(),
             &mut render_pass,
             TargetData {
                 target_size,
