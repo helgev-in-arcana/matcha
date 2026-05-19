@@ -14,6 +14,78 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
+// Platform-specific runtime state
+// ---------------------------------------------------------------------------
+
+#[cfg(not(target_arch = "wasm32"))]
+mod runtime_state {
+    use super::{HashMap, TaskHandle, WindowId};
+
+    pub(super) struct RuntimeState {
+        tokio_runtime: tokio::runtime::Runtime,
+    }
+
+    impl RuntimeState {
+        pub(super) fn new() -> Self {
+            Self {
+                tokio_runtime: tokio::runtime::Runtime::new().unwrap(),
+            }
+        }
+
+        pub(super) fn with_runtime(tokio_runtime: tokio::runtime::Runtime) -> Self {
+            Self { tokio_runtime }
+        }
+
+        pub(super) fn handle(&self) -> crate::RuntimeHandle {
+            crate::RuntimeHandle::from_tokio(self.tokio_runtime.handle().clone())
+        }
+
+        pub(super) fn abort_all_tasks(
+            &self,
+            rendering_window: &mut HashMap<WindowId, TaskHandle<()>>,
+        ) {
+            self.tokio_runtime.block_on(async {
+                for handle in rendering_window.values() {
+                    handle.abort();
+                }
+                for (_, handle) in rendering_window.drain() {
+                    let _ = handle.join().await;
+                }
+            });
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+mod runtime_state {
+    use super::{HashMap, TaskHandle, WindowId};
+
+    pub(super) struct RuntimeState;
+
+    impl RuntimeState {
+        pub(super) fn new() -> Self {
+            Self
+        }
+
+        pub(super) fn handle(&self) -> crate::RuntimeHandle {
+            crate::RuntimeHandle
+        }
+
+        pub(super) fn abort_all_tasks(
+            &self,
+            rendering_window: &mut HashMap<WindowId, TaskHandle<()>>,
+        ) {
+            for handle in rendering_window.values() {
+                handle.abort();
+            }
+            rendering_window.clear();
+        }
+    }
+}
+
+use runtime_state::RuntimeState;
+
+// ---------------------------------------------------------------------------
 // Per-window state machines
 // ---------------------------------------------------------------------------
 
@@ -37,51 +109,34 @@ impl PerWindowState {
 // ---------------------------------------------------------------------------
 
 pub struct Adapter<App: Application> {
-    #[cfg(not(target_arch = "wasm32"))]
-    tokio_runtime: tokio::runtime::Runtime,
-
+    runtime: RuntimeState,
     rendering_window: HashMap<WindowId, TaskHandle<()>>,
-
     /// Per-window event state machines, keyed by WindowId.
     /// Created lazily on the first event for a window;
     /// removed when `WindowEvent::Destroyed` is received.
     window_states: HashMap<WindowId, PerWindowState>,
-
     /// Configuration applied to every new per-window state machine.
     event_config: EventStateConfig,
-
     app: Arc<App>,
 }
 
 /// Construction
 impl<App: Application> Adapter<App> {
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(app: App) -> Self {
-        Self::with_tokio_runtime(app, tokio::runtime::Runtime::new().unwrap())
+        Self::with_runtime_and_event_config(RuntimeState::new(), app, EventStateConfig::default())
     }
 
-    #[cfg(target_arch = "wasm32")]
-    pub fn new(app: App) -> Self {
-        Self::wasm_new(app, EventStateConfig::default())
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_event_config(app: App, event_config: EventStateConfig) -> Self {
-        Self::with_tokio_runtime_and_event_config(
-            app,
-            tokio::runtime::Runtime::new().unwrap(),
-            event_config,
-        )
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub fn with_event_config(app: App, event_config: EventStateConfig) -> Self {
-        Self::wasm_new(app, event_config)
+        Self::with_runtime_and_event_config(RuntimeState::new(), app, event_config)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_tokio_runtime(app: App, runtime: tokio::runtime::Runtime) -> Self {
-        Self::with_tokio_runtime_and_event_config(app, runtime, EventStateConfig::default())
+        Self::with_runtime_and_event_config(
+            RuntimeState::with_runtime(runtime),
+            app,
+            EventStateConfig::default(),
+        )
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -90,18 +145,16 @@ impl<App: Application> Adapter<App> {
         runtime: tokio::runtime::Runtime,
         event_config: EventStateConfig,
     ) -> Self {
-        Self {
-            tokio_runtime: runtime,
-            rendering_window: HashMap::new(),
-            window_states: HashMap::new(),
-            event_config,
-            app: Arc::new(app),
-        }
+        Self::with_runtime_and_event_config(RuntimeState::with_runtime(runtime), app, event_config)
     }
 
-    #[cfg(target_arch = "wasm32")]
-    fn wasm_new(app: App, event_config: EventStateConfig) -> Self {
+    fn with_runtime_and_event_config(
+        runtime: RuntimeState,
+        app: App,
+        event_config: EventStateConfig,
+    ) -> Self {
         Self {
+            runtime,
             rendering_window: HashMap::new(),
             window_states: HashMap::new(),
             event_config,
@@ -311,30 +364,11 @@ impl<App: Application> Adapter<App> {
 
 impl<App: Application> Adapter<App> {
     fn runtime_handle(&self) -> RuntimeHandle {
-        #[cfg(not(target_arch = "wasm32"))]
-        return RuntimeHandle::from_tokio(self.tokio_runtime.handle().clone());
-        #[cfg(target_arch = "wasm32")]
-        return RuntimeHandle;
+        self.runtime.handle()
     }
 
     fn abort_all_rendering_tasks(&mut self) {
-        #[cfg(not(target_arch = "wasm32"))]
-        self.tokio_runtime.block_on(async {
-            for handle in self.rendering_window.values() {
-                handle.abort();
-            }
-            for (_, handle) in self.rendering_window.drain() {
-                let _ = handle.join().await;
-            }
-        });
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            for handle in self.rendering_window.values() {
-                handle.abort();
-            }
-            self.rendering_window.clear();
-        }
+        self.runtime.abort_all_tasks(&mut self.rendering_window);
     }
 
     fn remove_rendering_task(&mut self, window_id: WindowId) {

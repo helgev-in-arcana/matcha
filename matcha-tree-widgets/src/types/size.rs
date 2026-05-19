@@ -47,10 +47,34 @@ impl ChildSize<'_> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Platform-specific function type and bound — single cfg block per platform
+// ---------------------------------------------------------------------------
+
 #[cfg(not(target_arch = "wasm32"))]
-type SizeFn = dyn Fn([f32; 2], &mut ChildSize, &UiContext) -> f32 + Send + Sync + 'static;
+mod platform {
+    use super::{ChildSize, UiContext};
+    pub type SizeFn =
+        dyn Fn([f32; 2], &mut ChildSize, &UiContext) -> f32 + Send + Sync + 'static;
+    pub trait SizeFnBound:
+        Fn([f32; 2], &mut ChildSize, &UiContext) -> f32 + Send + Sync + 'static
+    {
+    }
+    impl<T: Fn([f32; 2], &mut ChildSize, &UiContext) -> f32 + Send + Sync + 'static>
+        SizeFnBound for T
+    {
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
-type SizeFn = dyn Fn([f32; 2], &mut ChildSize, &UiContext) -> f32 + 'static;
+mod platform {
+    use super::{ChildSize, UiContext};
+    pub type SizeFn = dyn Fn([f32; 2], &mut ChildSize, &UiContext) -> f32 + 'static;
+    pub trait SizeFnBound: Fn([f32; 2], &mut ChildSize, &UiContext) -> f32 + 'static {}
+    impl<T: Fn([f32; 2], &mut ChildSize, &UiContext) -> f32 + 'static> SizeFnBound for T {}
+}
+
+use platform::SizeFn;
 
 /// Calculate size from parent size child size and context.
 #[derive(Clone)]
@@ -163,20 +187,7 @@ impl Size {
 
 impl Size {
     /// Specify size with a custom function.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn from_size<F>(f: F) -> Self
-    where
-        F: Fn([f32; 2], &mut ChildSize, &UiContext) -> f32 + Send + Sync + 'static,
-    {
-        Self { f: Arc::new(f) }
-    }
-
-    /// Specify size with a custom function.
-    #[cfg(target_arch = "wasm32")]
-    pub fn from_size<F>(f: F) -> Self
-    where
-        F: Fn([f32; 2], &mut ChildSize, &UiContext) -> f32 + 'static,
-    {
+    pub fn from_size<F: platform::SizeFnBound>(f: F) -> Self {
         Self { f: Arc::new(f) }
     }
 }

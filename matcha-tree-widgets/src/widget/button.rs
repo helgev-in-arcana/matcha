@@ -1,6 +1,28 @@
 use std::sync::Arc;
 
 use crate::layout::reconcile_single_child;
+
+// ---------------------------------------------------------------------------
+// Platform-specific on_click function type and bound
+// ---------------------------------------------------------------------------
+
+#[cfg(not(target_arch = "wasm32"))]
+mod platform {
+    use matcha_tree::ui_tree::context::UiContext;
+    pub type OnClickFn = dyn Fn(&UiContext) + Send + Sync;
+    pub trait OnClickBound: Fn(&UiContext) + Send + Sync + 'static {}
+    impl<T: Fn(&UiContext) + Send + Sync + 'static> OnClickBound for T {}
+}
+
+#[cfg(target_arch = "wasm32")]
+mod platform {
+    use matcha_tree::ui_tree::context::UiContext;
+    pub type OnClickFn = dyn Fn(&UiContext);
+    pub trait OnClickBound: Fn(&UiContext) + 'static {}
+    impl<T: Fn(&UiContext) + 'static> OnClickBound for T {}
+}
+
+use platform::OnClickFn;
 use crate::style::solid_box::SolidBox;
 use matcha_tree::color::Color;
 use matcha_tree::event::device_event::ElementState;
@@ -21,10 +43,7 @@ use crate::style::Style as _;
 pub struct Button {
     pub label: Option<String>,
     pub content: Box<dyn View>,
-    #[cfg(not(target_arch = "wasm32"))]
-    pub on_click: Option<Arc<dyn Fn(&UiContext) + Send + Sync>>,
-    #[cfg(target_arch = "wasm32")]
-    pub on_click: Option<Arc<dyn Fn(&UiContext)>>,
+    pub on_click: Option<Arc<OnClickFn>>,
 }
 
 impl Button {
@@ -41,20 +60,7 @@ impl Button {
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn on_click<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&UiContext) + Send + Sync + 'static,
-    {
-        self.on_click = Some(Arc::new(f));
-        self
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub fn on_click<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&UiContext) + 'static,
-    {
+    pub fn on_click<F: platform::OnClickBound>(mut self, f: F) -> Self {
         self.on_click = Some(Arc::new(f));
         self
     }
@@ -88,10 +94,7 @@ enum ButtonState {
 }
 
 pub struct ButtonWidget {
-    #[cfg(not(target_arch = "wasm32"))]
-    on_click: Option<Arc<dyn Fn(&UiContext) + Send + Sync>>,
-    #[cfg(target_arch = "wasm32")]
-    on_click: Option<Arc<dyn Fn(&UiContext)>>,
+    on_click: Option<Arc<OnClickFn>>,
     state: ButtonState,
     child: Option<WidgetPod>,
 }
