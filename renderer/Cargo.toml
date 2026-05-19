@@ -10,11 +10,14 @@ nalgebra.workspace = true
 bytemuck.workspace = true
 thiserror.workspace = true
 gpu-utils = { workspace = true }
-moka.workspace = true
 fxhash.workspace = true
 utils = { workspace = true }
 smallvec = { workspace = true }
 parking_lot.workspace = true
+dashmap = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+moka = { workspace = true }
 
 [lints]
 workspace = true

@@ -11,11 +11,12 @@ use matcha_tree::ui_tree::{
     context::UiContext,
     metrics::{Constraints, QRect},
 };
+use utils::maybe_send_sync::MaybeSendSync;
 
 /// A trait that defines the visual appearance and drawing logic of a widget.
 ///
 /// This allows for custom rendering logic to be encapsulated and reused.
-pub trait Style: Send + Sync {
+pub trait Style: MaybeSendSync {
     /// Calculates the size required to draw this style within the given constraints.
     ///
     /// This method returns the intrinsic size of the visual content defined by the style,

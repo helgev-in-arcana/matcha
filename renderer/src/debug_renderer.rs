@@ -1,3 +1,4 @@
+use crate::pipeline_cache::PipelineCache;
 use crate::render_node::RenderNode;
 use std::sync::Arc;
 
@@ -8,8 +9,7 @@ pub struct DebugRenderer {
     texture_bind_group_layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
     shader_module: wgpu::ShaderModule,
-    render_pipeline_cache:
-        moka::sync::Cache<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>, fxhash::FxBuildHasher>,
+    render_pipeline_cache: PipelineCache<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>>,
 }
 
 impl DebugRenderer {
@@ -63,9 +63,7 @@ impl DebugRenderer {
             push_constant_ranges: &[],
         });
 
-        let render_pipeline_cache = moka::sync::Cache::builder()
-            .max_capacity(4)
-            .build_with_hasher(fxhash::FxBuildHasher::default());
+        let render_pipeline_cache = PipelineCache::new();
 
         Self {
             texture_sampler,
@@ -174,7 +172,7 @@ fn fragment_main(in_ : VertexOutput) -> @location(0) vec4<f32> {{
             source: wgpu::ShaderSource::Wgsl(shader_source.into()),
         });
 
-        let pipeline = self.render_pipeline_cache.get_with(surface_format, || {
+        let pipeline = self.render_pipeline_cache.get_or_insert(surface_format, || {
             Arc::new(self.create_render_pipeline(device, &shader_module, surface_format))
         });
 

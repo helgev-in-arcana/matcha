@@ -292,6 +292,8 @@ impl WindowSurface {
             resize_increments: None,
             active: self.window.has_focus(),
             surface_config: config.clone(),
+            #[cfg(target_arch = "wasm32")]
+            canvas_id: None,
         }
     }
 

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use renderer::RenderNode;
+use utils::maybe_send_sync::MaybeSendSync;
 
 use crate::ui_tree::{
     context::{UiContext, WindowCtx},
@@ -155,7 +156,7 @@ impl WindowWidgetInstance {
 /// when the window is removed from the view tree the widget is dropped, the `Arc` count
 /// reaches zero, and `UiArch`'s `Weak` becomes dead (window is destroyed automatically
 /// via [`WindowHandle`]'s [`Drop`] impl).
-pub trait AnyWindowWidgetInstance: Send + Sync {
+pub trait AnyWindowWidgetInstance: MaybeSendSync {
     fn window_id(&self) -> WindowId;
     fn size(&self) -> [f32; 2];
     fn device_input(&mut self, event: &DeviceEvent, ctx: &UiContext) -> WidgetInteractionResult;

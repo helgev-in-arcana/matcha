@@ -9,7 +9,7 @@ wgpu = { workspace = true }
 log = { workspace = true }
 guillotiere = "0.6"                              # texture atlas library # internal use only
 parking_lot = { workspace = true }
-uuid = { version = "1.17.0", features = ["v4"] } # internal use only
+uuid = { version = "1.17.0", features = ["v4", "js"] }
 dashmap = { workspace = true }
 fxhash = { workspace = true }
 thiserror = { workspace = true }

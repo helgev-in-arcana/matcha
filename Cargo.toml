@@ -30,7 +30,6 @@ gpu-utils = { path = "gpu-utils" }
 # async runtime, utilities
 tokio = { version = "1", features = [
     "rt",
-    "rt-multi-thread",
     "macros",
     "sync",
     "parking_lot",
@@ -49,7 +48,7 @@ accesskit = "0.21"
 accesskit_winit = { version = "0.29", features = ["tokio"] }
 
 # graphics
-wgpu = { version = "27.0.1", features = ["noop"] }
+wgpu = { version = "27.0.1", features = ["noop", "webgpu"] }
 bytemuck = { version = "1", features = ["derive"] }
 vello = { git = "https://github.com/linebender/vello.git", branch = "main" }
 

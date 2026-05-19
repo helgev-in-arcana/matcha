@@ -9,9 +9,20 @@ use crate::{
     window::WindowId,
 };
 
+/// Platform-specific supertrait: `Send + Sync` on native, plain `'static` on WASM.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait ApplicationBounds: Send + Sync + 'static {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send + Sync + 'static> ApplicationBounds for T {}
+
+#[cfg(target_arch = "wasm32")]
+pub trait ApplicationBounds: 'static {}
+#[cfg(target_arch = "wasm32")]
+impl<T: 'static> ApplicationBounds for T {}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait Application: Send + Sync + 'static {
+pub trait Application: ApplicationBounds {
     type Command: Send + 'static;
 
     // lifecycle methods
@@ -83,8 +94,8 @@ pub trait Application: Send + Sync + 'static {
         &self,
         runtime: &RuntimeHandle,
         event_loop: &impl EventLoop,
-        start: std::time::Instant,
-        requested_resume: std::time::Instant,
+        start: web_time::Instant,
+        requested_resume: web_time::Instant,
     ) {
         let _ = runtime;
         let _ = event_loop;
@@ -95,8 +106,8 @@ pub trait Application: Send + Sync + 'static {
         &self,
         runtime: &RuntimeHandle,
         event_loop: &impl EventLoop,
-        start: std::time::Instant,
-        requested_resume: Option<std::time::Instant>,
+        start: web_time::Instant,
+        requested_resume: Option<web_time::Instant>,
     ) {
         let _ = runtime;
         let _ = event_loop;
