@@ -9,7 +9,14 @@ use matcha_window::{
     window::WindowId,
 };
 
-pub struct UiEcs {}
+pub mod widgets;
+pub mod components;
+pub mod systems;
+
+pub struct UiEcs {
+    world: bevy_ecs::world::World,
+    scheduler: bevy_ecs::schedule::Schedule,
+}
 
 #[async_trait::async_trait]
 impl Application for UiEcs {
