@@ -80,6 +80,13 @@ thiserror = "2.0"
 # log
 log = "^0.4.28"
 
+# wasm
+web-time = "1.1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_log = "1.0"
+console_error_panic_hook = "0.1"
+
 # interpolation crate
 # todo: maybe useful.
 # interpolation = "0.3.0"
