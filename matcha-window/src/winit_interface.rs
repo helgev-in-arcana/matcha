@@ -18,6 +18,7 @@ pub(crate) struct WinitInterface<App: Application> {
 // run_on_winit entry point
 // ---------------------------------------------------------------------------
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn run<App: Application>(
     adapter: Adapter<App>,
 ) -> Result<(), winit::error::EventLoopError> {
@@ -31,6 +32,25 @@ pub(crate) fn run<App: Application>(
         event_loop_proxy,
     };
     event_loop.run_app(&mut interface)
+}
+
+/// WASM entry point. `spawn_app` hands control back to the browser event loop
+/// immediately; the adapter is then driven by browser callbacks.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn run<App: Application>(adapter: Adapter<App>) {
+    use winit::platform::web::EventLoopExtWebSys;
+
+    let event_loop = winit::event_loop::EventLoop::<WinitUserMessage<App>>::with_user_event()
+        .build()
+        .expect("failed to build winit event loop");
+
+    let event_loop_proxy = event_loop.create_proxy();
+
+    let interface = WinitInterface {
+        adapter,
+        event_loop_proxy,
+    };
+    event_loop.spawn_app(interface);
 }
 
 // ---------------------------------------------------------------------------

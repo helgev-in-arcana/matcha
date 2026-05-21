@@ -97,8 +97,15 @@ impl<App: Application> Adapter<App> {
 
 /// Running and setup
 impl<App: Application> Adapter<App> {
-    #[cfg(feature = "winit")]
+    #[cfg(all(feature = "winit", not(target_arch = "wasm32")))]
     pub fn run(self) -> Result<(), winit::error::EventLoopError> {
+        crate::winit_interface::run(self)
+    }
+
+    /// On wasm the browser owns the event loop, so `run` returns immediately
+    /// after handing the adapter off to winit.
+    #[cfg(all(feature = "winit", target_arch = "wasm32"))]
+    pub fn run(self) {
         crate::winit_interface::run(self)
     }
 
