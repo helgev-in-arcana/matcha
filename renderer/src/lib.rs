@@ -1,5 +1,6 @@
 pub mod core_renderer;
 pub use core_renderer::CoreRenderer;
+pub mod pipeline_cache;
 pub mod render_node;
 pub use render_node::RenderNode;
 

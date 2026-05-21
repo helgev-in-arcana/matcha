@@ -173,7 +173,7 @@ pub struct CoreRendererInner {
     culling_pipeline: wgpu::ComputePipeline,
     command_pipeline: wgpu::ComputePipeline,
     render_pipeline:
-        moka::sync::Cache<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>, fxhash::FxBuildHasher>, // key: surface format
+        crate::pipeline_cache::PipelineCache<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>>, // key: surface format
 
     // reusable buffers
     atomic_counter: wgpu::Buffer,
@@ -312,9 +312,7 @@ impl CoreRendererInner {
             );
         trace!("CoreRenderer::new: pipeline layouts created");
 
-        let render_pipeline = moka::sync::Cache::builder()
-            .max_capacity(PIPELINE_CACHE_SIZE)
-            .build_with_hasher(fxhash::FxBuildHasher::default());
+        let render_pipeline = crate::pipeline_cache::PipelineCache::new(PIPELINE_CACHE_SIZE);
 
         // Create buffers
         let atomic_counter = device.create_buffer(&wgpu::BufferDescriptor {
