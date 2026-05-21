@@ -14,6 +14,7 @@ use std::sync::{
 
 use matcha_window::adapter::{EventLoop, EventLoopProxy};
 use matcha_window::application::Application;
+use matcha_window::runtime::{JoinHandle, RuntimeHandle};
 use matcha_window::event::device_event::DeviceEvent;
 use matcha_window::event::raw_device_event::{RawDeviceEvent, RawDeviceId};
 use matcha_window::event::window_event::WindowEvent;
@@ -65,7 +66,7 @@ pub struct UiTree<C: Component> {
 
     /// Handle to the bridge task spawned in `init()`.
     /// Set once; `OnceLock` provides `Sync` without a runtime mutex.
-    bridge_handle: OnceLock<tokio::task::JoinHandle<()>>,
+    bridge_handle: OnceLock<JoinHandle>,
 
     /// Shared texture atlas for widget rendering (format: Rgba8UnormSrgb).
     texture_atlas: std::sync::Arc<TextureAtlas>,
@@ -145,7 +146,7 @@ impl<C: Component> UiTree<C> {
     /// reconciles the widget tree.  Prunes dead window registry entries.
     fn run_update(
         &self,
-        runtime: &tokio::runtime::Handle,
+        runtime: &RuntimeHandle,
         event_loop: &dyn EventLoop,
         gpu: &gpu_utils::gpu::Gpu,
     ) {
@@ -202,7 +203,7 @@ impl<C: Component> Application for UiTree<C> {
 
     fn init(
         &mut self,
-        runtime: &tokio::runtime::Handle,
+        runtime: &RuntimeHandle,
         proxy: Box<dyn EventLoopProxy<Self> + Send>,
         event_loop: &impl EventLoop,
     ) {
@@ -251,7 +252,7 @@ impl<C: Component> Application for UiTree<C> {
         self.root.init(&ctx);
     }
 
-    fn resumed(&self, runtime: &tokio::runtime::Handle, event_loop: &impl EventLoop) {
+    fn resumed(&self, runtime: &RuntimeHandle, event_loop: &impl EventLoop) {
         let ctx = AppContext {
             runtime_handle: runtime,
             event_sender: &self.event_sender,
@@ -263,7 +264,7 @@ impl<C: Component> Application for UiTree<C> {
     /// Builds the initial widget tree (creates OS windows declared in the view).
     ///
     /// Called by [`Adapter`](crate::adapter::Adapter) immediately after `resumed`.
-    fn create_surface(&self, runtime: &tokio::runtime::Handle, event_loop: &impl EventLoop) {
+    fn create_surface(&self, runtime: &RuntimeHandle, event_loop: &impl EventLoop) {
         self.surface_creation_permitted
             .store(true, Ordering::SeqCst);
 
@@ -284,7 +285,7 @@ impl<C: Component> Application for UiTree<C> {
     ///
     /// Dead `Weak` entries in the window registry are pruned on the next
     /// `create_window` / `buffer_updated` call.
-    fn destroy_surface(&self, _runtime: &tokio::runtime::Handle, _event_loop: &impl EventLoop) {
+    fn destroy_surface(&self, _runtime: &RuntimeHandle, _event_loop: &impl EventLoop) {
         self.surface_creation_permitted
             .store(false, Ordering::SeqCst);
 
@@ -296,7 +297,7 @@ impl<C: Component> Application for UiTree<C> {
         }
     }
 
-    fn suspended(&self, runtime: &tokio::runtime::Handle, event_loop: &impl EventLoop) {
+    fn suspended(&self, runtime: &RuntimeHandle, event_loop: &impl EventLoop) {
         let ctx = AppContext {
             runtime_handle: runtime,
             event_sender: &self.event_sender,
@@ -305,7 +306,7 @@ impl<C: Component> Application for UiTree<C> {
         self.root.suspended(&ctx);
     }
 
-    fn exiting(&self, runtime: &tokio::runtime::Handle, event_loop: &impl EventLoop) {
+    fn exiting(&self, runtime: &RuntimeHandle, event_loop: &impl EventLoop) {
         let ctx = AppContext {
             runtime_handle: runtime,
             event_sender: &self.event_sender,
@@ -322,7 +323,7 @@ impl<C: Component> Application for UiTree<C> {
     /// [`RenderNode`](renderer::RenderNode).
     ///
     /// GPU surface submission is now implemented.
-    async fn render(&self, runtime: &tokio::runtime::Handle, window_id: WindowId) {
+    async fn render(&self, runtime: &RuntimeHandle, window_id: WindowId) {
         let op_arc = self
             .window_registry
             .get(&window_id)
@@ -364,7 +365,7 @@ impl<C: Component> Application for UiTree<C> {
 
     fn window_event(
         &self,
-        runtime: &tokio::runtime::Handle,
+        runtime: &RuntimeHandle,
         event_loop: &impl EventLoop,
         window_id: WindowId,
         event: WindowEvent,
@@ -374,7 +375,7 @@ impl<C: Component> Application for UiTree<C> {
 
     fn window_destroyed(
         &self,
-        runtime: &tokio::runtime::Handle,
+        runtime: &RuntimeHandle,
         event_loop: &impl EventLoop,
         window_id: WindowId,
     ) {
@@ -384,7 +385,7 @@ impl<C: Component> Application for UiTree<C> {
     /// Routes a device event to the widget tree of the target window.
     fn device_event(
         &self,
-        runtime: &tokio::runtime::Handle,
+        runtime: &RuntimeHandle,
         event_loop: &impl EventLoop,
         window_id: WindowId,
         event: DeviceEvent,
@@ -421,7 +422,7 @@ impl<C: Component> Application for UiTree<C> {
 
     fn raw_device_event(
         &self,
-        runtime: &tokio::runtime::Handle,
+        runtime: &RuntimeHandle,
         event_loop: &impl EventLoop,
         raw_device_id: RawDeviceId,
         raw_event: RawDeviceEvent,
@@ -435,7 +436,7 @@ impl<C: Component> Application for UiTree<C> {
 
     fn ui_command(
         &self,
-        runtime: &tokio::runtime::Handle,
+        runtime: &RuntimeHandle,
         event_loop: &impl EventLoop,
         command: Self::Command,
     ) {
