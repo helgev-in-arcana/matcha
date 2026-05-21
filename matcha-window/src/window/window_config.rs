@@ -91,6 +91,10 @@ pub struct WindowConfig {
     pub resize_increments: Option<Size>,
     pub active: bool,
     pub surface_config: wgpu::SurfaceConfiguration,
+    /// On wasm, the id of an existing HTML `<canvas>` to render into. When
+    /// `None`, winit creates a canvas and appends it to the document body.
+    /// Ignored on native targets.
+    pub canvas_id: Option<String>,
 }
 
 impl Default for WindowConfig {
@@ -121,6 +125,7 @@ impl Default for WindowConfig {
                 desired_maximum_frame_latency: 1,
                 alpha_mode: wgpu::CompositeAlphaMode::Auto,
             },
+            canvas_id: None,
         }
     }
 }
@@ -221,6 +226,12 @@ impl WindowConfig {
         self
     }
 
+    /// Sets the id of an existing HTML `<canvas>` to render into (wasm only).
+    pub fn with_canvas_id(mut self, id: impl Into<String>) -> Self {
+        self.canvas_id = Some(id.into());
+        self
+    }
+
     #[cfg(feature = "winit")]
     pub(crate) fn to_winit_attributes(&self) -> winit::window::WindowAttributes {
         let mut attr = winit::window::WindowAttributes::default();
@@ -239,6 +250,23 @@ impl WindowConfig {
         attr.preferred_theme = self.preferred_theme.map(Into::into);
         attr.resize_increments = self.resize_increments.map(Into::into);
         attr.active = self.active;
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsCast;
+            use winit::platform::web::WindowAttributesExtWebSys;
+            attr = match &self.canvas_id {
+                Some(id) => {
+                    let canvas = web_sys::window()
+                        .and_then(|w| w.document())
+                        .and_then(|d| d.get_element_by_id(id))
+                        .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok());
+                    attr.with_canvas(canvas)
+                }
+                None => attr.with_append(true),
+            };
+        }
+
         attr
     }
 }

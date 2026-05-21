@@ -292,6 +292,7 @@ impl WindowSurface {
             resize_increments: None,
             active: self.window.has_focus(),
             surface_config: config.clone(),
+            canvas_id: None,
         }
     }
 
