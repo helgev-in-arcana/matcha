@@ -1,4 +1,0 @@
-# getrandom (pulled in transitively via uuid) has no default source on
-# wasm32-unknown-unknown. Route it to the browser's crypto API.
-[target.wasm32-unknown-unknown]
-rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
