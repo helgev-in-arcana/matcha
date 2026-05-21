@@ -8,15 +8,16 @@ use crate::{
     window::WindowId,
 };
 
-#[async_trait::async_trait]
-pub trait Application: Send + Sync + 'static {
-    type Command: Send + 'static;
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait Application: utils::MaybeSendSync + 'static {
+    type Command: utils::MaybeSend + 'static;
 
     // lifecycle methods
     fn init(
         &mut self,
         runtime: &crate::runtime::RuntimeHandle,
-        proxy: Box<dyn EventLoopProxy<Self> + Send>,
+        proxy: Box<dyn EventLoopProxy<Self>>,
         event_loop: &impl EventLoop,
     );
     fn resumed(&self, runtime: &crate::runtime::RuntimeHandle, event_loop: &impl EventLoop);

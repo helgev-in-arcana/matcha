@@ -387,7 +387,7 @@ impl EventLoop for winit::event_loop::ActiveEventLoop {
 impl<App: Application> EventLoopProxy<App>
     for winit::event_loop::EventLoopProxy<WinitUserMessage<App>>
 {
-    fn clone_box(&self) -> Box<dyn EventLoopProxy<App> + Send> {
+    fn clone_box(&self) -> Box<dyn EventLoopProxy<App>> {
         Box::new(Clone::clone(self))
     }
 

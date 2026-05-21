@@ -14,42 +14,49 @@ use matcha_window::window::{Window, WindowConfig, WindowError};
 // EventSender / EventReceiver
 // ----------------------------------------------------------------------------
 
+/// Type-erased message carried over the backend channel. Native targets
+/// additionally require `Send` so messages can cross threads.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) type BoxedMessage = Box<dyn Any + Send>;
+#[cfg(target_arch = "wasm32")]
+pub(super) type BoxedMessage = Box<dyn Any>;
+
 /// Type-erased sender for messages from Component background tasks back to TreeApp.
 ///
 /// Clone-able; each clone sends to the same channel. Use `emit()` to post a
 /// message that TreeApp will downcast to `C::Message` in `buffer_updated()`.
 #[derive(Clone)]
 pub struct EventSender {
-    sender: tokio::sync::mpsc::UnboundedSender<Box<dyn Any + Send>>,
+    sender: tokio::sync::mpsc::UnboundedSender<BoxedMessage>,
 }
 
 impl EventSender {
-    pub(super) fn new(sender: tokio::sync::mpsc::UnboundedSender<Box<dyn Any + Send>>) -> Self {
+    pub(super) fn new(sender: tokio::sync::mpsc::UnboundedSender<BoxedMessage>) -> Self {
         Self { sender }
     }
 
-    pub fn emit<T: Any + Send + 'static>(&self, msg: T) {
+    pub fn emit<T: Any + utils::MaybeSend + 'static>(&self, msg: T) {
         let _ = self.sender.send(Box::new(msg));
     }
 }
 
 /// Paired receiver for `EventSender`.
 pub(super) struct EventReceiver {
-    receiver: tokio::sync::mpsc::UnboundedReceiver<Box<dyn Any + Send>>,
+    receiver: tokio::sync::mpsc::UnboundedReceiver<BoxedMessage>,
 }
 
 impl EventReceiver {
-    pub(super) fn new(receiver: tokio::sync::mpsc::UnboundedReceiver<Box<dyn Any + Send>>) -> Self {
+    pub(super) fn new(receiver: tokio::sync::mpsc::UnboundedReceiver<BoxedMessage>) -> Self {
         Self { receiver }
     }
 
     pub(super) fn try_recv(
         &mut self,
-    ) -> Result<Box<dyn Any + Send>, tokio::sync::mpsc::error::TryRecvError> {
+    ) -> Result<BoxedMessage, tokio::sync::mpsc::error::TryRecvError> {
         self.receiver.try_recv()
     }
 
-    pub(super) async fn recv(&mut self) -> Option<Box<dyn Any + Send>> {
+    pub(super) async fn recv(&mut self) -> Option<BoxedMessage> {
         self.receiver.recv().await
     }
 }
@@ -81,7 +88,7 @@ impl<'a> AppContext<'a> {
     }
 
     /// Convenience: emit a message directly (no need to call `event_sender()` first).
-    pub fn emit<T: Any + Send + 'static>(&self, msg: T) {
+    pub fn emit<T: Any + utils::MaybeSend + 'static>(&self, msg: T) {
         self.event_sender.emit(msg);
     }
 }
@@ -176,7 +183,7 @@ impl UiContext<'_> {
         self.shared.event_sender.clone()
     }
 
-    pub fn emit<T: Any + Send + 'static>(&self, msg: T) {
+    pub fn emit<T: Any + utils::MaybeSend + 'static>(&self, msg: T) {
         self.shared.event_sender.emit(msg);
     }
 

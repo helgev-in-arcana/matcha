@@ -193,7 +193,8 @@ impl<C: Component> UiTree<C> {
 // Application impl
 // ----------------------------------------------------------------------------
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<C: Component> Application for UiTree<C> {
     type Command = TreeAppCommand<C::Message>;
 
@@ -204,7 +205,7 @@ impl<C: Component> Application for UiTree<C> {
     fn init(
         &mut self,
         runtime: &RuntimeHandle,
-        proxy: Box<dyn EventLoopProxy<Self> + Send>,
+        proxy: Box<dyn EventLoopProxy<Self>>,
         event_loop: &impl EventLoop,
     ) {
         // Extract the receiver without locking — safe because `init` has `&mut self`.
@@ -472,7 +473,7 @@ impl<C: Component> Application for UiTree<C> {
     }
 }
 
-pub enum TreeAppCommand<Msg: Send + 'static> {
+pub enum TreeAppCommand<Msg: utils::MaybeSend + 'static> {
     BufferUpdated,
     BackendMessage(Msg),
 }

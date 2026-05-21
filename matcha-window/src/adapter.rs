@@ -116,7 +116,7 @@ impl<App: Application> Adapter<App> {
     /// have been spawned yet and no other `Arc` clones exist.
     pub fn init(
         &mut self,
-        proxy: Box<dyn EventLoopProxy<App> + Send>,
+        proxy: Box<dyn EventLoopProxy<App>>,
         event_loop: &impl EventLoop,
     ) {
         let app = Arc::get_mut(&mut self.app)
@@ -365,8 +365,8 @@ pub enum ControlFlow {
     WaitUntil(web_time::Instant),
 }
 
-pub trait EventLoopProxy<App: Application>: Send {
-    fn clone_box(&self) -> Box<dyn EventLoopProxy<App> + Send>;
+pub trait EventLoopProxy<App: Application>: utils::MaybeSend {
+    fn clone_box(&self) -> Box<dyn EventLoopProxy<App>>;
     fn send_command(&self, command: App::Command);
     fn request_exit(&self);
     fn request_control_flow(&self, control_flow: ControlFlow);
