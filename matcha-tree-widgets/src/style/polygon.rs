@@ -16,9 +16,15 @@ use renderer::{
     widgets_renderer::vertex_color::{RenderData, TargetData, VertexColor},
 };
 
+#[cfg(not(target_arch = "wasm32"))]
 type PolygonFn = dyn for<'a> Fn([f32; 2], &'a UiContext) -> Mesh + Send + Sync + 'static;
+#[cfg(target_arch = "wasm32")]
+type PolygonFn = dyn for<'a> Fn([f32; 2], &'a UiContext) -> Mesh + 'static;
+#[cfg(not(target_arch = "wasm32"))]
 type AdaptFn =
     dyn for<'a> Fn([f32; 2], &'a UiContext) -> nalgebra::Matrix4<f32> + Send + Sync + 'static;
+#[cfg(target_arch = "wasm32")]
+type AdaptFn = dyn for<'a> Fn([f32; 2], &'a UiContext) -> nalgebra::Matrix4<f32> + 'static;
 
 /// Quantize factor used for cache keying of matrices.
 /// Matches metrics SUB_PIXEL_QUANTIZE used for QSize / QRect quantization.
@@ -104,7 +110,7 @@ impl Polygon {
 
     pub fn new_adaptive<F>(polygon: F) -> Self
     where
-        F: Fn([f32; 2], &UiContext) -> Mesh + Send + Sync + 'static,
+        F: Fn([f32; 2], &UiContext) -> Mesh + utils::MaybeSendSync + 'static,
     {
         Self {
             polygon: Arc::new(polygon),
@@ -117,7 +123,7 @@ impl Polygon {
 
     pub fn adaptive_affine<F>(mut self, affine: F) -> Self
     where
-        F: Fn([f32; 2], &UiContext) -> nalgebra::Matrix4<f32> + Send + Sync + 'static,
+        F: Fn([f32; 2], &UiContext) -> nalgebra::Matrix4<f32> + utils::MaybeSendSync + 'static,
     {
         self.adaptive_affine = Arc::new(affine);
         self

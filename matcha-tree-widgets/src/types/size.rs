@@ -47,7 +47,10 @@ impl ChildSize<'_> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 type SizeFn = dyn Fn([f32; 2], &mut ChildSize, &UiContext) -> f32 + Send + Sync + 'static;
+#[cfg(target_arch = "wasm32")]
+type SizeFn = dyn Fn([f32; 2], &mut ChildSize, &UiContext) -> f32 + 'static;
 
 /// Calculate size from parent size child size and context.
 #[derive(Clone)]
@@ -162,7 +165,7 @@ impl Size {
     /// Specify size with a custom function.
     pub fn from_size<F>(f: F) -> Self
     where
-        F: Fn([f32; 2], &mut ChildSize, &UiContext) -> f32 + Send + Sync + 'static,
+        F: Fn([f32; 2], &mut ChildSize, &UiContext) -> f32 + utils::MaybeSendSync + 'static,
     {
         Self { f: Arc::new(f) }
     }

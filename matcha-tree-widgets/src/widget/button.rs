@@ -18,10 +18,15 @@ use crate::style::Style as _;
 
 // MARK: View
 
+#[cfg(not(target_arch = "wasm32"))]
+type ClickFn = dyn Fn(&UiContext) + Send + Sync;
+#[cfg(target_arch = "wasm32")]
+type ClickFn = dyn Fn(&UiContext);
+
 pub struct Button {
     pub label: Option<String>,
     pub content: Box<dyn View>,
-    pub on_click: Option<Arc<dyn Fn(&UiContext) + Send + Sync>>,
+    pub on_click: Option<Arc<ClickFn>>,
 }
 
 impl Button {
@@ -40,7 +45,7 @@ impl Button {
 
     pub fn on_click<F>(mut self, f: F) -> Self
     where
-        F: Fn(&UiContext) + Send + Sync + 'static,
+        F: Fn(&UiContext) + utils::MaybeSendSync + 'static,
     {
         self.on_click = Some(Arc::new(f));
         self
@@ -75,7 +80,7 @@ enum ButtonState {
 }
 
 pub struct ButtonWidget {
-    on_click: Option<Arc<dyn Fn(&UiContext) + Send + Sync>>,
+    on_click: Option<Arc<ClickFn>>,
     state: ButtonState,
     child: Option<WidgetPod>,
 }
