@@ -2,7 +2,7 @@ use log::{debug, trace, warn};
 use std::sync::Arc;
 
 use crate::render_node::RenderNode;
-use gpu_utils::{device_loss_recoverable::DeviceLossRecoverable, texture_atlas};
+use gpu_utils::{ texture_atlas};
 use texture_atlas::RegionError;
 use thiserror::Error;
 
@@ -120,16 +120,6 @@ impl CoreRenderer {
         Self {
             inner: parking_lot::RwLock::new(inner),
         }
-    }
-}
-
-impl DeviceLossRecoverable for CoreRenderer {
-    fn recover(&self, device: &wgpu::Device, _: &wgpu::Queue) {
-        debug!("CoreRenderer::recover: recovering GPU resources");
-        let new_inner = CoreRendererInner::new(device);
-        let mut inner_lock = self.inner.write();
-        *inner_lock = new_inner;
-        debug!("CoreRenderer::recover: recovery complete");
     }
 }
 
