@@ -28,9 +28,10 @@ utils = { path = "utils" }
 gpu-utils = { path = "gpu-utils" }
 
 # async runtime, utilities
+# `rt-multi-thread` is intentionally omitted: it is not supported on wasm.
+# Crates that need it add it via a target-specific or dev dependency.
 tokio = { version = "1", features = [
     "rt",
-    "rt-multi-thread",
     "macros",
     "sync",
     "parking_lot",
