@@ -1,6 +1,6 @@
 use super::{ButtonState, DeviceEventData, MouseInput, MouseLogicalButton};
 
-use std::time::{Duration, Instant};
+use web_time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MousePrimaryButton {

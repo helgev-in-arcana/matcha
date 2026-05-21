@@ -244,8 +244,8 @@ impl<App: Application> Adapter<App> {
     pub fn resume_time_reached(
         &mut self,
         event_loop: &impl EventLoop,
-        start: std::time::Instant,
-        requested_resume: std::time::Instant,
+        start: web_time::Instant,
+        requested_resume: web_time::Instant,
     ) {
         let _guard = self.tokio_runtime.enter();
         self.app.resume_time_reached(
@@ -259,8 +259,8 @@ impl<App: Application> Adapter<App> {
     pub fn wait_cancelled(
         &mut self,
         event_loop: &impl EventLoop,
-        start: std::time::Instant,
-        requested_resume: Option<std::time::Instant>,
+        start: web_time::Instant,
+        requested_resume: Option<web_time::Instant>,
     ) {
         let _guard = self.tokio_runtime.enter();
         self.app.wait_cancelled(
@@ -357,7 +357,7 @@ pub enum EventLoopCommand {
 pub enum ControlFlow {
     Wait,
     Poll,
-    WaitUntil(std::time::Instant),
+    WaitUntil(web_time::Instant),
 }
 
 pub trait EventLoopProxy<App: Application>: Send {

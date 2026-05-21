@@ -81,8 +81,8 @@ pub trait Application: Send + Sync + 'static {
         &self,
         runtime: &tokio::runtime::Handle,
         event_loop: &impl EventLoop,
-        start: std::time::Instant,
-        requested_resume: std::time::Instant,
+        start: web_time::Instant,
+        requested_resume: web_time::Instant,
     ) {
         let _ = runtime;
         let _ = event_loop;
@@ -93,8 +93,8 @@ pub trait Application: Send + Sync + 'static {
         &self,
         runtime: &tokio::runtime::Handle,
         event_loop: &impl EventLoop,
-        start: std::time::Instant,
-        requested_resume: Option<std::time::Instant>,
+        start: web_time::Instant,
+        requested_resume: Option<web_time::Instant>,
     ) {
         let _ = runtime;
         let _ = event_loop;

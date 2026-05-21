@@ -8,6 +8,7 @@ dashmap = { workspace = true }
 fxhash = { workspace = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true }
+web-time = { workspace = true }
 
 [lints]
 workspace = true
