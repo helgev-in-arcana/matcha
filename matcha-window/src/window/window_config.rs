@@ -91,9 +91,9 @@ pub struct WindowConfig {
     pub resize_increments: Option<Size>,
     pub active: bool,
     pub surface_config: wgpu::SurfaceConfiguration,
-    /// On wasm, the id of an existing HTML `<canvas>` to render into. When
-    /// `None`, winit creates a canvas and appends it to the document body.
-    /// Ignored on native targets.
+    /// The id of an existing HTML `<canvas>` to render into. When `None`,
+    /// winit creates a canvas and appends it to the document body.
+    #[cfg(target_arch = "wasm32")]
     pub canvas_id: Option<String>,
 }
 
@@ -125,6 +125,7 @@ impl Default for WindowConfig {
                 desired_maximum_frame_latency: 1,
                 alpha_mode: wgpu::CompositeAlphaMode::Auto,
             },
+            #[cfg(target_arch = "wasm32")]
             canvas_id: None,
         }
     }
@@ -226,7 +227,8 @@ impl WindowConfig {
         self
     }
 
-    /// Sets the id of an existing HTML `<canvas>` to render into (wasm only).
+    /// Sets the id of an existing HTML `<canvas>` to render into.
+    #[cfg(target_arch = "wasm32")]
     pub fn with_canvas_id(mut self, id: impl Into<String>) -> Self {
         self.canvas_id = Some(id.into());
         self
