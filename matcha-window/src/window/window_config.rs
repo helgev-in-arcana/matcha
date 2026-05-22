@@ -77,22 +77,38 @@ pub enum Fullscreen {
 pub struct WindowConfig {
     pub title: String,
     pub inner_size: Option<Size>,
-    pub min_inner_size: Option<Size>,
-    pub max_inner_size: Option<Size>,
-    pub position: Option<Position>,
-    pub resizable: bool,
-    pub enabled_buttons: WindowButtons,
-    pub maximized: bool,
-    pub fullscreen: Option<Fullscreen>,
-    pub visible: bool,
-    pub transparent: bool,
-    pub decorations: bool,
-    pub preferred_theme: Option<Theme>,
-    pub resize_increments: Option<Size>,
-    pub active: bool,
     pub surface_config: wgpu::SurfaceConfiguration,
-    /// The id of an existing HTML `<canvas>` to render into. When `None`,
-    /// winit creates a canvas and appends it to the document body.
+
+    // --- Native-only: OS window-manager settings, unavailable on wasm ---
+    #[cfg(not(target_arch = "wasm32"))]
+    pub min_inner_size: Option<Size>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub max_inner_size: Option<Size>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub position: Option<Position>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub resizable: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub enabled_buttons: WindowButtons,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub maximized: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fullscreen: Option<Fullscreen>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub visible: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub transparent: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub decorations: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub preferred_theme: Option<Theme>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub resize_increments: Option<Size>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub active: bool,
+
+    /// Wasm-only: the id of an existing HTML `<canvas>` to render into.
+    /// When `None`, winit creates a canvas and appends it to the document body.
     #[cfg(target_arch = "wasm32")]
     pub canvas_id: Option<String>,
 }
@@ -102,19 +118,6 @@ impl Default for WindowConfig {
         Self {
             title: "Matcha Window".to_string(),
             inner_size: None,
-            min_inner_size: None,
-            max_inner_size: None,
-            position: None,
-            resizable: true,
-            enabled_buttons: WindowButtons::default(),
-            maximized: false,
-            fullscreen: None,
-            visible: true,
-            transparent: false,
-            decorations: true,
-            preferred_theme: None,
-            resize_increments: None,
-            active: true,
             surface_config: wgpu::SurfaceConfiguration {
                 width: 100,
                 height: 100,
@@ -125,6 +128,34 @@ impl Default for WindowConfig {
                 desired_maximum_frame_latency: 1,
                 alpha_mode: wgpu::CompositeAlphaMode::Auto,
             },
+
+            #[cfg(not(target_arch = "wasm32"))]
+            min_inner_size: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            max_inner_size: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            position: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            resizable: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            enabled_buttons: WindowButtons::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            maximized: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            fullscreen: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            visible: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            transparent: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            decorations: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            preferred_theme: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            resize_increments: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            active: true,
+
             #[cfg(target_arch = "wasm32")]
             canvas_id: None,
         }
@@ -142,66 +173,79 @@ impl WindowConfig {
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_min_inner_size(mut self, size: impl Into<Size>) -> Self {
         self.min_inner_size = Some(size.into());
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_max_inner_size(mut self, size: impl Into<Size>) -> Self {
         self.max_inner_size = Some(size.into());
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_position(mut self, position: impl Into<Position>) -> Self {
         self.position = Some(position.into());
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_resizable(mut self, resizable: bool) -> Self {
         self.resizable = resizable;
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_enabled_buttons(mut self, buttons: WindowButtons) -> Self {
         self.enabled_buttons = buttons;
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_maximized(mut self, maximized: bool) -> Self {
         self.maximized = maximized;
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_fullscreen(mut self, fullscreen: Option<Fullscreen>) -> Self {
         self.fullscreen = fullscreen;
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_visible(mut self, visible: bool) -> Self {
         self.visible = visible;
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_transparent(mut self, transparent: bool) -> Self {
         self.transparent = transparent;
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_decorations(mut self, decorations: bool) -> Self {
         self.decorations = decorations;
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_preferred_theme(mut self, theme: Option<Theme>) -> Self {
         self.preferred_theme = theme;
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_resize_increments(mut self, increments: impl Into<Size>) -> Self {
         self.resize_increments = Some(increments.into());
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_active(mut self, active: bool) -> Self {
         self.active = active;
         self
@@ -239,19 +283,23 @@ impl WindowConfig {
         let mut attr = winit::window::WindowAttributes::default();
         attr.title = self.title.clone();
         attr.inner_size = self.inner_size.map(Into::into);
-        attr.min_inner_size = self.min_inner_size.map(Into::into);
-        attr.max_inner_size = self.max_inner_size.map(Into::into);
-        attr.position = self.position.map(Into::into);
-        attr.resizable = self.resizable;
-        attr.enabled_buttons = self.enabled_buttons.into();
-        attr.maximized = self.maximized;
-        attr.fullscreen = self.fullscreen.map(Into::into);
-        attr.visible = self.visible;
-        attr.transparent = self.transparent;
-        attr.decorations = self.decorations;
-        attr.preferred_theme = self.preferred_theme.map(Into::into);
-        attr.resize_increments = self.resize_increments.map(Into::into);
-        attr.active = self.active;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            attr.min_inner_size = self.min_inner_size.map(Into::into);
+            attr.max_inner_size = self.max_inner_size.map(Into::into);
+            attr.position = self.position.map(Into::into);
+            attr.resizable = self.resizable;
+            attr.enabled_buttons = self.enabled_buttons.into();
+            attr.maximized = self.maximized;
+            attr.fullscreen = self.fullscreen.map(Into::into);
+            attr.visible = self.visible;
+            attr.transparent = self.transparent;
+            attr.decorations = self.decorations;
+            attr.preferred_theme = self.preferred_theme.map(Into::into);
+            attr.resize_increments = self.resize_increments.map(Into::into);
+            attr.active = self.active;
+        }
 
         #[cfg(target_arch = "wasm32")]
         {

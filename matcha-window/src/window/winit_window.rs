@@ -263,14 +263,9 @@ impl WindowSurface {
 impl WindowSurface {
     pub fn get_config(&self) -> super::WindowConfig {
         let config = self.current_config.lock();
-        use crate::window::window_config::{Position, Size, WindowButtons};
+        use crate::window::window_config::Size;
 
         let inner_size = self.window.inner_size();
-        let position = self
-            .window
-            .outer_position()
-            .ok()
-            .map(|p| Position::Physical { x: p.x, y: p.y });
 
         super::WindowConfig {
             title: self.window.title(),
@@ -278,20 +273,39 @@ impl WindowSurface {
                 width: inner_size.width,
                 height: inner_size.height,
             }),
-            min_inner_size: None,
-            max_inner_size: None,
-            position,
-            resizable: self.window.is_resizable(),
-            enabled_buttons: WindowButtons::ALL,
-            maximized: self.window.is_maximized(),
-            fullscreen: None,
-            visible: self.window.is_visible().unwrap_or(true),
-            transparent: false,
-            decorations: self.window.is_decorated(),
-            preferred_theme: None,
-            resize_increments: None,
-            active: self.window.has_focus(),
             surface_config: config.clone(),
+
+            #[cfg(not(target_arch = "wasm32"))]
+            min_inner_size: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            max_inner_size: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            position: self
+                .window
+                .outer_position()
+                .ok()
+                .map(|p| crate::window::window_config::Position::Physical { x: p.x, y: p.y }),
+            #[cfg(not(target_arch = "wasm32"))]
+            resizable: self.window.is_resizable(),
+            #[cfg(not(target_arch = "wasm32"))]
+            enabled_buttons: crate::window::window_config::WindowButtons::ALL,
+            #[cfg(not(target_arch = "wasm32"))]
+            maximized: self.window.is_maximized(),
+            #[cfg(not(target_arch = "wasm32"))]
+            fullscreen: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            visible: self.window.is_visible().unwrap_or(true),
+            #[cfg(not(target_arch = "wasm32"))]
+            transparent: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            decorations: self.window.is_decorated(),
+            #[cfg(not(target_arch = "wasm32"))]
+            preferred_theme: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            resize_increments: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            active: self.window.has_focus(),
+
             #[cfg(target_arch = "wasm32")]
             canvas_id: None,
         }
