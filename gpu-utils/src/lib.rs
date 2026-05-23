@@ -1,7 +1,6 @@
 pub mod buffer_atlas;
-pub mod device_loss_recoverable;
 pub mod gpu;
-pub mod gpu_type_map;
+mod gpu_defaults;
 pub mod texture_atlas;
 
 #[cfg(debug_assertions)]

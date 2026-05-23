@@ -262,37 +262,7 @@ impl WindowSurface {
 
 impl WindowSurface {
     pub fn get_config(&self) -> super::WindowConfig {
-        let config = self.current_config.lock();
-        use crate::window::window_config::{Position, Size, WindowButtons};
-
-        let inner_size = self.window.inner_size();
-        let position = self
-            .window
-            .outer_position()
-            .ok()
-            .map(|p| Position::Physical { x: p.x, y: p.y });
-
-        super::WindowConfig {
-            title: self.window.title(),
-            inner_size: Some(Size::Physical {
-                width: inner_size.width,
-                height: inner_size.height,
-            }),
-            min_inner_size: None,
-            max_inner_size: None,
-            position,
-            resizable: self.window.is_resizable(),
-            enabled_buttons: WindowButtons::ALL,
-            maximized: self.window.is_maximized(),
-            fullscreen: None,
-            visible: self.window.is_visible().unwrap_or(true),
-            transparent: false,
-            decorations: self.window.is_decorated(),
-            preferred_theme: None,
-            resize_increments: None,
-            active: self.window.has_focus(),
-            surface_config: config.clone(),
-        }
+        super::WindowConfig::from_winit_window(&self.window, self.current_config.lock().clone())
     }
 
     pub fn surface_config(&self) -> wgpu::SurfaceConfiguration {

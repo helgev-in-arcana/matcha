@@ -29,11 +29,11 @@ pub enum WidgetInteractionResult {
 // Key Structs and Traits
 // ----------------------------------------------------------------------------
 
-pub trait View: Send + Sync + Any {
+pub trait View: utils::MaybeSendSync + Any {
     fn build(&self, ctx: &UiContext) -> WidgetPod;
 }
 
-pub trait Widget: Send + Sync + Any {
+pub trait Widget: utils::MaybeSendSync + Any {
     type View: View;
 
     fn update(&mut self, view: &Self::View, ctx: &UiContext) -> WidgetInteractionResult;
@@ -60,7 +60,7 @@ pub trait Widget: Send + Sync + Any {
 }
 
 /// Wrapper trait to erase the concrete Widget type.
-pub(super) trait AnyWidget: Send + Sync + Any {
+pub(super) trait AnyWidget: utils::MaybeSendSync + Any {
     fn try_update(
         &mut self,
         view: &dyn View,

@@ -29,9 +29,10 @@ utils = { path = "utils" }
 gpu-utils = { path = "gpu-utils" }
 
 # async runtime, utilities
+# `rt-multi-thread` is intentionally omitted: it is not supported on wasm.
+# Crates that need it add it via a target-specific or dev dependency.
 tokio = { version = "1", features = [
     "rt",
-    "rt-multi-thread",
     "macros",
     "sync",
     "parking_lot",
@@ -80,6 +81,19 @@ thiserror = "2.0"
 
 # log
 log = "^0.4.28"
+
+# wasm
+web-time = "1.1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_log = "1.0"
+console_error_panic_hook = "0.1"
+
+# build-time cfg aliases.
+# Each crate that splits modules along the "web" axis declares a `web` alias
+# in its build.rs via `cfg_aliases::cfg_aliases!`. The alias expansion is
+# kept in sync with the `[target.'cfg(...)']` sections in each Cargo.toml.
+cfg_aliases = "0.2"
 
 # interpolation crate
 # todo: maybe useful.

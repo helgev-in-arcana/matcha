@@ -9,9 +9,28 @@ use matcha_window::adapter::EventLoop;
 use matcha_window::window::WindowId;
 use matcha_window::window::{Window, WindowConfig, WindowError};
 
+pub use super::runtime::RuntimeHandle;
+
 // ----------------------------------------------------------------------------
 // EventSender / EventReceiver
 // ----------------------------------------------------------------------------
+
+/// Type-erased message carried over the backend channel.
+///
+/// Native targets additionally require `Send` (supplied by `MaybeSend`) so
+/// messages can cross threads; on wasm `MaybeSend` collapses to a no-op.
+pub trait AnyMessage: Any + utils::MaybeSend {
+    /// Erases this trait object down to `dyn Any` so callers can `downcast`.
+    fn into_any(self: Box<Self>) -> Box<dyn Any>;
+}
+
+impl<T: Any + utils::MaybeSend> AnyMessage for T {
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
+
+pub(super) type BoxedMessage = Box<dyn AnyMessage>;
 
 /// Type-erased sender for messages from Component background tasks back to TreeApp.
 ///
@@ -19,36 +38,36 @@ use matcha_window::window::{Window, WindowConfig, WindowError};
 /// message that TreeApp will downcast to `C::Message` in `buffer_updated()`.
 #[derive(Clone)]
 pub struct EventSender {
-    sender: tokio::sync::mpsc::UnboundedSender<Box<dyn Any + Send>>,
+    sender: tokio::sync::mpsc::UnboundedSender<BoxedMessage>,
 }
 
 impl EventSender {
-    pub(super) fn new(sender: tokio::sync::mpsc::UnboundedSender<Box<dyn Any + Send>>) -> Self {
+    pub(super) fn new(sender: tokio::sync::mpsc::UnboundedSender<BoxedMessage>) -> Self {
         Self { sender }
     }
 
-    pub fn emit<T: Any + Send + 'static>(&self, msg: T) {
+    pub fn emit<T: Any + utils::MaybeSend + 'static>(&self, msg: T) {
         let _ = self.sender.send(Box::new(msg));
     }
 }
 
 /// Paired receiver for `EventSender`.
 pub(super) struct EventReceiver {
-    receiver: tokio::sync::mpsc::UnboundedReceiver<Box<dyn Any + Send>>,
+    receiver: tokio::sync::mpsc::UnboundedReceiver<BoxedMessage>,
 }
 
 impl EventReceiver {
-    pub(super) fn new(receiver: tokio::sync::mpsc::UnboundedReceiver<Box<dyn Any + Send>>) -> Self {
+    pub(super) fn new(receiver: tokio::sync::mpsc::UnboundedReceiver<BoxedMessage>) -> Self {
         Self { receiver }
     }
 
     pub(super) fn try_recv(
         &mut self,
-    ) -> Result<Box<dyn Any + Send>, tokio::sync::mpsc::error::TryRecvError> {
+    ) -> Result<BoxedMessage, tokio::sync::mpsc::error::TryRecvError> {
         self.receiver.try_recv()
     }
 
-    pub(super) async fn recv(&mut self) -> Option<Box<dyn Any + Send>> {
+    pub(super) async fn recv(&mut self) -> Option<BoxedMessage> {
         self.receiver.recv().await
     }
 }
@@ -59,13 +78,13 @@ impl EventReceiver {
 
 /// Context passed to Component lifecycle methods (init, resumed, suspended, exiting).
 pub struct AppContext<'a> {
-    pub(super) runtime_handle: &'a tokio::runtime::Handle,
+    pub(super) runtime_handle: RuntimeHandle,
     pub(super) event_sender: &'a EventSender,
     pub(super) event_loop: &'a dyn EventLoop,
 }
 
 impl<'a> AppContext<'a> {
-    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
+    pub fn runtime_handle(&self) -> RuntimeHandle {
         self.runtime_handle.clone()
     }
 
@@ -80,7 +99,7 @@ impl<'a> AppContext<'a> {
     }
 
     /// Convenience: emit a message directly (no need to call `event_sender()` first).
-    pub fn emit<T: Any + Send + 'static>(&self, msg: T) {
+    pub fn emit<T: Any + utils::MaybeSend + 'static>(&self, msg: T) {
         self.event_sender.emit(msg);
     }
 }
@@ -94,7 +113,7 @@ impl<'a> AppContext<'a> {
 /// Lives on the caller's stack and is borrowed by [`UiContext`].
 /// Adding new resources here does not change `UiContext`'s stack size.
 pub(super) struct SharedCtx<'a> {
-    pub(super) runtime_handle: &'a tokio::runtime::Handle,
+    pub(super) runtime_handle: RuntimeHandle,
     pub(super) event_sender: &'a EventSender,
     pub(super) window_registry: &'a DashMap<WindowId, Weak<Mutex<dyn AnyWindowWidgetInstance>>>,
     pub(super) gpu_instance: &'a wgpu::Instance,
@@ -167,7 +186,7 @@ impl UiContext<'_> {
         Ok(window)
     }
 
-    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
+    pub fn runtime_handle(&self) -> RuntimeHandle {
         self.shared.runtime_handle.clone()
     }
 
@@ -175,7 +194,7 @@ impl UiContext<'_> {
         self.shared.event_sender.clone()
     }
 
-    pub fn emit<T: Any + Send + 'static>(&self, msg: T) {
+    pub fn emit<T: Any + utils::MaybeSend + 'static>(&self, msg: T) {
         self.shared.event_sender.emit(msg);
     }
 

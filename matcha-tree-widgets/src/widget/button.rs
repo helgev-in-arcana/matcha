@@ -18,10 +18,15 @@ use crate::style::Style as _;
 
 // MARK: View
 
+/// Closure trait invoked when a button is clicked.
+/// `MaybeSendSync` supplies the platform-conditional `Send + Sync` bound.
+pub trait ClickFn: for<'a> Fn(&'a UiContext) + utils::MaybeSendSync {}
+impl<F> ClickFn for F where F: for<'a> Fn(&'a UiContext) + utils::MaybeSendSync {}
+
 pub struct Button {
     pub label: Option<String>,
     pub content: Box<dyn View>,
-    pub on_click: Option<Arc<dyn Fn(&UiContext) + Send + Sync>>,
+    pub on_click: Option<Arc<dyn ClickFn>>,
 }
 
 impl Button {
@@ -40,7 +45,7 @@ impl Button {
 
     pub fn on_click<F>(mut self, f: F) -> Self
     where
-        F: Fn(&UiContext) + Send + Sync + 'static,
+        F: Fn(&UiContext) + utils::MaybeSendSync + 'static,
     {
         self.on_click = Some(Arc::new(f));
         self
@@ -75,7 +80,7 @@ enum ButtonState {
 }
 
 pub struct ButtonWidget {
-    on_click: Option<Arc<dyn Fn(&UiContext) + Send + Sync>>,
+    on_click: Option<Arc<dyn ClickFn>>,
     state: ButtonState,
     child: Option<WidgetPod>,
 }

@@ -27,7 +27,7 @@ const PUSH_CONSTANTS_SIZE: u32 = std::mem::size_of::<PushConstant>() as u32;
 
 struct ViewportClearImpl {
     pipeline_layout: wgpu::PipelineLayout,
-    pipeline: moka::sync::Cache<wgpu::TextureFormat, wgpu::RenderPipeline, fxhash::FxBuildHasher>,
+    pipeline: crate::pipeline_cache::PipelineCache<wgpu::TextureFormat, wgpu::RenderPipeline>,
 }
 
 impl ViewportClearImpl {
@@ -41,8 +41,7 @@ impl ViewportClearImpl {
             }],
         });
 
-        let pipeline = moka::sync::CacheBuilder::new(PIPELINE_CACHE_SIZE)
-            .build_with_hasher(fxhash::FxBuildHasher::default());
+        let pipeline = crate::pipeline_cache::PipelineCache::new(PIPELINE_CACHE_SIZE);
 
         ViewportClearImpl {
             pipeline_layout,

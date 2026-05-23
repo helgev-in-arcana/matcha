@@ -9,7 +9,7 @@ pub struct DebugRenderer {
     pipeline_layout: wgpu::PipelineLayout,
     shader_module: wgpu::ShaderModule,
     render_pipeline_cache:
-        moka::sync::Cache<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>, fxhash::FxBuildHasher>,
+        crate::pipeline_cache::PipelineCache<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>>,
 }
 
 impl DebugRenderer {
@@ -63,9 +63,7 @@ impl DebugRenderer {
             push_constant_ranges: &[],
         });
 
-        let render_pipeline_cache = moka::sync::Cache::builder()
-            .max_capacity(4)
-            .build_with_hasher(fxhash::FxBuildHasher::default());
+        let render_pipeline_cache = crate::pipeline_cache::PipelineCache::new(4);
 
         Self {
             texture_sampler,

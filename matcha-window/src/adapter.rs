@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use crate::{
     application::Application,
@@ -35,138 +35,71 @@ impl PerWindowState {
 // ---------------------------------------------------------------------------
 
 pub struct Adapter<App: Application> {
-    tokio_runtime: tokio::runtime::Runtime,
+    app: App,
 
-    rendering_window: HashMap<WindowId, tokio::task::JoinHandle<()>>,
+    /// Configuration applied to every new per-window state machine.
+    event_config: EventStateConfig,
 
     /// Per-window event state machines, keyed by WindowId.
     /// Created lazily on the first event for a window;
     /// removed when `WindowEvent::Destroyed` is received.
     window_states: HashMap<WindowId, PerWindowState>,
-
-    /// Configuration applied to every new per-window state machine.
-    event_config: EventStateConfig,
-
-    app: Arc<App>,
 }
 
 /// Construction
 impl<App: Application> Adapter<App> {
     pub fn new(app: App) -> Self {
-        Self::with_tokio_runtime(app, tokio::runtime::Runtime::new().unwrap())
+        Self::with_event_config(app, EventStateConfig::default())
     }
 
     pub fn with_event_config(app: App, event_config: EventStateConfig) -> Self {
-        Self::with_tokio_runtime_and_event_config(
-            app,
-            tokio::runtime::Runtime::new().unwrap(),
-            event_config,
-        )
-    }
-
-    pub fn with_tokio_runtime(app: App, runtime: tokio::runtime::Runtime) -> Self {
-        Self::with_tokio_runtime_and_event_config(app, runtime, EventStateConfig::default())
-    }
-
-    pub fn with_tokio_runtime_and_event_config(
-        app: App,
-        runtime: tokio::runtime::Runtime,
-        event_config: EventStateConfig,
-    ) -> Self {
         Self {
-            tokio_runtime: runtime,
-            rendering_window: HashMap::new(),
             window_states: HashMap::new(),
             event_config,
-            app: Arc::new(app),
+            app,
         }
     }
 }
 
-/// Running and setup
-impl<App: Application> Adapter<App> {
-    #[cfg(feature = "winit")]
-    pub fn run(self) -> Result<(), winit::error::EventLoopError> {
-        crate::winit_interface::run(self)
-    }
-
-    #[cfg(feature = "baseview")]
-    pub fn run(self) -> () {
-        unimplemented!("baseview support is not implemented yet")
-    }
-}
+// Platform-specific impls (`run`).
+#[cfg(not(web))]
+#[path = "adapter/native.rs"]
+mod platform;
+#[cfg(web)]
+#[path = "adapter/web.rs"]
+mod platform;
 
 /// Lifecycle events
 impl<App: Application> Adapter<App> {
-    /// Called exactly once at `StartCause::Init`.
-    ///
-    /// `Arc::get_mut` is guaranteed to succeed here because no rendering tasks
-    /// have been spawned yet and no other `Arc` clones exist.
-    pub fn init(
-        &mut self,
-        proxy: Box<dyn EventLoopProxy<App> + Send>,
-        event_loop: &impl EventLoop,
-    ) {
-        let app = Arc::get_mut(&mut self.app)
-            .expect("Adapter::init must be called before any Arc clones are created");
-        let _guard = self.tokio_runtime.enter();
-        app.init(self.tokio_runtime.handle(), proxy, event_loop);
+    pub fn init(&mut self, proxy: Box<dyn EventLoopProxy<App>>, event_loop: &impl EventLoop) {
+        self.app.init(proxy, event_loop);
     }
 
     pub fn resumed(&mut self, event_loop: &impl EventLoop) {
-        let _guard = self.tokio_runtime.enter();
-        self.app.resumed(self.tokio_runtime.handle(), event_loop);
+        self.app.resumed(event_loop);
     }
 
     pub fn create_surface(&mut self, event_loop: &impl EventLoop) {
-        let _guard = self.tokio_runtime.enter();
-        self.app
-            .create_surface(self.tokio_runtime.handle(), event_loop);
+        self.app.create_surface(event_loop);
     }
 
     pub fn destroy_surface(&mut self, event_loop: &impl EventLoop) {
-        // ensure all rendering tasks are finished
-        self.abort_all_rendering_tasks();
-
-        let _guard = self.tokio_runtime.enter();
-        self.app
-            .destroy_surface(self.tokio_runtime.handle(), event_loop);
+        self.app.destroy_surface(event_loop);
     }
 
     pub fn suspended(&mut self, event_loop: &impl EventLoop) {
-        let _guard = self.tokio_runtime.enter();
-        self.app.suspended(self.tokio_runtime.handle(), event_loop);
+        self.app.suspended(event_loop);
     }
 
     pub fn exiting(&mut self, event_loop: &impl EventLoop) {
-        let _guard = self.tokio_runtime.enter();
-        self.app.exiting(self.tokio_runtime.handle(), event_loop);
+        self.app.exiting(event_loop);
     }
 }
 
 /// Events
 impl<App: Application> Adapter<App> {
     pub fn render(&mut self, window_id: WindowId) {
-        if let Some(handle) = self.rendering_window.get(&window_id) {
-            if handle.is_finished() {
-                self.rendering_window.remove(&window_id);
-            } else {
-                // request redraw again to catch up latest redraw request
-                self.app
-                    .request_redraw(self.tokio_runtime.handle(), window_id);
-                return;
-            }
-        }
-
-        let app = self.app.clone();
-        let runtime_handle = self.tokio_runtime.handle().clone();
-
-        let handle = self.tokio_runtime.spawn(async move {
-            let handle = runtime_handle;
-            app.render(&handle, window_id).await;
-        });
-
-        self.rendering_window.insert(window_id, handle);
+        self.app.render(window_id);
     }
 
     pub fn window_event(
@@ -175,21 +108,13 @@ impl<App: Application> Adapter<App> {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        let _guard = self.tokio_runtime.enter();
         let event = self.window_state_mut(window_id).window.process(event);
-        self.app
-            .window_event(self.tokio_runtime.handle(), event_loop, window_id, event);
+        self.app.window_event(event_loop, window_id, event);
     }
 
     pub fn window_destroyed(&mut self, event_loop: &impl EventLoop, window_id: WindowId) {
-        // Clean up the per-window state machine so it doesn't outlive the window.
         self.remove_window_state(window_id);
-        // Clean up the rendering task for the window.
-        self.remove_rendering_task(window_id);
-        // Notify the Application that the window is gone.
-        let _guard = self.tokio_runtime.enter();
-        self.app
-            .window_destroyed(self.tokio_runtime.handle(), event_loop, window_id);
+        self.app.window_destroyed(event_loop, window_id);
     }
 
     pub fn device_event(
@@ -199,13 +124,7 @@ impl<App: Application> Adapter<App> {
         event: DeviceEvent,
     ) {
         if let Some(processed) = self.window_state_mut(window_id).device.process(event) {
-            let _guard = self.tokio_runtime.enter();
-            self.app.device_event(
-                self.tokio_runtime.handle(),
-                event_loop,
-                window_id,
-                processed,
-            );
+            self.app.device_event(event_loop, window_id, processed);
         }
     }
 
@@ -215,100 +134,55 @@ impl<App: Application> Adapter<App> {
         raw_device_id: RawDeviceId,
         raw_event: RawDeviceEvent,
     ) {
-        let _guard = self.tokio_runtime.enter();
-        self.app.raw_device_event(
-            self.tokio_runtime.handle(),
-            event_loop,
-            raw_device_id,
-            raw_event,
-        );
+        self.app.raw_device_event(event_loop, raw_device_id, raw_event);
     }
 }
 
 /// Ui commands
 impl<App: Application> Adapter<App> {
     pub fn ui_command(&mut self, event_loop: &impl EventLoop, command: App::Command) {
-        let _guard = self.tokio_runtime.enter();
-        self.app
-            .ui_command(self.tokio_runtime.handle(), event_loop, command);
+        self.app.ui_command(event_loop, command);
     }
 }
 
 /// Polling
 impl<App: Application> Adapter<App> {
     pub fn poll(&mut self, event_loop: &impl EventLoop) {
-        let _guard = self.tokio_runtime.enter();
-        self.app.poll(self.tokio_runtime.handle(), event_loop);
+        self.app.poll(event_loop);
     }
 
     pub fn resume_time_reached(
         &mut self,
         event_loop: &impl EventLoop,
-        start: std::time::Instant,
-        requested_resume: std::time::Instant,
+        start: web_time::Instant,
+        requested_resume: web_time::Instant,
     ) {
-        let _guard = self.tokio_runtime.enter();
-        self.app.resume_time_reached(
-            self.tokio_runtime.handle(),
-            event_loop,
-            start,
-            requested_resume,
-        );
+        self.app.resume_time_reached(event_loop, start, requested_resume);
     }
 
     pub fn wait_cancelled(
         &mut self,
         event_loop: &impl EventLoop,
-        start: std::time::Instant,
-        requested_resume: Option<std::time::Instant>,
+        start: web_time::Instant,
+        requested_resume: Option<web_time::Instant>,
     ) {
-        let _guard = self.tokio_runtime.enter();
-        self.app.wait_cancelled(
-            self.tokio_runtime.handle(),
-            event_loop,
-            start,
-            requested_resume,
-        );
+        self.app.wait_cancelled(event_loop, start, requested_resume);
     }
 
     pub fn about_to_wait(&mut self, event_loop: &impl EventLoop) {
-        let _guard = self.tokio_runtime.enter();
-        self.app
-            .about_to_wait(self.tokio_runtime.handle(), event_loop);
+        self.app.about_to_wait(event_loop);
     }
 }
 
 impl<App: Application> Adapter<App> {
     pub fn memory_warning(&mut self, event_loop: &impl EventLoop) {
-        let _guard = self.tokio_runtime.enter();
-        self.app
-            .memory_warning(self.tokio_runtime.handle(), event_loop);
+        self.app.memory_warning(event_loop);
     }
 }
 
 // -------------------
 // Helpers
 // -------------------
-
-impl<App: Application> Adapter<App> {
-    fn abort_all_rendering_tasks(&mut self) {
-        self.tokio_runtime.block_on(async {
-            for handle in self.rendering_window.values() {
-                handle.abort();
-            }
-            for (_, handle) in self.rendering_window.drain() {
-                let _ = handle.await;
-            }
-        });
-    }
-
-    fn remove_rendering_task(&mut self, window_id: WindowId) {
-        if let Some(handle) = self.rendering_window.get(&window_id) {
-            handle.abort();
-            self.rendering_window.remove(&window_id);
-        }
-    }
-}
 
 /// Per-window state machine access
 impl<App: Application> Adapter<App> {
@@ -357,11 +231,11 @@ pub enum EventLoopCommand {
 pub enum ControlFlow {
     Wait,
     Poll,
-    WaitUntil(std::time::Instant),
+    WaitUntil(web_time::Instant),
 }
 
-pub trait EventLoopProxy<App: Application>: Send {
-    fn clone_box(&self) -> Box<dyn EventLoopProxy<App> + Send>;
+pub trait EventLoopProxy<App: Application>: utils::MaybeSend {
+    fn clone_box(&self) -> Box<dyn EventLoopProxy<App>>;
     fn send_command(&self, command: App::Command);
     fn request_exit(&self);
     fn request_control_flow(&self, control_flow: ControlFlow);

@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use crate::style::Style;
 use dashmap::DashMap;
-use gpu_utils::device_loss_recoverable::DeviceLossRecoverable;
 use image::EncodableLayout;
 use matcha_tree::ui_tree::{
     context::UiContext,
@@ -15,13 +14,6 @@ use crate::types::size::{ChildSize, Size};
 #[derive(Default)]
 struct ImageCache {
     map: DashMap<ImageCacheKey, ImageCacheData, fxhash::FxBuildHasher>,
-}
-
-impl DeviceLossRecoverable for ImageCache {
-    fn recover(&self, _device: &wgpu::Device, _queue: &wgpu::Queue) {
-        log::info!("ImageCache: recovering from device loss");
-        self.map.clear();
-    }
 }
 
 #[derive(Clone, PartialEq)]

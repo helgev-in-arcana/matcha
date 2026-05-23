@@ -1,5 +1,5 @@
 use super::ElementState;
-use std::time::{Duration, Instant};
+use web_time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Hash)]
 pub(super) enum ClickStatus {
