@@ -236,7 +236,7 @@ impl<C: Component> Application for UiTree<C> {
                     }
                     msg = receiver.recv() => match msg {
                         Some(boxed) => {
-                            if let Ok(m) = boxed.downcast::<C::Message>() {
+                            if let Ok(m) = boxed.into_any().downcast::<C::Message>() {
                                 proxy.send_command(TreeAppCommand::BackendMessage(*m));
                             }
                         }

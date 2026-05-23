@@ -14,12 +14,22 @@ use matcha_window::window::{Window, WindowConfig, WindowError};
 // EventSender / EventReceiver
 // ----------------------------------------------------------------------------
 
-/// Type-erased message carried over the backend channel. Native targets
-/// additionally require `Send` so messages can cross threads.
-#[cfg(not(web))]
-pub(super) type BoxedMessage = Box<dyn Any + Send>;
-#[cfg(web)]
-pub(super) type BoxedMessage = Box<dyn Any>;
+/// Type-erased message carried over the backend channel.
+///
+/// Native targets additionally require `Send` (supplied by `MaybeSend`) so
+/// messages can cross threads; on wasm `MaybeSend` collapses to a no-op.
+pub trait AnyMessage: Any + utils::MaybeSend {
+    /// Erases this trait object down to `dyn Any` so callers can `downcast`.
+    fn into_any(self: Box<Self>) -> Box<dyn Any>;
+}
+
+impl<T: Any + utils::MaybeSend> AnyMessage for T {
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
+
+pub(super) type BoxedMessage = Box<dyn AnyMessage>;
 
 /// Type-erased sender for messages from Component background tasks back to TreeApp.
 ///
