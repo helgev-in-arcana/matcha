@@ -262,53 +262,7 @@ impl WindowSurface {
 
 impl WindowSurface {
     pub fn get_config(&self) -> super::WindowConfig {
-        let config = self.current_config.lock();
-        use crate::window::window_config::Size;
-
-        let inner_size = self.window.inner_size();
-
-        super::WindowConfig {
-            title: self.window.title(),
-            inner_size: Some(Size::Physical {
-                width: inner_size.width,
-                height: inner_size.height,
-            }),
-            surface_config: config.clone(),
-
-            #[cfg(not(web))]
-            min_inner_size: None,
-            #[cfg(not(web))]
-            max_inner_size: None,
-            #[cfg(not(web))]
-            position: self
-                .window
-                .outer_position()
-                .ok()
-                .map(|p| crate::window::window_config::Position::Physical { x: p.x, y: p.y }),
-            #[cfg(not(web))]
-            resizable: self.window.is_resizable(),
-            #[cfg(not(web))]
-            enabled_buttons: crate::window::window_config::WindowButtons::ALL,
-            #[cfg(not(web))]
-            maximized: self.window.is_maximized(),
-            #[cfg(not(web))]
-            fullscreen: None,
-            #[cfg(not(web))]
-            visible: self.window.is_visible().unwrap_or(true),
-            #[cfg(not(web))]
-            transparent: false,
-            #[cfg(not(web))]
-            decorations: self.window.is_decorated(),
-            #[cfg(not(web))]
-            preferred_theme: None,
-            #[cfg(not(web))]
-            resize_increments: None,
-            #[cfg(not(web))]
-            active: self.window.has_focus(),
-
-            #[cfg(web)]
-            canvas_id: None,
-        }
+        super::WindowConfig::from_winit_window(&self.window, self.current_config.lock().clone())
     }
 
     pub fn surface_config(&self) -> wgpu::SurfaceConfiguration {
