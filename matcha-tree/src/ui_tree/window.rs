@@ -158,6 +158,7 @@ impl WindowWidgetInstance {
 pub trait AnyWindowWidgetInstance: utils::MaybeSendSync {
     fn window_id(&self) -> WindowId;
     fn size(&self) -> [f32; 2];
+    fn request_redraw(&self);
     fn device_input(&mut self, event: &DeviceEvent, ctx: &UiContext) -> WidgetInteractionResult;
     fn render(
         &mut self,
@@ -183,6 +184,10 @@ impl AnyWindowWidgetInstance for WindowWidgetInstance {
     fn size(&self) -> [f32; 2] {
         let s = self.window.inner_size();
         [s[0] as f32, s[1] as f32]
+    }
+
+    fn request_redraw(&self) {
+        self.window.request_redraw();
     }
 
     fn device_input(&mut self, event: &DeviceEvent, ctx: &UiContext) -> WidgetInteractionResult {

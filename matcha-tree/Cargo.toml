@@ -13,7 +13,6 @@ shared-buffer = { workspace = true }
 
 # async runtime, utility
 tokio = { workspace = true }
-async-trait = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
 

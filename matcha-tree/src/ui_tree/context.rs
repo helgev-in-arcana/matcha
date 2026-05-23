@@ -6,9 +6,10 @@ use std::{any::Any, sync::Arc};
 
 use super::window::AnyWindowWidgetInstance;
 use matcha_window::adapter::EventLoop;
-use matcha_window::runtime::RuntimeHandle;
 use matcha_window::window::WindowId;
 use matcha_window::window::{Window, WindowConfig, WindowError};
+
+pub use super::runtime::RuntimeHandle;
 
 // ----------------------------------------------------------------------------
 // EventSender / EventReceiver
@@ -77,7 +78,7 @@ impl EventReceiver {
 
 /// Context passed to Component lifecycle methods (init, resumed, suspended, exiting).
 pub struct AppContext<'a> {
-    pub(super) runtime_handle: &'a RuntimeHandle,
+    pub(super) runtime_handle: RuntimeHandle,
     pub(super) event_sender: &'a EventSender,
     pub(super) event_loop: &'a dyn EventLoop,
 }
@@ -112,7 +113,7 @@ impl<'a> AppContext<'a> {
 /// Lives on the caller's stack and is borrowed by [`UiContext`].
 /// Adding new resources here does not change `UiContext`'s stack size.
 pub(super) struct SharedCtx<'a> {
-    pub(super) runtime_handle: &'a RuntimeHandle,
+    pub(super) runtime_handle: RuntimeHandle,
     pub(super) event_sender: &'a EventSender,
     pub(super) window_registry: &'a DashMap<WindowId, Weak<Mutex<dyn AnyWindowWidgetInstance>>>,
     pub(super) gpu_instance: &'a wgpu::Instance,

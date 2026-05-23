@@ -8,60 +8,44 @@ use crate::{
     window::WindowId,
 };
 
-// Documented exception to the WASM cfg convention §1: a `trait` item cannot
-// be split across `#[path]` modules because `Application` is referenced by
-// the same name on both platforms. `async_trait` requires the `?Send` mode
-// to be selected at the trait definition itself, so the platform switch
-// must live here as a `cfg_attr`.
-#[cfg_attr(not(web), async_trait::async_trait)]
-#[cfg_attr(web, async_trait::async_trait(?Send))]
 pub trait Application: utils::MaybeSendSync + 'static {
     type Command: utils::MaybeSend + 'static;
 
     // lifecycle methods
     fn init(
         &mut self,
-        runtime: &crate::runtime::RuntimeHandle,
         proxy: Box<dyn EventLoopProxy<Self>>,
         event_loop: &impl EventLoop,
     );
-    fn resumed(&self, runtime: &crate::runtime::RuntimeHandle, event_loop: &impl EventLoop);
-    fn create_surface(&self, runtime: &crate::runtime::RuntimeHandle, event_loop: &impl EventLoop);
-    fn destroy_surface(&self, runtime: &crate::runtime::RuntimeHandle, event_loop: &impl EventLoop);
-    fn suspended(&self, runtime: &crate::runtime::RuntimeHandle, event_loop: &impl EventLoop);
-    fn exiting(&self, runtime: &crate::runtime::RuntimeHandle, event_loop: &impl EventLoop);
+    fn resumed(&self, event_loop: &impl EventLoop);
+    fn create_surface(&self, event_loop: &impl EventLoop);
+    fn destroy_surface(&self, event_loop: &impl EventLoop);
+    fn suspended(&self, event_loop: &impl EventLoop);
+    fn exiting(&self, event_loop: &impl EventLoop);
 
-    // rendering methods — no event_loop, spawnable in parallel
-    async fn render(&self, runtime: &crate::runtime::RuntimeHandle, window_id: WindowId);
-    fn request_redraw(&self, runtime: &crate::runtime::RuntimeHandle, window_id: WindowId) {
-        let _ = runtime;
-        let _ = window_id;
-    }
+    // rendering
+    fn render(&self, window_id: WindowId);
 
     // event methods
     fn window_event(
         &self,
-        runtime: &crate::runtime::RuntimeHandle,
         event_loop: &impl EventLoop,
         window_id: WindowId,
         event: WindowEvent,
     );
     fn window_destroyed(
         &self,
-        runtime: &crate::runtime::RuntimeHandle,
         event_loop: &impl EventLoop,
         window_id: WindowId,
     );
     fn device_event(
         &self,
-        runtime: &crate::runtime::RuntimeHandle,
         event_loop: &impl EventLoop,
         window_id: WindowId,
         event: DeviceEvent,
     );
     fn ui_command(
         &self,
-        runtime: &crate::runtime::RuntimeHandle,
         event_loop: &impl EventLoop,
         command: Self::Command,
     );
@@ -69,50 +53,41 @@ pub trait Application: utils::MaybeSendSync + 'static {
     // Default Methods
     fn raw_device_event(
         &self,
-        runtime: &crate::runtime::RuntimeHandle,
         event_loop: &impl EventLoop,
         raw_device_id: RawDeviceId,
         raw_event: RawDeviceEvent,
     ) {
-        let _ = runtime;
         let _ = event_loop;
         let _ = raw_device_id;
         let _ = raw_event;
     }
-    fn poll(&self, runtime: &crate::runtime::RuntimeHandle, event_loop: &impl EventLoop) {
-        let _ = runtime;
+    fn poll(&self, event_loop: &impl EventLoop) {
         let _ = event_loop;
     }
     fn resume_time_reached(
         &self,
-        runtime: &crate::runtime::RuntimeHandle,
         event_loop: &impl EventLoop,
         start: web_time::Instant,
         requested_resume: web_time::Instant,
     ) {
-        let _ = runtime;
         let _ = event_loop;
         let _ = start;
         let _ = requested_resume;
     }
     fn wait_cancelled(
         &self,
-        runtime: &crate::runtime::RuntimeHandle,
         event_loop: &impl EventLoop,
         start: web_time::Instant,
         requested_resume: Option<web_time::Instant>,
     ) {
-        let _ = runtime;
         let _ = event_loop;
         let _ = start;
         let _ = requested_resume;
     }
-    fn about_to_wait(&self, runtime: &crate::runtime::RuntimeHandle, event_loop: &impl EventLoop) {
-        let _ = runtime;
+    fn about_to_wait(&self, event_loop: &impl EventLoop) {
         let _ = event_loop;
     }
-    fn memory_warning(&self, runtime: &crate::runtime::RuntimeHandle, event_loop: &impl EventLoop) {
-        let _ = runtime;
+    fn memory_warning(&self, event_loop: &impl EventLoop) {
         let _ = event_loop;
     }
 }
