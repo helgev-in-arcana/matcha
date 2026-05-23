@@ -60,7 +60,7 @@ impl<App: Application> Adapter<App> {
         Self::with_runtime_and_event_config(app, crate::runtime::Runtime::new(), event_config)
     }
 
-    fn with_runtime_and_event_config(
+    pub(crate) fn with_runtime_and_event_config(
         app: App,
         runtime: crate::runtime::Runtime,
         event_config: EventStateConfig,
@@ -73,47 +73,15 @@ impl<App: Application> Adapter<App> {
             app: Arc::new(app),
         }
     }
-
-    /// Builds an adapter on an externally created Tokio runtime (native only).
-    #[cfg(not(web))]
-    pub fn with_tokio_runtime(app: App, runtime: tokio::runtime::Runtime) -> Self {
-        Self::with_tokio_runtime_and_event_config(app, runtime, EventStateConfig::default())
-    }
-
-    /// Builds an adapter on an externally created Tokio runtime (native only).
-    #[cfg(not(web))]
-    pub fn with_tokio_runtime_and_event_config(
-        app: App,
-        runtime: tokio::runtime::Runtime,
-        event_config: EventStateConfig,
-    ) -> Self {
-        Self::with_runtime_and_event_config(
-            app,
-            crate::runtime::Runtime::from_tokio(runtime),
-            event_config,
-        )
-    }
 }
 
-/// Running and setup
-impl<App: Application> Adapter<App> {
-    #[cfg(all(feature = "winit", not(target_arch = "wasm32")))]
-    pub fn run(self) -> Result<(), winit::error::EventLoopError> {
-        crate::winit_interface::run(self)
-    }
-
-    /// On wasm the browser owns the event loop, so `run` returns immediately
-    /// after handing the adapter off to winit.
-    #[cfg(all(feature = "winit", target_arch = "wasm32"))]
-    pub fn run(self) {
-        crate::winit_interface::run(self)
-    }
-
-    #[cfg(feature = "baseview")]
-    pub fn run(self) -> () {
-        unimplemented!("baseview support is not implemented yet")
-    }
-}
+// Platform-specific impls (`run`, plus `with_tokio_runtime*` on native).
+#[cfg(not(web))]
+#[path = "adapter/native.rs"]
+mod platform;
+#[cfg(web)]
+#[path = "adapter/web.rs"]
+mod platform;
 
 /// Lifecycle events
 impl<App: Application> Adapter<App> {
