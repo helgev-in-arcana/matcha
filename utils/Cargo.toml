@@ -8,6 +8,13 @@ dashmap = { workspace = true }
 fxhash = { workspace = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true }
+web-time = { workspace = true }
+
+[build-dependencies]
+cfg_aliases = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]
 workspace = true

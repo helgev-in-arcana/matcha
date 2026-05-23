@@ -41,9 +41,9 @@ use matcha_window::window::WindowId;
 ///
 /// Widgets emit events via `ctx.emit_event(Box<dyn Any + Send>)` rather than
 /// returning typed events. The application layer receives and downcasts them.
-pub trait Component: Send + Sync + 'static {
+pub trait Component: utils::MaybeSendSync + 'static {
     /// Discrete commands delivered from the application layer.
-    type Message: Send + Sync + 'static;
+    type Message: utils::MaybeSendSync + 'static;
 
     // -----------------
     // Lifecycle methods

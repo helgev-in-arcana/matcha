@@ -19,10 +19,9 @@ pub struct GpuDescriptor {
 impl Default for GpuDescriptor {
     fn default() -> Self {
         Self {
-            backends: wgpu::Backends::PRIMARY,
+            backends: crate::gpu_defaults::BACKENDS,
             power_preference: wgpu::PowerPreference::LowPower,
-            required_features: wgpu::Features::PUSH_CONSTANTS
-                | wgpu::Features::VERTEX_WRITABLE_STORAGE,
+            required_features: crate::gpu_defaults::REQUIRED_FEATURES,
             required_limits: None,
             preferred_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
         }

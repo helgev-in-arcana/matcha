@@ -12,7 +12,6 @@ shared-buffer = { workspace = true }
 wgpu = { workspace = true }
 
 # async runtime, utility
-tokio = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
@@ -33,6 +32,20 @@ smallvec = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 enum-map = "2.7.3"
+web-time = { workspace = true }
+
+# NOTE: the `cfg` expressions below must stay in sync with the `web` alias
+# defined in build.rs (`all(target_arch = "wasm32", target_os = "unknown")`).
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen-futures = { workspace = true }
+wasm-bindgen = { workspace = true }
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement"] }
+
+[build-dependencies]
+cfg_aliases = { workspace = true }
 
 [features]
 default = ["winit"]

@@ -1,7 +1,6 @@
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use std::collections::VecDeque;
+
+use web_time::{Duration, Instant};
 
 pub struct Benchmark {
     items: std::collections::HashMap<&'static str, VecDeque<Duration>, fxhash::FxBuildHasher>,

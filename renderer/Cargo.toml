@@ -10,11 +10,20 @@ nalgebra.workspace = true
 bytemuck.workspace = true
 thiserror.workspace = true
 gpu-utils = { workspace = true }
-moka.workspace = true
 fxhash.workspace = true
 utils = { workspace = true }
 smallvec = { workspace = true }
 parking_lot.workspace = true
+
+# moka spawns background threads and is unsupported on wasm; the pipeline
+# cache falls back to a locked map there (see src/pipeline_cache.rs).
+# NOTE: the `cfg` expression below must stay in sync with the `web` alias
+# defined in build.rs (`all(target_arch = "wasm32", target_os = "unknown")`).
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+moka.workspace = true
+
+[build-dependencies]
+cfg_aliases = { workspace = true }
 
 [lints]
 workspace = true

@@ -16,7 +16,7 @@ const PIPELINE_CACHE_SIZE: u64 = 4;
 
 struct LineStripColorImpl {
     pipeline_layout: wgpu::PipelineLayout,
-    pipeline: moka::sync::Cache<wgpu::TextureFormat, wgpu::RenderPipeline, fxhash::FxBuildHasher>,
+    pipeline: crate::pipeline_cache::PipelineCache<wgpu::TextureFormat, wgpu::RenderPipeline>,
 }
 
 impl LineStripColorImpl {
@@ -30,8 +30,7 @@ impl LineStripColorImpl {
             }],
         });
 
-        let pipeline = moka::sync::CacheBuilder::new(PIPELINE_CACHE_SIZE)
-            .build_with_hasher(fxhash::FxBuildHasher::default());
+        let pipeline = crate::pipeline_cache::PipelineCache::new(PIPELINE_CACHE_SIZE);
 
         Self {
             pipeline_layout,

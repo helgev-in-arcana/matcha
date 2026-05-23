@@ -59,7 +59,7 @@ struct Bezier2dImpl {
     compute_pipeline: wgpu::ComputePipeline,
     command_pipeline: wgpu::ComputePipeline,
     draw_pipeline:
-        moka::sync::Cache<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>, fxhash::FxBuildHasher>,
+        crate::pipeline_cache::PipelineCache<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>>,
 
     // reusable resources
     draw_command_buffer: wgpu::Buffer,
@@ -137,9 +137,7 @@ impl Bezier2dImpl {
             make_command_pipeline(device, &data_bind_group_layout);
         let draw_pipeline_layout = make_draw_pipeline_layout(device);
 
-        let draw_pipeline = moka::sync::Cache::builder()
-            .max_capacity(PIPELINE_CACHE_SIZE)
-            .build_with_hasher(fxhash::FxBuildHasher::default());
+        let draw_pipeline = crate::pipeline_cache::PipelineCache::new(PIPELINE_CACHE_SIZE);
 
         let draw_command_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("bezier_2d_draw_command_buffer"),

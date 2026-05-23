@@ -41,6 +41,9 @@ thiserror = { workspace = true }
 log = { workspace = true }
 enum-map = "2.7.3"
 
+[build-dependencies]
+cfg_aliases = { workspace = true }
+
 [features]
 default = ["winit"]
 winit = ["matcha-window/winit"]
