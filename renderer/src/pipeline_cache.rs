@@ -6,12 +6,12 @@
 
 use std::hash::Hash;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(web))]
 pub struct PipelineCache<K, V> {
     inner: moka::sync::Cache<K, V, fxhash::FxBuildHasher>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(web))]
 impl<K, V> PipelineCache<K, V>
 where
     K: Eq + Hash + Send + Sync + Clone + 'static,
@@ -32,12 +32,12 @@ where
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(web)]
 pub struct PipelineCache<K, V> {
     inner: parking_lot::Mutex<fxhash::FxHashMap<K, V>>,
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(web)]
 impl<K, V> PipelineCache<K, V>
 where
     K: Eq + Hash + Clone,

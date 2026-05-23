@@ -75,13 +75,13 @@ impl<App: Application> Adapter<App> {
     }
 
     /// Builds an adapter on an externally created Tokio runtime (native only).
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub fn with_tokio_runtime(app: App, runtime: tokio::runtime::Runtime) -> Self {
         Self::with_tokio_runtime_and_event_config(app, runtime, EventStateConfig::default())
     }
 
     /// Builds an adapter on an externally created Tokio runtime (native only).
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub fn with_tokio_runtime_and_event_config(
         app: App,
         runtime: tokio::runtime::Runtime,

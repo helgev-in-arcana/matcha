@@ -5,12 +5,12 @@
 //! `wasm-bindgen-futures`. The rest of the framework only ever sees
 //! [`Runtime`], [`RuntimeHandle`] and [`JoinHandle`], never the backend.
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(web))]
 pub use native::{EnterGuard, JoinHandle, Runtime, RuntimeHandle};
-#[cfg(target_arch = "wasm32")]
+#[cfg(web)]
 pub use wasm::{EnterGuard, JoinHandle, Runtime, RuntimeHandle};
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(web))]
 mod native {
     use std::future::Future;
 
@@ -113,7 +113,7 @@ mod native {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(web)]
 mod wasm {
     use std::cell::Cell;
     use std::future::Future;

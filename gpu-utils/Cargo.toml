@@ -19,9 +19,14 @@ bytemuck = { workspace = true }
 
 # uuid (v4) needs an explicit RNG source on wasm; route it through
 # getrandom with its browser-backed wasm_js source.
-[target.'cfg(target_arch = "wasm32")'.dependencies]
+# NOTE: the `cfg` expression below must stay in sync with the `web` alias
+# defined in build.rs (`all(target_arch = "wasm32", target_os = "unknown")`).
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 uuid = { version = "1.17.0", features = ["v4", "rng-getrandom"] }
 getrandom = { version = "0.4", features = ["wasm_js"] }
+
+[build-dependencies]
+cfg_aliases = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }

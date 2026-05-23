@@ -275,38 +275,38 @@ impl WindowSurface {
             }),
             surface_config: config.clone(),
 
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             min_inner_size: None,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             max_inner_size: None,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             position: self
                 .window
                 .outer_position()
                 .ok()
                 .map(|p| crate::window::window_config::Position::Physical { x: p.x, y: p.y }),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             resizable: self.window.is_resizable(),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             enabled_buttons: crate::window::window_config::WindowButtons::ALL,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             maximized: self.window.is_maximized(),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             fullscreen: None,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             visible: self.window.is_visible().unwrap_or(true),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             transparent: false,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             decorations: self.window.is_decorated(),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             preferred_theme: None,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             resize_increments: None,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             active: self.window.has_focus(),
 
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(web)]
             canvas_id: None,
         }
     }

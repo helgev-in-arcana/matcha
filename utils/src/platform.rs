@@ -4,7 +4,7 @@
 //! crossing thread boundaries must be `Send`/`Sync`. WASM is single-threaded,
 //! so these markers relax to no-op bounds there.
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(web))]
 mod imp {
     pub trait MaybeSend: Send {}
     impl<T: Send> MaybeSend for T {}
@@ -13,7 +13,7 @@ mod imp {
     impl<T: Send + Sync> MaybeSendSync for T {}
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(web)]
 mod imp {
     pub trait MaybeSend {}
     impl<T> MaybeSend for T {}

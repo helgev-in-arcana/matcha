@@ -80,36 +80,36 @@ pub struct WindowConfig {
     pub surface_config: wgpu::SurfaceConfiguration,
 
     // --- Native-only: OS window-manager settings, unavailable on wasm ---
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub min_inner_size: Option<Size>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub max_inner_size: Option<Size>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub position: Option<Position>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub resizable: bool,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub enabled_buttons: WindowButtons,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub maximized: bool,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub fullscreen: Option<Fullscreen>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub visible: bool,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub transparent: bool,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub decorations: bool,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub preferred_theme: Option<Theme>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub resize_increments: Option<Size>,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub active: bool,
 
     /// Wasm-only: the id of an existing HTML `<canvas>` to render into.
     /// When `None`, winit creates a canvas and appends it to the document body.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(web)]
     pub canvas_id: Option<String>,
 }
 
@@ -129,34 +129,34 @@ impl Default for WindowConfig {
                 alpha_mode: wgpu::CompositeAlphaMode::Auto,
             },
 
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             min_inner_size: None,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             max_inner_size: None,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             position: None,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             resizable: true,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             enabled_buttons: WindowButtons::default(),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             maximized: false,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             fullscreen: None,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             visible: true,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             transparent: false,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             decorations: true,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             preferred_theme: None,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             resize_increments: None,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(not(web))]
             active: true,
 
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(web)]
             canvas_id: None,
         }
     }
@@ -173,79 +173,79 @@ impl WindowConfig {
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub fn with_min_inner_size(mut self, size: impl Into<Size>) -> Self {
         self.min_inner_size = Some(size.into());
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub fn with_max_inner_size(mut self, size: impl Into<Size>) -> Self {
         self.max_inner_size = Some(size.into());
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub fn with_position(mut self, position: impl Into<Position>) -> Self {
         self.position = Some(position.into());
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub fn with_resizable(mut self, resizable: bool) -> Self {
         self.resizable = resizable;
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub fn with_enabled_buttons(mut self, buttons: WindowButtons) -> Self {
         self.enabled_buttons = buttons;
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub fn with_maximized(mut self, maximized: bool) -> Self {
         self.maximized = maximized;
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub fn with_fullscreen(mut self, fullscreen: Option<Fullscreen>) -> Self {
         self.fullscreen = fullscreen;
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub fn with_visible(mut self, visible: bool) -> Self {
         self.visible = visible;
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub fn with_transparent(mut self, transparent: bool) -> Self {
         self.transparent = transparent;
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub fn with_decorations(mut self, decorations: bool) -> Self {
         self.decorations = decorations;
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub fn with_preferred_theme(mut self, theme: Option<Theme>) -> Self {
         self.preferred_theme = theme;
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub fn with_resize_increments(mut self, increments: impl Into<Size>) -> Self {
         self.resize_increments = Some(increments.into());
         self
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(web))]
     pub fn with_active(mut self, active: bool) -> Self {
         self.active = active;
         self
@@ -272,7 +272,7 @@ impl WindowConfig {
     }
 
     /// Sets the id of an existing HTML `<canvas>` to render into.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(web)]
     pub fn with_canvas_id(mut self, id: impl Into<String>) -> Self {
         self.canvas_id = Some(id.into());
         self
@@ -284,7 +284,7 @@ impl WindowConfig {
         attr.title = self.title.clone();
         attr.inner_size = self.inner_size.map(Into::into);
 
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(web))]
         {
             attr.min_inner_size = self.min_inner_size.map(Into::into);
             attr.max_inner_size = self.max_inner_size.map(Into::into);
@@ -301,7 +301,7 @@ impl WindowConfig {
             attr.active = self.active;
         }
 
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(web)]
         {
             use wasm_bindgen::JsCast;
             use winit::platform::web::WindowAttributesExtWebSys;

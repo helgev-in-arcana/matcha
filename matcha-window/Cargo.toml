@@ -34,13 +34,18 @@ log = { workspace = true }
 enum-map = "2.7.3"
 web-time = { workspace = true }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# NOTE: the `cfg` expressions below must stay in sync with the `web` alias
+# defined in build.rs (`all(target_arch = "wasm32", target_os = "unknown")`).
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 wasm-bindgen-futures = { workspace = true }
 wasm-bindgen = { workspace = true }
 web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement"] }
+
+[build-dependencies]
+cfg_aliases = { workspace = true }
 
 [features]
 default = ["winit"]

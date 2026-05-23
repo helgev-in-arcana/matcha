@@ -8,8 +8,13 @@ use crate::{
     window::WindowId,
 };
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+// Documented exception to the WASM cfg convention §1: a `trait` item cannot
+// be split across `#[path]` modules because `Application` is referenced by
+// the same name on both platforms. `async_trait` requires the `?Send` mode
+// to be selected at the trait definition itself, so the platform switch
+// must live here as a `cfg_attr`.
+#[cfg_attr(not(web), async_trait::async_trait)]
+#[cfg_attr(web, async_trait::async_trait(?Send))]
 pub trait Application: utils::MaybeSendSync + 'static {
     type Command: utils::MaybeSend + 'static;
 

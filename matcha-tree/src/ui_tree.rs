@@ -193,8 +193,11 @@ impl<C: Component> UiTree<C> {
 // Application impl
 // ----------------------------------------------------------------------------
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+// Documented exception to the WASM cfg convention §1: this `impl` of the
+// `Application` trait must mirror the `?Send` mode chosen at the trait
+// definition (see `matcha-window/src/application.rs`).
+#[cfg_attr(not(web), async_trait::async_trait)]
+#[cfg_attr(web, async_trait::async_trait(?Send))]
 impl<C: Component> Application for UiTree<C> {
     type Command = TreeAppCommand<C::Message>;
 

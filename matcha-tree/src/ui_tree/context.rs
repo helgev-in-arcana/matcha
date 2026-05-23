@@ -16,9 +16,9 @@ use matcha_window::window::{Window, WindowConfig, WindowError};
 
 /// Type-erased message carried over the backend channel. Native targets
 /// additionally require `Send` so messages can cross threads.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(web))]
 pub(super) type BoxedMessage = Box<dyn Any + Send>;
-#[cfg(target_arch = "wasm32")]
+#[cfg(web)]
 pub(super) type BoxedMessage = Box<dyn Any>;
 
 /// Type-erased sender for messages from Component background tasks back to TreeApp.

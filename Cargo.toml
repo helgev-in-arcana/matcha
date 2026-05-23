@@ -88,6 +88,12 @@ wasm-bindgen-futures = "0.4"
 console_log = "1.0"
 console_error_panic_hook = "0.1"
 
+# build-time cfg aliases.
+# Each crate that splits modules along the "web" axis declares a `web` alias
+# in its build.rs via `cfg_aliases::cfg_aliases!`. The alias expansion is
+# kept in sync with the `[target.'cfg(...)']` sections in each Cargo.toml.
+cfg_aliases = "0.2"
+
 # interpolation crate
 # todo: maybe useful.
 # interpolation = "0.3.0"

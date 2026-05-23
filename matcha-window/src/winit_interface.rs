@@ -18,7 +18,7 @@ pub(crate) struct WinitInterface<App: Application> {
 // run_on_winit entry point
 // ---------------------------------------------------------------------------
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(web))]
 pub(crate) fn run<App: Application>(
     adapter: Adapter<App>,
 ) -> Result<(), winit::error::EventLoopError> {
@@ -36,7 +36,7 @@ pub(crate) fn run<App: Application>(
 
 /// WASM entry point. `spawn_app` hands control back to the browser event loop
 /// immediately; the adapter is then driven by browser callbacks.
-#[cfg(target_arch = "wasm32")]
+#[cfg(web)]
 pub(crate) fn run<App: Application>(adapter: Adapter<App>) {
     use winit::platform::web::EventLoopExtWebSys;
 
