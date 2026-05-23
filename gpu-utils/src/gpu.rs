@@ -18,22 +18,10 @@ pub struct GpuDescriptor {
 
 impl Default for GpuDescriptor {
     fn default() -> Self {
-        #[cfg(not(web))]
-        let backends = wgpu::Backends::PRIMARY;
-        #[cfg(web)]
-        let backends = wgpu::Backends::BROWSER_WEBGPU;
-
-        #[cfg(not(web))]
-        let required_features =
-            wgpu::Features::PUSH_CONSTANTS | wgpu::Features::VERTEX_WRITABLE_STORAGE;
-        // WebGPU exposes neither feature; wasm renderers need other fallbacks.
-        #[cfg(web)]
-        let required_features = wgpu::Features::empty();
-
         Self {
-            backends,
+            backends: crate::gpu_defaults::BACKENDS,
             power_preference: wgpu::PowerPreference::LowPower,
-            required_features,
+            required_features: crate::gpu_defaults::REQUIRED_FEATURES,
             required_limits: None,
             preferred_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
         }
