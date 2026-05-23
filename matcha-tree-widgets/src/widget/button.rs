@@ -18,15 +18,15 @@ use crate::style::Style as _;
 
 // MARK: View
 
-#[cfg(not(target_arch = "wasm32"))]
-type ClickFn = dyn Fn(&UiContext) + Send + Sync;
-#[cfg(target_arch = "wasm32")]
-type ClickFn = dyn Fn(&UiContext);
+/// Closure trait invoked when a button is clicked.
+/// `MaybeSendSync` supplies the platform-conditional `Send + Sync` bound.
+pub trait ClickFn: for<'a> Fn(&'a UiContext) + utils::MaybeSendSync {}
+impl<F> ClickFn for F where F: for<'a> Fn(&'a UiContext) + utils::MaybeSendSync {}
 
 pub struct Button {
     pub label: Option<String>,
     pub content: Box<dyn View>,
-    pub on_click: Option<Arc<ClickFn>>,
+    pub on_click: Option<Arc<dyn ClickFn>>,
 }
 
 impl Button {
@@ -80,7 +80,7 @@ enum ButtonState {
 }
 
 pub struct ButtonWidget {
-    on_click: Option<Arc<ClickFn>>,
+    on_click: Option<Arc<dyn ClickFn>>,
     state: ButtonState,
     child: Option<WidgetPod>,
 }

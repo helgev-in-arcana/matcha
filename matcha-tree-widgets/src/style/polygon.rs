@@ -16,23 +16,35 @@ use renderer::{
     widgets_renderer::vertex_color::{RenderData, TargetData, VertexColor},
 };
 
-#[cfg(not(target_arch = "wasm32"))]
-type PolygonFn = dyn for<'a> Fn([f32; 2], &'a UiContext) -> Mesh + Send + Sync + 'static;
-#[cfg(target_arch = "wasm32")]
-type PolygonFn = dyn for<'a> Fn([f32; 2], &'a UiContext) -> Mesh + 'static;
-#[cfg(not(target_arch = "wasm32"))]
-type AdaptFn =
-    dyn for<'a> Fn([f32; 2], &'a UiContext) -> nalgebra::Matrix4<f32> + Send + Sync + 'static;
-#[cfg(target_arch = "wasm32")]
-type AdaptFn = dyn for<'a> Fn([f32; 2], &'a UiContext) -> nalgebra::Matrix4<f32> + 'static;
+/// Closure trait producing a `Mesh` from a boundary and context.
+/// `MaybeSendSync` supplies the platform-conditional `Send + Sync` bound.
+pub trait PolygonFn:
+    for<'a> Fn([f32; 2], &'a UiContext) -> Mesh + utils::MaybeSendSync
+{
+}
+impl<F> PolygonFn for F where
+    F: for<'a> Fn([f32; 2], &'a UiContext) -> Mesh + utils::MaybeSendSync
+{
+}
+
+/// Closure trait producing an adaptive affine matrix.
+/// `MaybeSendSync` supplies the platform-conditional `Send + Sync` bound.
+pub trait AdaptFn:
+    for<'a> Fn([f32; 2], &'a UiContext) -> nalgebra::Matrix4<f32> + utils::MaybeSendSync
+{
+}
+impl<F> AdaptFn for F where
+    F: for<'a> Fn([f32; 2], &'a UiContext) -> nalgebra::Matrix4<f32> + utils::MaybeSendSync
+{
+}
 
 /// Quantize factor used for cache keying of matrices.
 /// Matches metrics SUB_PIXEL_QUANTIZE used for QSize / QRect quantization.
 const MATRIX_QUANTIZE: f32 = 256_f32;
 
 pub struct Polygon {
-    polygon: Arc<PolygonFn>,
-    adaptive_affine: Arc<AdaptFn>,
+    polygon: Arc<dyn PolygonFn>,
+    adaptive_affine: Arc<dyn AdaptFn>,
     cache_the_mesh: bool,
     caches: Mutex<utils::cache::Cache<CacheKey, Caches>>,
     renderer: VertexColor,

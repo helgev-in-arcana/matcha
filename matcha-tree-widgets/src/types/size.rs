@@ -47,15 +47,22 @@ impl ChildSize<'_> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-type SizeFn = dyn Fn([f32; 2], &mut ChildSize, &UiContext) -> f32 + Send + Sync + 'static;
-#[cfg(target_arch = "wasm32")]
-type SizeFn = dyn Fn([f32; 2], &mut ChildSize, &UiContext) -> f32 + 'static;
+/// Closure trait used to compute a size from parent size, child size and
+/// context. `MaybeSendSync` supplies the platform-conditional `Send + Sync`
+/// bound.
+pub trait SizeFn:
+    for<'a, 'b> Fn([f32; 2], &'a mut ChildSize<'b>, &UiContext) -> f32 + utils::MaybeSendSync
+{
+}
+impl<F> SizeFn for F where
+    F: for<'a, 'b> Fn([f32; 2], &'a mut ChildSize<'b>, &UiContext) -> f32 + utils::MaybeSendSync
+{
+}
 
 /// Calculate size from parent size child size and context.
 #[derive(Clone)]
 pub struct Size {
-    f: Arc<SizeFn>,
+    f: Arc<dyn SizeFn>,
 }
 
 impl Size {
