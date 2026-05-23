@@ -5,21 +5,10 @@
 //! so these markers relax to no-op bounds there.
 
 #[cfg(not(web))]
-mod imp {
-    pub trait MaybeSend: Send {}
-    impl<T: Send> MaybeSend for T {}
-
-    pub trait MaybeSendSync: Send + Sync + MaybeSend {}
-    impl<T: Send + Sync> MaybeSendSync for T {}
-}
-
+#[path = "platform/native.rs"]
+mod imp;
 #[cfg(web)]
-mod imp {
-    pub trait MaybeSend {}
-    impl<T> MaybeSend for T {}
-
-    pub trait MaybeSendSync: MaybeSend {}
-    impl<T> MaybeSendSync for T {}
-}
+#[path = "platform/web.rs"]
+mod imp;
 
 pub use imp::{MaybeSend, MaybeSendSync};
