@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use bevy_ecs::component::Component;
 
 // window
@@ -13,7 +15,14 @@ pub struct WindowBelonging {
     pub window_id: matcha_window::window::WindowId,
 }
 
-// position, size
+// widget
+
+#[derive(Component)]
+pub struct WidgetId {
+    pub id: Cow<'static, str>,
+}
+
+// about layout
 
 #[derive(Component)]
 pub struct RelativeTransform {
@@ -29,6 +38,13 @@ pub struct GlobalTransform {
 pub struct Size {
     pub width: f32,
     pub height: f32,
+}
+
+// about rndering
+
+#[derive(Component)]
+pub struct RenderCache {
+    // todo
 }
 
 // dirty flag
@@ -48,11 +64,4 @@ pub struct RenderDirtyFlag {
 #[derive(Component)]
 pub struct HitTestEnabled {
     pub enabled: bool,
-}
-
-// widget
-
-#[derive(Component)]
-pub struct Widget {
-    
 }

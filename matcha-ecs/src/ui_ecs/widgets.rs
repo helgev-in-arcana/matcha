@@ -1,8 +1,7 @@
-pub struct Widget<'a> {
-    zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+pub struct Widget {
 }
 
-impl<'a> Widget<'a> {
+impl Widget {
     pub fn new() -> Self {
         Self {
             
