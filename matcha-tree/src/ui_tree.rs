@@ -259,7 +259,7 @@ impl<C: Component> Application for UiTree<C> {
         self.root.init(&ctx);
     }
 
-    fn resumed(&self, event_loop: &impl EventLoop) {
+    fn resumed(&mut self, event_loop: &impl EventLoop) {
         let ctx = AppContext {
             runtime_handle: self.runtime_handle(),
             event_sender: &self.event_sender,
@@ -268,7 +268,7 @@ impl<C: Component> Application for UiTree<C> {
         self.root.resumed(&ctx);
     }
 
-    fn create_surface(&self, event_loop: &impl EventLoop) {
+    fn create_surface(&mut self, event_loop: &impl EventLoop) {
         self.surface_creation_permitted
             .store(true, Ordering::SeqCst);
 
@@ -285,7 +285,7 @@ impl<C: Component> Application for UiTree<C> {
         self.run_update(event_loop);
     }
 
-    fn destroy_surface(&self, _event_loop: &impl EventLoop) {
+    fn destroy_surface(&mut self, _event_loop: &impl EventLoop) {
         self.surface_creation_permitted
             .store(false, Ordering::SeqCst);
 
@@ -301,7 +301,7 @@ impl<C: Component> Application for UiTree<C> {
         }
     }
 
-    fn suspended(&self, event_loop: &impl EventLoop) {
+    fn suspended(&mut self, event_loop: &impl EventLoop) {
         let ctx = AppContext {
             runtime_handle: self.runtime_handle(),
             event_sender: &self.event_sender,
@@ -310,7 +310,7 @@ impl<C: Component> Application for UiTree<C> {
         self.root.suspended(&ctx);
     }
 
-    fn exiting(&self, event_loop: &impl EventLoop) {
+    fn exiting(&mut self, event_loop: &impl EventLoop) {
         let ctx = AppContext {
             runtime_handle: self.runtime_handle(),
             event_sender: &self.event_sender,
@@ -323,7 +323,7 @@ impl<C: Component> Application for UiTree<C> {
     // Rendering
     // -------------------------------------------------------------------------
 
-    fn render(&self, window_id: WindowId) {
+    fn render(&mut self, window_id: WindowId) {
         // If a render task for this window is still running, request another
         // frame and return — the new frame will be triggered once this task finishes.
         {
@@ -389,7 +389,7 @@ impl<C: Component> Application for UiTree<C> {
     // -------------------------------------------------------------------------
 
     fn window_event(
-        &self,
+        &mut self,
         _event_loop: &impl EventLoop,
         _window_id: WindowId,
         _event: WindowEvent,
@@ -397,12 +397,12 @@ impl<C: Component> Application for UiTree<C> {
         // TODO
     }
 
-    fn window_destroyed(&self, _event_loop: &impl EventLoop, _window_id: WindowId) {
+    fn window_destroyed(&mut self, _event_loop: &impl EventLoop, _window_id: WindowId) {
         // TODO
     }
 
     fn device_event(
-        &self,
+        &mut self,
         event_loop: &impl EventLoop,
         window_id: WindowId,
         event: DeviceEvent,
@@ -438,7 +438,7 @@ impl<C: Component> Application for UiTree<C> {
     }
 
     fn raw_device_event(
-        &self,
+        &mut self,
         _event_loop: &impl EventLoop,
         _raw_device_id: RawDeviceId,
         _raw_event: RawDeviceEvent,
@@ -450,7 +450,7 @@ impl<C: Component> Application for UiTree<C> {
     // Ui commands
     // -------------------------------------------------------------------------
 
-    fn ui_command(&self, event_loop: &impl EventLoop, command: Self::Command) {
+    fn ui_command(&mut self, event_loop: &impl EventLoop, command: Self::Command) {
         match command {
             TreeAppCommand::BufferUpdated => {
                 self.run_update(event_loop);

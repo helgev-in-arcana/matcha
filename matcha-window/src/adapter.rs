@@ -234,7 +234,7 @@ pub enum ControlFlow {
     WaitUntil(web_time::Instant),
 }
 
-pub trait EventLoopProxy<App: Application>: utils::MaybeSend {
+pub trait EventLoopProxy<App: Application>: utils::MaybeSendSync {
     fn clone_box(&self) -> Box<dyn EventLoopProxy<App>>;
     fn send_command(&self, command: App::Command);
     fn request_exit(&self);

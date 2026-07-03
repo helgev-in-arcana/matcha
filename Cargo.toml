@@ -10,6 +10,7 @@ members = [
     "shared-buffer",
     "matcha-window",
     "matcha-ecs",
+    "matcha-ecs-widgets",
 ]
 resolver = "3"
 
@@ -22,6 +23,8 @@ matcha = { path = "matcha" }
 matcha-tree = { path = "matcha-tree" }
 matcha-window = { path = "matcha-window" }
 matcha-tree-widgets = { path = "matcha-tree-widgets" }
+matcha-ecs = { path = "matcha-ecs" }
+matcha-ecs-widgets = { path = "matcha-ecs-widgets" }
 shared-buffer = { path = "shared-buffer" }
 renderer = { path = "renderer" }
 text-render = { path = "text-render" }

@@ -17,42 +17,42 @@ pub trait Application: utils::MaybeSendSync + 'static {
         proxy: Box<dyn EventLoopProxy<Self>>,
         event_loop: &impl EventLoop,
     );
-    fn resumed(&self, event_loop: &impl EventLoop);
-    fn create_surface(&self, event_loop: &impl EventLoop);
-    fn destroy_surface(&self, event_loop: &impl EventLoop);
-    fn suspended(&self, event_loop: &impl EventLoop);
-    fn exiting(&self, event_loop: &impl EventLoop);
+    fn resumed(&mut self, event_loop: &impl EventLoop);
+    fn create_surface(&mut self, event_loop: &impl EventLoop);
+    fn destroy_surface(&mut self, event_loop: &impl EventLoop);
+    fn suspended(&mut self, event_loop: &impl EventLoop);
+    fn exiting(&mut self, event_loop: &impl EventLoop);
 
     // rendering
-    fn render(&self, window_id: WindowId);
+    fn render(&mut self, window_id: WindowId);
 
     // event methods
     fn window_event(
-        &self,
+        &mut self,
         event_loop: &impl EventLoop,
         window_id: WindowId,
         event: WindowEvent,
     );
     fn window_destroyed(
-        &self,
+        &mut self,
         event_loop: &impl EventLoop,
         window_id: WindowId,
     );
     fn device_event(
-        &self,
+        &mut self,
         event_loop: &impl EventLoop,
         window_id: WindowId,
         event: DeviceEvent,
     );
     fn ui_command(
-        &self,
+        &mut self,
         event_loop: &impl EventLoop,
         command: Self::Command,
     );
 
     // Default Methods
     fn raw_device_event(
-        &self,
+        &mut self,
         event_loop: &impl EventLoop,
         raw_device_id: RawDeviceId,
         raw_event: RawDeviceEvent,
@@ -61,11 +61,11 @@ pub trait Application: utils::MaybeSendSync + 'static {
         let _ = raw_device_id;
         let _ = raw_event;
     }
-    fn poll(&self, event_loop: &impl EventLoop) {
+    fn poll(&mut self, event_loop: &impl EventLoop) {
         let _ = event_loop;
     }
     fn resume_time_reached(
-        &self,
+        &mut self,
         event_loop: &impl EventLoop,
         start: web_time::Instant,
         requested_resume: web_time::Instant,
@@ -75,7 +75,7 @@ pub trait Application: utils::MaybeSendSync + 'static {
         let _ = requested_resume;
     }
     fn wait_cancelled(
-        &self,
+        &mut self,
         event_loop: &impl EventLoop,
         start: web_time::Instant,
         requested_resume: Option<web_time::Instant>,
@@ -84,10 +84,10 @@ pub trait Application: utils::MaybeSendSync + 'static {
         let _ = start;
         let _ = requested_resume;
     }
-    fn about_to_wait(&self, event_loop: &impl EventLoop) {
+    fn about_to_wait(&mut self, event_loop: &impl EventLoop) {
         let _ = event_loop;
     }
-    fn memory_warning(&self, event_loop: &impl EventLoop) {
+    fn memory_warning(&mut self, event_loop: &impl EventLoop) {
         let _ = event_loop;
     }
 }

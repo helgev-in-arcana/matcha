@@ -1,0 +1,15 @@
+[package]
+name = "matcha-ecs-widgets"
+version = { workspace = true }
+edition = "2024"
+publish = false
+
+[dependencies]
+# self
+matcha-ecs = { workspace = true }
+
+# ecs
+bevy_ecs = "0.18.1"
+
+[lints]
+workspace = true
