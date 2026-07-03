@@ -44,6 +44,11 @@ log = { workspace = true }
 enum-map = "2.7.3"
 web-time = { workspace = true }
 
+[dev-dependencies]
+# Widget implementations are only needed by tests/examples. A dev-dependency
+# keeps the one-way crate rule (matcha-ecs-widgets -> matcha-ecs) intact.
+matcha-ecs-widgets = { workspace = true }
+
 [features]
 default = ["winit"]
 winit = ["matcha-window/winit"]

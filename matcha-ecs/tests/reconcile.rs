@@ -6,8 +6,8 @@ use bevy_ecs::{entity::Entity, world::World};
 use matcha_ecs::{
     components::view::ViewChildren,
     view::{run_view, Scope},
-    widgets::{Button, ButtonLabel, Column, LayoutKind, OnClick, Row, Text, TextContent},
 };
+use matcha_ecs_widgets::{Button, ButtonLabel, Column, LayoutKind, OnClick, Row, Text, TextContent};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Msg {
