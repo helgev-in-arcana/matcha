@@ -100,15 +100,15 @@ impl Constraints {
 /// Implementors are widget-side data components (`Column`'s `LayoutKind`,
 /// `ColorRect`'s size, ...); the core never names a concrete `Layout` type.
 ///
-/// `Copy` (not `Clone`) is required deliberately: `LayoutDispatch::of` must
-/// duplicate `L` out of the world on every dispatch (see its doc comment), so
-/// an arbitrarily expensive `Clone` impl (e.g. one that deep-copies a `Vec`)
-/// would make that cost invisible at the call site. `Copy` forbids heap data
-/// by construction — implementors that need large or shared config should
-/// store it behind a separate, cheaply-`Copy`able handle (e.g. `Arc<T>` or an
-/// index into an asset table), not inline in `L` itself. Children are never a
-/// concern here: they live in `ViewChildren`, a sibling component, not in `L`.
-pub trait Layout: Component + Copy {
+/// `LayoutDispatch::of` clones `L` out of the world on every dispatch (see
+/// its doc comment) to release the borrow before recursing. A `Clone` impl
+/// with unbounded cost (e.g. deep-copying a `Vec`) is on the implementor —
+/// see `ECS_IMPLEMENTATION_PLAN.md` §5 progress log for why this is a known,
+/// open gap rather than a `Copy` bound (rejected: too restrictive) or an
+/// `unsafe` disjoint-borrow fix (rejected for now: soundness would depend on
+/// `view.rs`'s reconcile invariants, a cross-module dependency not yet worth
+/// taking on).
+pub trait Layout: Component + Clone {
     /// Return this entity's desired size within `constraints`. Recurses into
     /// children via `ctx.measure_child`; writes nothing.
     fn measure(&self, ctx: &mut LayoutCtx, me: Entity, constraints: Constraints) -> [f32; 2];
@@ -129,31 +129,38 @@ pub struct LayoutDispatch {
 }
 
 impl LayoutDispatch {
-    /// Build a dispatch table for `L`. The generated fns copy `L` out of the
+    /// Build a dispatch table for `L`. The generated fns clone `L` out of the
     /// world (releasing the borrow) before calling `L::measure`/`L::arrange`,
     /// so the subsequent recursive `&mut LayoutCtx` call never conflicts with
-    /// a held component borrow (`ECS_ARCHITECTURE.md` §8.3). `Layout: Copy`
-    /// guarantees this is a cheap bitwise copy, never a hidden allocation.
+    /// a held component borrow (`ECS_ARCHITECTURE.md` §8.3).
     pub fn of<L: Layout>() -> Self {
         Self {
             measure: |ctx, e, c| {
-                let l: L = ctx.world().get::<L>(e).copied().unwrap_or_else(|| {
-                    panic!(
-                        "entity {e:?} has LayoutDispatch::of::<{}>() but no {} component",
-                        std::any::type_name::<L>(),
-                        std::any::type_name::<L>()
-                    )
-                });
+                let l: L = ctx
+                    .world()
+                    .get::<L>(e)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "entity {e:?} has LayoutDispatch::of::<{}>() but no {} component",
+                            std::any::type_name::<L>(),
+                            std::any::type_name::<L>()
+                        )
+                    })
+                    .clone();
                 l.measure(ctx, e, c)
             },
             arrange: |ctx, e, size| {
-                let l: L = ctx.world().get::<L>(e).copied().unwrap_or_else(|| {
-                    panic!(
-                        "entity {e:?} has LayoutDispatch::of::<{}>() but no {} component",
-                        std::any::type_name::<L>(),
-                        std::any::type_name::<L>()
-                    )
-                });
+                let l: L = ctx
+                    .world()
+                    .get::<L>(e)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "entity {e:?} has LayoutDispatch::of::<{}>() but no {} component",
+                            std::any::type_name::<L>(),
+                            std::any::type_name::<L>()
+                        )
+                    })
+                    .clone();
                 l.arrange(ctx, e, size)
             },
         }
