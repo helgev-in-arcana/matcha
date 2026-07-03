@@ -32,11 +32,7 @@ fn first_child(world: &World, root: Entity) -> Entity {
 fn unchanged_props_do_not_invalidate_cache() {
     let (mut world, root) = setup();
     run_view(&mut world, root, |s| {
-        s.leaf(
-            ColorRect::new(100.0, 50.0)
-                .color([1.0, 0.0, 0.0, 1.0])
-                .pos(10.0, 10.0),
-        );
+        s.leaf(ColorRect::new(100.0, 50.0).color([1.0, 0.0, 0.0, 1.0]));
     });
     let child = first_child(&world, root);
     let cache_before = world
@@ -47,11 +43,7 @@ fn unchanged_props_do_not_invalidate_cache() {
 
     // Same slot, same widget type, identical props -> patch() with no change.
     run_view(&mut world, root, |s| {
-        s.leaf(
-            ColorRect::new(100.0, 50.0)
-                .color([1.0, 0.0, 0.0, 1.0])
-                .pos(10.0, 10.0),
-        );
+        s.leaf(ColorRect::new(100.0, 50.0).color([1.0, 0.0, 0.0, 1.0]));
     });
     let cache_after = world.get::<RenderItem>(child).unwrap().cache.clone();
 
@@ -65,21 +57,13 @@ fn unchanged_props_do_not_invalidate_cache() {
 fn changed_color_invalidates_cache() {
     let (mut world, root) = setup();
     run_view(&mut world, root, |s| {
-        s.leaf(
-            ColorRect::new(100.0, 50.0)
-                .color([1.0, 0.0, 0.0, 1.0])
-                .pos(10.0, 10.0),
-        );
+        s.leaf(ColorRect::new(100.0, 50.0).color([1.0, 0.0, 0.0, 1.0]));
     });
     let child = first_child(&world, root);
     let cache_before = world.get::<RenderItem>(child).unwrap().cache.clone();
 
     run_view(&mut world, root, |s| {
-        s.leaf(
-            ColorRect::new(100.0, 50.0)
-                .color([0.0, 1.0, 0.0, 1.0])
-                .pos(10.0, 10.0),
-        );
+        s.leaf(ColorRect::new(100.0, 50.0).color([0.0, 1.0, 0.0, 1.0]));
     });
     let cache_after = world.get::<RenderItem>(child).unwrap().cache.clone();
 
@@ -90,29 +74,21 @@ fn changed_color_invalidates_cache() {
 }
 
 #[test]
-fn changed_geometry_invalidates_cache() {
+fn changed_size_invalidates_cache() {
     let (mut world, root) = setup();
     run_view(&mut world, root, |s| {
-        s.leaf(
-            ColorRect::new(100.0, 50.0)
-                .color([1.0, 0.0, 0.0, 1.0])
-                .pos(10.0, 10.0),
-        );
+        s.leaf(ColorRect::new(100.0, 50.0).color([1.0, 0.0, 0.0, 1.0]));
     });
     let child = first_child(&world, root);
     let cache_before = world.get::<RenderItem>(child).unwrap().cache.clone();
 
     run_view(&mut world, root, |s| {
-        s.leaf(
-            ColorRect::new(100.0, 50.0)
-                .color([1.0, 0.0, 0.0, 1.0])
-                .pos(20.0, 10.0),
-        );
+        s.leaf(ColorRect::new(120.0, 50.0).color([1.0, 0.0, 0.0, 1.0]));
     });
     let cache_after = world.get::<RenderItem>(child).unwrap().cache.clone();
 
     assert!(
         !Arc::ptr_eq(&cache_before, &cache_after),
-        "cache Arc must change when a draw-relevant prop (position) changed"
+        "cache Arc must change when a draw-relevant prop (size) changed"
     );
 }

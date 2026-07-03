@@ -175,7 +175,9 @@ where
             )
                 .chain(),
         );
-        render_schedule.add_systems(crate::systems::temp_place.in_set(MatchaSet::Layout));
+        render_schedule.add_systems(crate::layout::run_layout.in_set(MatchaSet::Layout));
+        render_schedule
+            .add_systems(crate::systems::invalidate_on_layout_change.in_set(MatchaSet::Flush));
 
         Self {
             world,

@@ -12,9 +12,11 @@
 pub mod button;
 pub mod color_rect;
 pub mod layout;
+pub mod padding;
 pub mod text;
 
 pub use button::{Button, ButtonLabel, Message, OnClick};
 pub use color_rect::{ColorRect, RectColor};
 pub use layout::{Column, Container, Gap, LayoutKind, Row};
+pub use padding::{Padding, PaddingLayout};
 pub use text::{Text, TextContent};

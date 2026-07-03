@@ -1,11 +1,15 @@
-//! `ColorRect` — a fixed-size, absolutely-positioned solid colour rectangle.
+//! `ColorRect` — a fixed-size solid colour rectangle, positioned by whatever
+//! layout it is nested under.
 //!
-//! M1 test widget exercising the full View → pixels path: it carries a core
-//! [`RectGeometry`] (read by the throwaway placement system) plus a
-//! [`RenderItem`] whose builder rasterises a single-colour quad into the texture
-//! atlas. Real layout-driven widgets replace this from M3/M6 on.
+//! It is a layout *leaf*: `measure` returns its own `w`×`h` (clamped to the
+//! incoming constraints) and ignores children; `arrange` does nothing further
+//! since it has none. Its [`RenderItem`] rasterises a single-colour quad into
+//! the texture atlas.
 
-use bevy_ecs::{bundle::Bundle, change_detection::DetectChangesMut, component::Component, world::EntityWorldMut};
+use bevy_ecs::{
+    bundle::Bundle, change_detection::DetectChangesMut, component::Component, entity::Entity,
+    world::EntityWorldMut,
+};
 use nalgebra::{Matrix4, Point3};
 use renderer::{
     vertex::colored_vertex::ColorVertex,
@@ -15,50 +19,46 @@ use renderer::{
 
 use matcha_ecs::{
     components::{
-        layout::{GlobalTransform, RectGeometry},
         render::{RenderCtx, RenderItem},
+        view::Key,
     },
-    components::view::Key,
+    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch},
     view::Widget,
 };
+
+/// A [`ColorRect`]'s requested (unconstrained) size.
+#[derive(Component, Clone, Copy, PartialEq, Debug)]
+pub struct RectGeometry {
+    pub w: f32,
+    pub h: f32,
+}
 
 /// The RGBA fill colour of a [`ColorRect`], carried so `patch` can detect changes.
 #[derive(Component, Clone, Copy, PartialEq, Debug)]
 pub struct RectColor(pub [f32; 4]);
 
-/// A solid-colour rectangle of fixed size at an absolute position.
+/// A solid-colour rectangle of fixed size.
 pub struct ColorRect {
     key: Key,
     w: f32,
     h: f32,
     color: [f32; 4],
-    x: f32,
-    y: f32,
 }
 
 impl ColorRect {
-    /// Create a `w`×`h` rectangle (white, at the origin by default).
+    /// Create a `w`×`h` rectangle (white by default).
     pub fn new(w: f32, h: f32) -> Self {
         Self {
             key: Key::Auto,
             w,
             h,
             color: [1.0, 1.0, 1.0, 1.0],
-            x: 0.0,
-            y: 0.0,
         }
     }
 
     /// Set the RGBA fill colour (components in `0.0..=1.0`).
     pub fn color(mut self, color: [f32; 4]) -> Self {
         self.color = color;
-        self
-    }
-
-    /// Set the absolute top-left position in window (UI) space.
-    pub fn pos(mut self, x: f32, y: f32) -> Self {
-        self.x = x;
-        self.y = y;
         self
     }
 
@@ -70,8 +70,6 @@ impl ColorRect {
 
     fn geometry(&self) -> RectGeometry {
         RectGeometry {
-            x: self.x,
-            y: self.y,
             w: self.w,
             h: self.h,
         }
@@ -155,7 +153,7 @@ impl Widget for ColorRect {
         (
             self.geometry(),
             RectColor(self.color),
-            GlobalTransform::default(),
+            LayoutDispatch::of::<RectGeometry>(),
             make_render_item(self.w, self.h, self.color),
         )
     }
@@ -176,5 +174,18 @@ impl Widget for ColorRect {
                 *existing = item;
             }
         }
+    }
+}
+
+impl Layout for RectGeometry {
+    fn measure(&self, _ctx: &mut LayoutCtx, _me: Entity, c: Constraints) -> [f32; 2] {
+        [
+            self.w.clamp(c.min_width(), c.max_width()),
+            self.h.clamp(c.min_height(), c.max_height()),
+        ]
+    }
+
+    fn arrange(&self, _ctx: &mut LayoutCtx, _me: Entity, _size: [f32; 2]) {
+        // Leaf: no children to arrange.
     }
 }

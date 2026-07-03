@@ -1,19 +1,15 @@
 //! Framework systems.
 
-use bevy_ecs::system::Query;
+use bevy_ecs::{query::Changed, system::Query};
 
-use crate::components::layout::{GlobalTransform, RectGeometry};
+use crate::components::{layout::LayoutOutput, render::RenderItem};
 
-/// Throwaway M1 placement pass: copy each entity's desired [`RectGeometry`]
-/// position into its [`GlobalTransform`] as a plain translation.
-///
-/// This is a stand-in for the real layout pass and is registered in
-/// `MatchaSet::Layout`. **Removed wholesale in M3** when `Constraints`/
-/// `LayoutOutput` layout arrives.
-pub fn temp_place(mut query: Query<(&RectGeometry, &mut GlobalTransform)>) {
-    for (geometry, mut transform) in query.iter_mut() {
-        transform.affine = nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(
-            geometry.x, geometry.y, 0.0,
-        ));
+/// Drop the cached render node of every entity whose [`LayoutOutput`] changed
+/// this frame (new placement/size), so the next extract rebuilds it.
+/// Registered in `MatchaSet::Flush`, after layout and before extract
+/// (`ECS_ARCHITECTURE.md` §8.5).
+pub fn invalidate_on_layout_change(mut query: Query<&mut RenderItem, Changed<LayoutOutput>>) {
+    for mut item in query.iter_mut() {
+        item.invalidate();
     }
 }

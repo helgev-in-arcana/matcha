@@ -15,11 +15,7 @@ struct Model {
 
 fn view(model: &Model, s: &mut Scope) {
     let width = 50.0 + (model.count as f32) * 20.0;
-    s.leaf(
-        ColorRect::new(width, 80.0)
-            .color([0.2, 0.4, 0.8, 1.0])
-            .pos(50.0, 50.0),
-    );
+    s.leaf(ColorRect::new(width, 80.0).color([0.2, 0.4, 0.8, 1.0]));
 }
 
 fn main() {
