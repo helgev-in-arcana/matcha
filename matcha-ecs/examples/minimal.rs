@@ -1,11 +1,11 @@
 //! Minimal M1 demo: two absolutely-positioned solid rectangles rendered from a
-//! view function, with no model, layout, or input.
+//! view function, with no meaningful model, layout, or input.
 
 use matcha_ecs::{ui_ecs::UiEcs, view::Scope};
 use matcha_ecs_widgets::ColorRect;
 use matcha_window::adapter::Adapter;
 
-fn view(s: &mut Scope) {
+fn view(_model: &(), s: &mut Scope) {
     s.leaf(
         ColorRect::new(300.0, 200.0)
             .color([0.2, 0.4, 0.8, 1.0])
@@ -19,7 +19,7 @@ fn view(s: &mut Scope) {
 }
 
 fn main() {
-    Adapter::new(UiEcs::new(view))
+    Adapter::new(UiEcs::new((), view))
         .run()
         .expect("event loop failed");
 }

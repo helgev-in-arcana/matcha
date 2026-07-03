@@ -1,12 +1,13 @@
 //! `UiEcs`: the ECS-backed [`Application`] driver.
 //!
-//! Owns the ECS `World`, the frame schedules, and the async runtime. For M1 it
-//! initialises the GPU up front, creates a single window on `resumed`, runs the
-//! view function once to populate the world, and renders synchronously on the
-//! main thread. Model updates, per-frame re-`run_view`, layout, input and a
-//! dedicated render thread arrive in later milestones.
+//! Owns the ECS `World`, the frame schedules, and the async runtime. GPU init
+//! happens up front, a single window is created as the UI root on `resumed`,
+//! and rendering runs synchronously on the main thread. From M2 on, the model
+//! lives in the world as a resource and [`ModelHandle::update`] calls queue
+//! mutations that are drained and re-viewed on `ui_command`. Layout, input and
+//! a dedicated render thread arrive in later milestones.
 
-use std::sync::Arc;
+use std::sync::{atomic::AtomicBool, Arc, OnceLock};
 
 use bevy_ecs::{
     entity::Entity,
@@ -29,6 +30,7 @@ use matcha_window::{
     window::{Window as OsWindow, WindowConfig, WindowId},
 };
 use renderer::{CoreRenderer, RenderNode};
+use tokio::sync::mpsc;
 
 use crate::{
     components::{
@@ -37,6 +39,7 @@ use crate::{
         view::ViewChildren,
         window::{Window as WindowComp, WindowBelonging},
     },
+    model::{ModelHandle, ModelResource},
     resources::{GpuResource, RenderWindowRoot, RendererResource},
     view::{run_view, Scope},
 };
@@ -58,30 +61,56 @@ pub struct CanCreateSurface {
     pub flag: bool,
 }
 
-/// The ECS application driver, parameterised over the view function `F`.
-///
-/// M1 has no model; `F` takes only a `&mut Scope`. M2 will add the model type
-/// and change the signature to `Fn(&M, &mut Scope)`.
-pub struct UiEcs<F: Fn(&mut Scope) + Send + Sync + 'static> {
+/// Commands delivered into the event loop from outside (currently only
+/// [`ModelHandle::update`]). Routed to [`UiEcs::ui_command`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiCommand {
+    /// The model queue has (or may have) pending mutations: drain them and
+    /// re-run the view.
+    ModelUpdated,
+}
+
+/// The ECS application driver, parameterised over the model type `M` and view
+/// function `F`.
+pub struct UiEcs<M, F>
+where
+    M: Send + Sync + 'static,
+    F: Fn(&M, &mut Scope) + Send + Sync + 'static,
+{
     world: World,
     view_fn: F,
 
-    /// Phase A + B (model drain, re-run view). Empty and unused in M1; driven
-    /// from `ui_command` once the model loop lands in M2.
-    #[allow(dead_code)]
+    /// Phase A + B hook (model drain, re-run view). Empty for now; a future
+    /// milestone may add systems here that must run before the drain.
     model_update_schedule: Schedule,
     /// Phase C (animation, layout, flush, extract).
     render_schedule: Schedule,
 
     /// Async runtime kept alive for the app's lifetime (used for GPU init now,
-    /// background tasks from M2 on).
+    /// background tasks from a later milestone on).
     _runtime: tokio::runtime::Runtime,
+
+    /// Receiver half of the model mutation queue. `UnboundedReceiver` is not
+    /// `Sync`, so it is wrapped in a `Mutex` purely to make `UiEcs` itself
+    /// `Sync` (accessed via `get_mut()` — no runtime locking occurs, same
+    /// pattern as `matcha-tree/src/ui_tree.rs`).
+    model_receiver: parking_lot::Mutex<mpsc::UnboundedReceiver<Box<dyn FnOnce(&mut M) + Send>>>,
+    wake_pending: Arc<AtomicBool>,
+    /// Filled once in `init()` (the event loop proxy is unavailable before
+    /// then). `ModelHandle::update` calls made earlier still queue correctly;
+    /// `init()` self-heals by waking immediately if a mutation is pending.
+    proxy_slot: Arc<OnceLock<Box<dyn EventLoopProxy<Self>>>>,
 }
 
-impl<F: Fn(&mut Scope) + Send + Sync + 'static> UiEcs<F> {
-    /// Build a `UiEcs`: initialise the GPU, atlases and renderer, insert them as
-    /// world resources, and wire the render schedule.
-    pub fn new(view_fn: F) -> Self {
+impl<M, F> UiEcs<M, F>
+where
+    M: Send + Sync + 'static,
+    F: Fn(&M, &mut Scope) + Send + Sync + 'static,
+{
+    /// Build a `UiEcs`: initialise the GPU, atlases and renderer, insert them
+    /// (plus the initial model) as world resources, and wire the render
+    /// schedule.
+    pub fn new(model: M, view_fn: F) -> Self {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -121,6 +150,20 @@ impl<F: Fn(&mut Scope) + Send + Sync + 'static> UiEcs<F> {
             stencil_atlas,
         });
         world.insert_resource(CanCreateSurface { flag: false });
+        world.insert_resource(ModelResource(model));
+
+        let (sender, receiver) = mpsc::unbounded_channel::<Box<dyn FnOnce(&mut M) + Send>>();
+        let wake_pending = Arc::new(AtomicBool::new(false));
+        let proxy_slot: Arc<OnceLock<Box<dyn EventLoopProxy<Self>>>> = Arc::new(OnceLock::new());
+        let wake: Arc<dyn Fn() + Send + Sync> = {
+            let proxy_slot = proxy_slot.clone();
+            Arc::new(move || {
+                if let Some(proxy) = proxy_slot.get() {
+                    proxy.send_command(UiCommand::ModelUpdated);
+                }
+            })
+        };
+        world.insert_resource(ModelHandle::new(sender, wake_pending.clone(), wake));
 
         let mut render_schedule = Schedule::default();
         render_schedule.configure_sets(
@@ -140,7 +183,49 @@ impl<F: Fn(&mut Scope) + Send + Sync + 'static> UiEcs<F> {
             model_update_schedule: Schedule::default(),
             render_schedule,
             _runtime: runtime,
+            model_receiver: parking_lot::Mutex::new(receiver),
+            wake_pending,
+            proxy_slot,
         }
+    }
+
+    /// Clone a handle for mutating the model from any thread. Safe to call
+    /// before the event loop starts (`ModelHandle::update` queues correctly
+    /// even before `init()` fills in the wake proxy).
+    pub fn model_handle(&self) -> ModelHandle<M> {
+        self.world.resource::<ModelHandle<M>>().clone()
+    }
+
+    /// Phase A (drain queued mutations into the model) + Phase B (re-run the
+    /// view against the updated model) + request a redraw on every window.
+    fn process_model_update(&mut self) {
+        self.model_update_schedule.run(&mut self.world);
+
+        self.wake_pending
+            .store(false, std::sync::atomic::Ordering::Release);
+        {
+            let receiver = self.model_receiver.get_mut();
+            let mut model = self.world.resource_mut::<ModelResource<M>>();
+            while let Ok(f) = receiver.try_recv() {
+                f(&mut model.0);
+            }
+        }
+
+        let Some(root) = self.world.get_resource::<RenderWindowRoot>() else {
+            return;
+        };
+        let root_entity = root.entity;
+        let view_fn = &self.view_fn;
+        self.world
+            .resource_scope::<ModelResource<M>, _>(|world, model| {
+                run_view(world, root_entity, |s| view_fn(&model.0, s));
+            });
+
+        let _ = self.world.run_system_cached(|q: Query<&WindowComp>| {
+            for window in q.iter() {
+                window.window.request_redraw();
+            }
+        });
     }
 
     /// Walk the window root's view tree and present one frame.
@@ -148,7 +233,7 @@ impl<F: Fn(&mut Scope) + Send + Sync + 'static> UiEcs<F> {
         let Some(root) = self.world.get_resource::<RenderWindowRoot>() else {
             return;
         };
-        // M1 is single-window; ignore redraws for any other id.
+        // M1/M2 are single-window; ignore redraws for any other id.
         if root.window_id != window_id {
             return;
         }
@@ -235,12 +320,26 @@ fn collect_render_nodes(world: &World, entity: Entity, ctx: &RenderCtx, out: &mu
     }
 }
 
-impl<F: Fn(&mut Scope) + Send + Sync + 'static> Application for UiEcs<F> {
-    type Command = ();
+impl<M, F> Application for UiEcs<M, F>
+where
+    M: Send + Sync + 'static,
+    F: Fn(&M, &mut Scope) + Send + Sync + 'static,
+{
+    type Command = UiCommand;
 
-    fn init(&mut self, _proxy: Box<dyn EventLoopProxy<Self>>, _event_loop: &impl EventLoop) {
-        // M1 needs no proxy. M2 wires a type-erased wake function for the model
-        // update loop.
+    fn init(&mut self, proxy: Box<dyn EventLoopProxy<Self>>, _event_loop: &impl EventLoop) {
+        // `set` only fails if already set; `init` runs exactly once per app.
+        let _ = self.proxy_slot.set(proxy);
+        // Self-heal: a `ModelHandle::update` call made before `init()` ran
+        // could not reach a proxy yet, so replay the wake now if one is due.
+        if self
+            .wake_pending
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            if let Some(proxy) = self.proxy_slot.get() {
+                proxy.send_command(UiCommand::ModelUpdated);
+            }
+        }
     }
 
     fn resumed(&mut self, event_loop: &impl EventLoop) {
@@ -271,9 +370,11 @@ impl<F: Fn(&mut Scope) + Send + Sync + 'static> Application for UiEcs<F> {
             },
         ));
 
-        // Populate the view tree once (per-frame re-run arrives in M2).
         let view_fn = &self.view_fn;
-        run_view(&mut self.world, entity, |s| view_fn(s));
+        self.world
+            .resource_scope::<ModelResource<M>, _>(|world, model| {
+                run_view(world, entity, |s| view_fn(&model.0, s));
+            });
 
         self.world
             .insert_resource(RenderWindowRoot { entity, window_id });
@@ -353,15 +454,22 @@ impl<F: Fn(&mut Scope) + Send + Sync + 'static> Application for UiEcs<F> {
     }
 
     fn window_destroyed(&mut self, _event_loop: &impl EventLoop, _window_id: WindowId) {
-        // Per-window resource teardown is not needed for M1's single window.
+        // Per-window resource teardown is not needed for the single window M1/M2 support.
     }
 
-    fn device_event(&mut self, _event_loop: &impl EventLoop, _window_id: WindowId, _event: DeviceEvent) {
+    fn device_event(
+        &mut self,
+        _event_loop: &impl EventLoop,
+        _window_id: WindowId,
+        _event: DeviceEvent,
+    ) {
         // Input handling arrives in M5.
     }
 
-    fn ui_command(&mut self, _event_loop: &impl EventLoop, _command: Self::Command) {
-        // No commands in M1 (`Command = ()`).
+    fn ui_command(&mut self, _event_loop: &impl EventLoop, command: Self::Command) {
+        match command {
+            UiCommand::ModelUpdated => self.process_model_update(),
+        }
     }
 
     // ---------------------------------------------------------------
