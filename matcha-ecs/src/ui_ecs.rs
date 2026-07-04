@@ -7,7 +7,10 @@
 //! mutations that are drained and re-viewed on `ui_command`. Layout, input and
 //! a dedicated render thread arrive in later milestones.
 
-use std::sync::{atomic::AtomicBool, Arc, OnceLock};
+use std::{
+    sync::{atomic::AtomicBool, Arc, OnceLock},
+    time::{Duration, Instant},
+};
 
 use bevy_ecs::{
     schedule::{IntoScheduleConfigs, Schedule, SystemSet},
@@ -52,6 +55,11 @@ pub enum MatchaSet {
     Flush,
     Extract,
 }
+
+/// How long after the last `Resized` event `render()` keeps forcing the
+/// synchronous fallback path (see the `render_driver`/resize-jitter note on
+/// [`UiEcs::last_resize`]).
+const RESIZE_SYNC_WINDOW: Duration = Duration::from_millis(200);
 
 /// Gate consulted by `create_surface`: `true` once surfaces may be created.
 #[derive(bevy_ecs::resource::Resource)]
@@ -104,6 +112,25 @@ where
     /// channel sender inside does not make `UiEcs` itself `!Sync` (accessed via
     /// `get_mut()` — no runtime locking occurs, same pattern as `model_receiver`).
     render_driver: parking_lot::Mutex<Box<dyn RenderDriver>>,
+
+    /// Set on every `WindowEvent::Resized`. While recent (within
+    /// `RESIZE_SYNC_WINDOW`), `render()` bypasses `render_driver` and calls
+    /// `render::build_and_present` synchronously instead.
+    ///
+    /// Root cause this works around: before M4, `get_surface_texture` (whose
+    /// lazy reconfigure-on-`Outdated` is the *only* place the swapchain is
+    /// resized — see `WindowSurface::get_surface_texture`) and `present()` ran
+    /// back-to-back on the main thread, so the acquired texture was presented
+    /// at (almost) the size it was acquired at. M4 inserted a channel hop plus
+    /// encode/submit between those two steps, and the `is_busy` coalescing
+    /// guard lets several more `Resized` deltas land on the main thread while a
+    /// frame is in flight. During a continuous drag-resize this grows the gap
+    /// between "acquired at size A" and "presented while the OS window is
+    /// already size D", which the compositor bridges by stretching — the
+    /// jitter. Forcing the same-thread synchronous path during (and briefly
+    /// after) a resize closes that gap back to ~0, matching pre-M4 behaviour,
+    /// while steady-state (non-resize) frames keep the async `ThreadDriver`.
+    last_resize: Option<Instant>,
 }
 
 impl<M, F> UiEcs<M, F>
@@ -193,6 +220,7 @@ where
             wake_pending,
             proxy_slot,
             render_driver: parking_lot::Mutex::new(Box::new(ThreadDriver::default())),
+            last_resize: None,
         }
     }
 
@@ -423,7 +451,18 @@ where
         }
 
         self.render_schedule.run(&mut self.world);
-        if let Some(snapshot) = self.build_snapshot(window_id) {
+        let Some(snapshot) = self.build_snapshot(window_id) else {
+            return;
+        };
+
+        let is_resizing = self
+            .last_resize
+            .is_some_and(|t| t.elapsed() < RESIZE_SYNC_WINDOW);
+        if is_resizing {
+            // See `last_resize` doc comment: close the acquire-to-present gap
+            // during a live resize by staying on the main thread.
+            crate::render::build_and_present(snapshot);
+        } else {
             self.render_driver.get_mut().dispatch(snapshot);
         }
     }
@@ -437,7 +476,12 @@ where
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized { inner_size, .. } => {
-                // Surface reconfiguration lands in a later milestone; log for now.
+                // Surface reconfiguration itself still lands in a later
+                // milestone (lazy Outdated-triggered reconfigure inside
+                // `get_surface_texture` is what resizes the swapchain); this
+                // timestamp only drives the resize-jitter workaround on
+                // `last_resize`.
+                self.last_resize = Some(Instant::now());
                 log::debug!("window resized to {inner_size:?}");
             }
             _ => {}

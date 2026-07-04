@@ -19,6 +19,7 @@ fn view(model: &Model, s: &mut Scope) {
 }
 
 fn main() {
+    env_logger::init();
     let app = UiEcs::new(Model { count: 0 }, view);
     let handle = app.model_handle();
 

@@ -48,6 +48,9 @@ web-time = { workspace = true }
 # Widget implementations are only needed by tests/examples. A dev-dependency
 # keeps the one-way crate rule (matcha-ecs-widgets -> matcha-ecs) intact.
 matcha-ecs-widgets = { workspace = true }
+# Examples call env_logger::init() so RUST_LOG surfaces wgpu validation errors,
+# which otherwise go through the `log` facade silently with no backend installed.
+env_logger = "^0.11.8"
 
 [features]
 default = ["winit"]

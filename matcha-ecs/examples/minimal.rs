@@ -17,6 +17,7 @@ fn view(_model: &(), s: &mut Scope) {
 }
 
 fn main() {
+    env_logger::init();
     Adapter::new(UiEcs::new((), view))
         .run()
         .expect("event loop failed");
