@@ -36,9 +36,6 @@ web-time = { workspace = true }
 
 # NOTE: the `cfg` expressions below must stay in sync with the `web` alias
 # defined in build.rs (`all(target_arch = "wasm32", target_os = "unknown")`).
-[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread"] }
-
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 wasm-bindgen-futures = { workspace = true }
 wasm-bindgen = { workspace = true }

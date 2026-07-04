@@ -7,9 +7,7 @@ publish = false
 [dependencies]
 # self
 renderer = { workspace = true }
-utils = { workspace = true }
 gpu-utils = { workspace = true }
-shared-buffer = { workspace = true }
 matcha-window = { workspace = true }
 
 # ecs
@@ -17,8 +15,6 @@ bevy_ecs = "0.18.1"
 bevy_tasks = "0.18.1"
 
 # async runtime, utility
-tokio = { workspace = true }
-async-trait = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
 

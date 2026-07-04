@@ -14,7 +14,6 @@ dashmap = { workspace = true }
 fxhash = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
-tokio = { workspace = true }
 bytemuck = { workspace = true }
 
 # uuid (v4) needs an explicit RNG source on wasm; route it through

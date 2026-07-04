@@ -7,11 +7,10 @@
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    mpsc, Arc,
 };
 
 use bevy_ecs::resource::Resource;
-use tokio::sync::mpsc;
 
 /// World-resource wrapper for the user's model type `M`.
 ///
@@ -34,7 +33,7 @@ pub struct ModelResource<M: Send + Sync + 'static>(pub M);
 /// before the event loop starts.
 #[derive(Resource)]
 pub struct ModelHandle<M: 'static> {
-    sender: mpsc::UnboundedSender<Box<dyn FnOnce(&mut M) + Send>>,
+    sender: mpsc::Sender<Box<dyn FnOnce(&mut M) + Send>>,
     wake_pending: Arc<AtomicBool>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
@@ -51,7 +50,7 @@ impl<M: 'static> Clone for ModelHandle<M> {
 
 impl<M: 'static> ModelHandle<M> {
     pub(crate) fn new(
-        sender: mpsc::UnboundedSender<Box<dyn FnOnce(&mut M) + Send>>,
+        sender: mpsc::Sender<Box<dyn FnOnce(&mut M) + Send>>,
         wake_pending: Arc<AtomicBool>,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {

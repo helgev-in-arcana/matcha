@@ -4,7 +4,6 @@ compile_error!("feature \"winit\" and feature \"baseview\" cannot be enabled at 
 pub mod adapter;
 pub mod application;
 pub mod event;
-// pub mod runtime;
 pub mod window;
 
 #[cfg(feature = "winit")]

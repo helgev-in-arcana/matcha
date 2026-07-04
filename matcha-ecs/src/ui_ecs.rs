@@ -1,7 +1,9 @@
 //! `UiEcs`: the ECS-backed [`Application`] driver.
 //!
-//! Owns the ECS `World`, the frame schedules, and the async runtime. GPU init
-//! happens up front, a single window is created as the UI root on `resumed`,
+//! Owns the ECS `World` and the frame schedules (no async runtime of its own —
+//! T-1 removed the `tokio` dependency; GPU init blocks via
+//! `futures::executor::block_on` and the `bevy_tasks` pools are initialised
+//! explicitly up front). A single window is created as the UI root on `resumed`,
 //! and rendering runs synchronously on the main thread. From M2 on, the model
 //! lives in the world as a resource and [`ModelHandle::update`] calls queue
 //! mutations that are drained and re-viewed on `ui_command`. From M5 on,
@@ -9,13 +11,14 @@
 //! and applies the matched `Msg` to the model via a user-supplied `reducer`,
 //! reusing the same Phase B (re-view) + redraw path as the model queue.
 
-use std::sync::{atomic::AtomicBool, Arc, OnceLock};
+use std::sync::{atomic::AtomicBool, mpsc, Arc, OnceLock};
 
 use bevy_ecs::{
     schedule::{IntoScheduleConfigs, Schedule, SystemSet},
     system::{Query, Res, ResMut},
     world::World,
 };
+use bevy_tasks::{AsyncComputeTaskPool, ComputeTaskPool, TaskPoolBuilder};
 use gpu_utils::{
     gpu::{Gpu, GpuDescriptor},
     texture_atlas::TextureAtlas,
@@ -31,7 +34,6 @@ use matcha_window::{
     window::{Window as OsWindow, WindowConfig, WindowId},
 };
 use renderer::CoreRenderer;
-use tokio::sync::mpsc;
 
 use crate::{
     animation::{advance_tweens, FrameTime, Opacity, Tween},
@@ -93,15 +95,11 @@ where
     /// Phase C (animation, layout, flush, extract).
     render_schedule: Schedule,
 
-    /// Async runtime kept alive for the app's lifetime (used for GPU init now,
-    /// background tasks from a later milestone on).
-    _runtime: tokio::runtime::Runtime,
-
-    /// Receiver half of the model mutation queue. `UnboundedReceiver` is not
+    /// Receiver half of the model mutation queue. `mpsc::Receiver` is not
     /// `Sync`, so it is wrapped in a `Mutex` purely to make `UiEcs` itself
     /// `Sync` (accessed via `get_mut()` — no runtime locking occurs, same
     /// pattern as `matcha-tree/src/ui_tree.rs`).
-    model_receiver: parking_lot::Mutex<mpsc::UnboundedReceiver<Box<dyn FnOnce(&mut M) + Send>>>,
+    model_receiver: parking_lot::Mutex<mpsc::Receiver<Box<dyn FnOnce(&mut M) + Send>>>,
     wake_pending: Arc<AtomicBool>,
     /// Filled once in `init()` (the event loop proxy is unavailable before
     /// then). `ModelHandle::update` calls made earlier still queue correctly;
@@ -128,13 +126,23 @@ where
     /// to the model, the same way `ModelHandle::update` applies a queued
     /// mutation.
     pub fn new(model: M, view_fn: F, reducer: R) -> Self {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build tokio current-thread runtime");
+        // First-wins statics (T-1): initialise explicitly before any bevy_ecs
+        // system (e.g. a future `par_iter`) has a chance to lazily default-init
+        // `ComputeTaskPool` to an all-cores pool of its own choosing.
+        ComputeTaskPool::get_or_init(|| {
+            TaskPoolBuilder::new()
+                .num_threads(2)
+                .thread_name("matcha compute".into())
+                .build()
+        });
+        AsyncComputeTaskPool::get_or_init(|| {
+            TaskPoolBuilder::new()
+                .num_threads(2)
+                .thread_name("matcha async".into())
+                .build()
+        });
 
-        let gpu = runtime
-            .block_on(Gpu::new(GpuDescriptor::default()))
+        let gpu = futures::executor::block_on(Gpu::new(GpuDescriptor::default()))
             .expect("GPU initialisation failed");
         let (device, _queue) = gpu
             .context()
@@ -171,7 +179,7 @@ where
         world.insert_resource(HitTestCache::default());
         world.insert_resource(FrameTime(web_time::Instant::now()));
 
-        let (sender, receiver) = mpsc::unbounded_channel::<Box<dyn FnOnce(&mut M) + Send>>();
+        let (sender, receiver) = mpsc::channel::<Box<dyn FnOnce(&mut M) + Send>>();
         let wake_pending = Arc::new(AtomicBool::new(false));
         let proxy_slot: Arc<OnceLock<Box<dyn EventLoopProxy<Self>>>> = Arc::new(OnceLock::new());
         let wake: Arc<dyn Fn() + Send + Sync> = {
@@ -213,7 +221,6 @@ where
             reducer,
             model_update_schedule: Schedule::default(),
             render_schedule,
-            _runtime: runtime,
             model_receiver: parking_lot::Mutex::new(receiver),
             wake_pending,
             proxy_slot,

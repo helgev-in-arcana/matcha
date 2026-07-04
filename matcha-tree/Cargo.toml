@@ -12,7 +12,7 @@ gpu-utils = { workspace = true }
 shared-buffer = { workspace = true }
 
 # async runtime, utility
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 futures = { workspace = true }
 parking_lot = { workspace = true }
 
