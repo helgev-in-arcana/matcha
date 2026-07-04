@@ -4,8 +4,10 @@
 //! happens up front, a single window is created as the UI root on `resumed`,
 //! and rendering runs synchronously on the main thread. From M2 on, the model
 //! lives in the world as a resource and [`ModelHandle::update`] calls queue
-//! mutations that are drained and re-viewed on `ui_command`. Layout, input and
-//! a dedicated render thread arrive in later milestones.
+//! mutations that are drained and re-viewed on `ui_command`. From M5 on,
+//! `device_event` resolves clicks against the [`crate::input::HitTestCache`]
+//! and applies the matched `Msg` to the model via a user-supplied `reducer`,
+//! reusing the same Phase B (re-view) + redraw path as the model queue.
 
 use std::sync::{atomic::AtomicBool, Arc, OnceLock};
 
@@ -33,9 +35,11 @@ use tokio::sync::mpsc;
 
 use crate::{
     components::{
+        input::{Message, OnClick},
         view::ViewChildren,
         window::{Window as WindowComp, WindowBelonging},
     },
+    input::{resolve_click_target, update_hit_test_cache, HitTestCache},
     model::{ModelHandle, ModelResource},
     render::{extract_items, RenderDriver, RenderSnapshot, ThreadDriver},
     resources::{GpuResource, RenderWindowRoot, RendererResource},
@@ -68,15 +72,19 @@ pub enum UiCommand {
     ModelUpdated,
 }
 
-/// The ECS application driver, parameterised over the model type `M` and view
-/// function `F`.
-pub struct UiEcs<M, F>
+/// The ECS application driver, parameterised over the model type `M`, the
+/// click-message type `Msg`, the view function `F`, and the reducer `R` that
+/// applies a dispatched `Msg` to the model (`ECS_IMPLEMENTATION_PLAN.md` §6.2).
+pub struct UiEcs<M, Msg, F, R>
 where
     M: Send + Sync + 'static,
+    Msg: Message,
     F: Fn(&M, &mut Scope) + Send + Sync + 'static,
+    R: Fn(&mut M, Msg) + Send + Sync + 'static,
 {
     world: World,
     view_fn: F,
+    reducer: R,
 
     /// Phase A + B hook (model drain, re-run view). Empty for now; a future
     /// milestone may add systems here that must run before the drain.
@@ -106,15 +114,19 @@ where
     render_driver: parking_lot::Mutex<Box<dyn RenderDriver>>,
 }
 
-impl<M, F> UiEcs<M, F>
+impl<M, Msg, F, R> UiEcs<M, Msg, F, R>
 where
     M: Send + Sync + 'static,
+    Msg: Message,
     F: Fn(&M, &mut Scope) + Send + Sync + 'static,
+    R: Fn(&mut M, Msg) + Send + Sync + 'static,
 {
     /// Build a `UiEcs`: initialise the GPU, atlases and renderer, insert them
     /// (plus the initial model) as world resources, and wire the render
-    /// schedule.
-    pub fn new(model: M, view_fn: F) -> Self {
+    /// schedule. `reducer` applies a `Msg` dispatched by a click (`device_event`)
+    /// to the model, the same way `ModelHandle::update` applies a queued
+    /// mutation.
+    pub fn new(model: M, view_fn: F, reducer: R) -> Self {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -155,6 +167,7 @@ where
         });
         world.insert_resource(CanCreateSurface { flag: false });
         world.insert_resource(ModelResource(model));
+        world.insert_resource(HitTestCache::default());
 
         let (sender, receiver) = mpsc::unbounded_channel::<Box<dyn FnOnce(&mut M) + Send>>();
         let wake_pending = Arc::new(AtomicBool::new(false));
@@ -182,10 +195,12 @@ where
         render_schedule.add_systems(crate::layout::run_layout.in_set(MatchaSet::Layout));
         render_schedule
             .add_systems(crate::systems::invalidate_on_layout_change.in_set(MatchaSet::Flush));
+        render_schedule.add_systems(update_hit_test_cache.in_set(MatchaSet::Flush));
 
         Self {
             world,
             view_fn,
+            reducer,
             model_update_schedule: Schedule::default(),
             render_schedule,
             _runtime: runtime,
@@ -218,6 +233,13 @@ where
             }
         }
 
+        self.rerun_view_and_redraw();
+    }
+
+    /// Phase B (re-run the view against the current model) + request a
+    /// redraw on every window. Shared by [`Self::process_model_update`] (model
+    /// queue drain) and [`Self::dispatch_click`] (click -> reducer).
+    fn rerun_view_and_redraw(&mut self) {
         let Some(root) = self.world.get_resource::<RenderWindowRoot>() else {
             return;
         };
@@ -233,6 +255,33 @@ where
                 window.window.request_redraw();
             }
         });
+    }
+
+    /// Resolve a click at `pos` (window space) against the `HitTestCache`,
+    /// apply the matched `Msg` to the model via `reducer`, and re-view +
+    /// redraw. A no-op if nothing hit-testable with an assigned message was
+    /// under the pointer.
+    fn dispatch_click(&mut self, pos: [f32; 2]) {
+        let Some(entity) = ({
+            let cache = self.world.resource::<HitTestCache>();
+            resolve_click_target::<Msg>(&self.world, cache, pos)
+        }) else {
+            return;
+        };
+        let Some(msg) = self
+            .world
+            .get::<OnClick<Msg>>(entity)
+            .and_then(|on_click| on_click.0)
+        else {
+            return;
+        };
+
+        {
+            let mut model = self.world.resource_mut::<ModelResource<M>>();
+            (self.reducer)(&mut model.0, msg);
+        }
+
+        self.rerun_view_and_redraw();
     }
 
     /// Build a [`RenderSnapshot`] for `window_id`: acquire the surface texture on
@@ -295,10 +344,12 @@ where
     }
 }
 
-impl<M, F> Application for UiEcs<M, F>
+impl<M, Msg, F, R> Application for UiEcs<M, Msg, F, R>
 where
     M: Send + Sync + 'static,
+    Msg: Message,
     F: Fn(&M, &mut Scope) + Send + Sync + 'static,
+    R: Fn(&mut M, Msg) + Send + Sync + 'static,
 {
     type Command = UiCommand;
 
@@ -452,9 +503,13 @@ where
         &mut self,
         _event_loop: &impl EventLoop,
         _window_id: WindowId,
-        _event: DeviceEvent,
+        event: DeviceEvent,
     ) {
-        // Input handling arrives in M5.
+        // `on_click` only fires on the primary-button press edge (not every
+        // move/release), so a hit is always a genuine new click.
+        if event.on_click(|_count| ()).is_some() {
+            self.dispatch_click(event.mouse_viewport_position());
+        }
     }
 
     fn ui_command(&mut self, _event_loop: &impl EventLoop, command: Self::Command) {

@@ -20,7 +20,8 @@ fn view(model: &Model, s: &mut Scope) {
 
 fn main() {
     env_logger::init();
-    let app = UiEcs::new(Model { count: 0 }, view);
+    // No clickable widgets in this demo, so `Msg = ()` and the reducer is a no-op.
+    let app = UiEcs::new(Model { count: 0 }, view, |_model: &mut Model, _msg: ()| {});
     let handle = app.model_handle();
 
     std::thread::spawn(move || loop {

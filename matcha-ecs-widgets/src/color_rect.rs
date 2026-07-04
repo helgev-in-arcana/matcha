@@ -78,8 +78,9 @@ impl ColorRect {
 
 /// Build a `RenderItem` that rasterises a `w`×`h` solid `color` quad into the
 /// colour atlas and returns a textured `RenderNode` (positioned later by the
-/// entity's `GlobalTransform`).
-fn make_render_item(w: f32, h: f32, color: [f32; 4]) -> RenderItem {
+/// entity's `GlobalTransform`). Shared with `Button`, which is also a solid
+/// rect until M6 adds label drawing.
+pub(crate) fn solid_rect_render_item(w: f32, h: f32, color: [f32; 4]) -> RenderItem {
     RenderItem::new(move |ctx: &RenderCtx| {
         let node = RenderNode::new();
         if w <= 0.0 || h <= 0.0 {
@@ -154,7 +155,7 @@ impl Widget for ColorRect {
             self.geometry(),
             RectColor(self.color),
             LayoutDispatch::of::<RectGeometry>(),
-            make_render_item(self.w, self.h, self.color),
+            solid_rect_render_item(self.w, self.h, self.color),
         )
     }
 
@@ -169,7 +170,7 @@ impl Widget for ColorRect {
         }
         // Rebuild the cached render node only when a draw-relevant prop changed.
         if changed {
-            let item = make_render_item(self.w, self.h, self.color);
+            let item = solid_rect_render_item(self.w, self.h, self.color);
             if let Some(mut existing) = entity.get_mut::<RenderItem>() {
                 *existing = item;
             }

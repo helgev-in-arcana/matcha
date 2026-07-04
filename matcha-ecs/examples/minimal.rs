@@ -18,7 +18,8 @@ fn view(_model: &(), s: &mut Scope) {
 
 fn main() {
     env_logger::init();
-    Adapter::new(UiEcs::new((), view))
+    // No clickable widgets in this demo, so `Msg = ()` and the reducer is a no-op.
+    Adapter::new(UiEcs::new((), view, |_model: &mut (), _msg: ()| {}))
         .run()
         .expect("event loop failed");
 }
