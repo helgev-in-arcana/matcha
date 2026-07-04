@@ -4,7 +4,6 @@ members = [
     "matcha-tree",
     "matcha-tree-widgets",
     "renderer",
-    "text-render",
     "utils",
     "gpu-utils",
     "shared-buffer",
