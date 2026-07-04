@@ -34,6 +34,7 @@ use renderer::CoreRenderer;
 use tokio::sync::mpsc;
 
 use crate::{
+    animation::{advance_tweens, FrameTime, Opacity, Tween},
     components::{
         input::{Message, OnClick},
         view::ViewChildren,
@@ -43,7 +44,7 @@ use crate::{
     model::{ModelHandle, ModelResource},
     render::{extract_items, RenderDriver, RenderSnapshot, ThreadDriver},
     resources::{GpuResource, RenderWindowRoot, RendererResource},
-    view::{run_view, Scope},
+    view::{despawn_completed_exits, run_view, Scope},
 };
 
 /// Ordering buckets for the render schedule (Phase C). Bodies are empty for now;
@@ -168,6 +169,7 @@ where
         world.insert_resource(CanCreateSurface { flag: false });
         world.insert_resource(ModelResource(model));
         world.insert_resource(HitTestCache::default());
+        world.insert_resource(FrameTime(web_time::Instant::now()));
 
         let (sender, receiver) = mpsc::unbounded_channel::<Box<dyn FnOnce(&mut M) + Send>>();
         let wake_pending = Arc::new(AtomicBool::new(false));
@@ -192,9 +194,17 @@ where
             )
                 .chain(),
         );
+        render_schedule.add_systems(
+            (advance_tweens::<Opacity>, despawn_completed_exits)
+                .chain()
+                .in_set(MatchaSet::Animation),
+        );
         render_schedule.add_systems(crate::layout::run_layout.in_set(MatchaSet::Layout));
         render_schedule
             .add_systems(crate::systems::invalidate_on_layout_change.in_set(MatchaSet::Flush));
+        render_schedule.add_systems(
+            crate::systems::invalidate_on_animated_opacity_change.in_set(MatchaSet::Flush),
+        );
         render_schedule.add_systems(update_hit_test_cache.in_set(MatchaSet::Flush));
 
         Self {
@@ -473,9 +483,31 @@ where
             return;
         }
 
+        self.world
+            .insert_resource(FrameTime(web_time::Instant::now()));
         self.render_schedule.run(&mut self.world);
         if let Some(snapshot) = self.build_snapshot(window_id) {
             self.render_driver.get_mut().dispatch(snapshot);
+        }
+
+        // Keep redrawing while any `Tween<Opacity>` is in flight (no dedicated
+        // `RedrawScheduler` resource — a direct query is simpler and this is
+        // the only `Animatable` type wired up so far).
+        if self
+            .world
+            .query::<&Tween<Opacity>>()
+            .iter(&self.world)
+            .next()
+            .is_some()
+        {
+            if let Some(root) = self.world.get_resource::<RenderWindowRoot>() {
+                if root.window_id == window_id {
+                    let root_entity = root.entity;
+                    if let Some(window_comp) = self.world.get::<WindowComp>(root_entity) {
+                        window_comp.window.request_redraw();
+                    }
+                }
+            }
         }
     }
 

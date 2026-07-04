@@ -1,3 +1,4 @@
+pub mod animation;
 pub mod components;
 pub mod input;
 pub mod layout;

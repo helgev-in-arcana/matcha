@@ -28,18 +28,23 @@ use nalgebra::Matrix4;
 use parking_lot::Mutex;
 use renderer::{CoreRenderer, RenderNode};
 
-use crate::components::{
-    layout::GlobalTransform,
-    render::{RenderCtx, RenderItem},
-    view::ViewChildren,
+use crate::{
+    animation::{Animated, Opacity},
+    components::{
+        layout::GlobalTransform,
+        render::{RenderCtx, RenderItem},
+        view::ViewChildren,
+    },
 };
 
 /// One drawable entity captured for a frame: the shared node cache, its deferred
-/// builder, and its window-space transform (already composed by M3 layout).
+/// builder, its window-space transform (already composed by M3 layout), and its
+/// current opacity (M7; `1.0` if the entity has no `Animated<Opacity>`).
 pub struct RenderItemSnapshot {
     pub cache: Arc<Mutex<Option<Arc<RenderNode>>>>,
     pub builder: Arc<dyn Fn(&RenderCtx) -> RenderNode + Send + Sync>,
     pub transform: Matrix4<f32>,
+    pub opacity: f32,
 }
 
 /// Everything a [`RenderDriver`] needs to draw one window's frame. Owns the
@@ -79,10 +84,15 @@ fn extract_recursive(world: &World, entity: Entity, out: &mut Vec<RenderItemSnap
             world.get::<RenderItem>(child),
             world.get::<GlobalTransform>(child),
         ) {
+            let opacity = world
+                .get::<Animated<Opacity>>(child)
+                .map(|a| a.0 .0)
+                .unwrap_or(1.0);
             out.push(RenderItemSnapshot {
                 cache: item.cache.clone(),
                 builder: item.builder.clone(),
                 transform: transform.affine,
+                opacity,
             });
         }
         extract_recursive(world, child, out);
@@ -106,15 +116,17 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
         stencil_atlas,
     } = snapshot;
 
-    let ctx = RenderCtx {
-        device: &device,
-        queue: &queue,
-        texture_atlas: &texture_atlas,
-        stencil_atlas: &stencil_atlas,
-    };
-
     let mut nodes: Vec<(Arc<RenderNode>, Matrix4<f32>)> = Vec::with_capacity(items.len());
     for item in &items {
+        // Opacity varies per item (M7), so `RenderCtx` is built fresh per item
+        // rather than shared across the loop.
+        let ctx = RenderCtx {
+            device: &device,
+            queue: &queue,
+            texture_atlas: &texture_atlas,
+            stencil_atlas: &stencil_atlas,
+            opacity: item.opacity,
+        };
         let node = build_node(&item.cache, &item.builder, &ctx);
         nodes.push((node, item.transform));
     }

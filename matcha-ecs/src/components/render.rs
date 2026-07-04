@@ -21,6 +21,11 @@ pub struct RenderCtx<'a> {
     pub queue: &'a wgpu::Queue,
     pub texture_atlas: &'a TextureAtlas,
     pub stencil_atlas: &'a TextureAtlas,
+    /// The entity's current `Animated<Opacity>` (M7), or `1.0` if it doesn't
+    /// carry one. Colours are baked into the atlas at build time (there is no
+    /// per-instance alpha uniform at draw time), so a builder that wants to
+    /// fade must multiply this into its vertex colours itself.
+    pub opacity: f32,
 }
 
 /// A cached, deferred render-tree source for one widget entity.

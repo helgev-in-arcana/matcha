@@ -18,6 +18,7 @@ nalgebra = { features = ["bytemuck"], workspace = true }
 
 # other
 log = { workspace = true }
+web-time = { workspace = true }
 
 [lints]
 workspace = true

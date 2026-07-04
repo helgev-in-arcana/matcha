@@ -6,6 +6,8 @@
 //! since it has none. Its [`RenderItem`] rasterises a single-colour quad into
 //! the texture atlas.
 
+use std::time::Duration;
+
 use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, entity::Entity,
     world::EntityWorldMut,
@@ -18,6 +20,7 @@ use renderer::{
 };
 
 use matcha_ecs::{
+    animation::{Animated, Easing, ExitTransition, Opacity, Target, ToBeDespawn, Tween},
     components::{
         render::{RenderCtx, RenderItem},
         view::Key,
@@ -43,6 +46,15 @@ pub struct ColorRect {
     w: f32,
     h: f32,
     color: [f32; 4],
+    /// If set, this rect fades in from transparent when first spawned
+    /// (`ECS_ARCHITECTURE.md` §9, M7 — baked directly into `bundle()`'s
+    /// initial `Animated<Opacity>`/`Tween<Opacity>` mismatch; there is no
+    /// persisted "enter transition" component).
+    enter_fade: Option<(Duration, Easing)>,
+    /// If set, this rect fades out instead of vanishing immediately when
+    /// pruned from the view (`view.rs`'s `begin_or_continue_exit` reads
+    /// the resulting `ExitTransition<Opacity>`).
+    exit_fade: Option<(Duration, Easing)>,
 }
 
 impl ColorRect {
@@ -53,12 +65,27 @@ impl ColorRect {
             w,
             h,
             color: [1.0, 1.0, 1.0, 1.0],
+            enter_fade: None,
+            exit_fade: None,
         }
     }
 
     /// Set the RGBA fill colour (components in `0.0..=1.0`).
     pub fn color(mut self, color: [f32; 4]) -> Self {
         self.color = color;
+        self
+    }
+
+    /// Fade in from transparent over `duration` when first spawned.
+    pub fn enter_fade(mut self, duration: Duration, easing: Easing) -> Self {
+        self.enter_fade = Some((duration, easing));
+        self
+    }
+
+    /// Fade out over `duration` instead of vanishing immediately when pruned
+    /// from the view.
+    pub fn exit_fade(mut self, duration: Duration, easing: Easing) -> Self {
+        self.exit_fade = Some((duration, easing));
         self
     }
 
@@ -101,6 +128,12 @@ pub(crate) fn solid_rect_render_item(w: f32, h: f32, color: [f32; 4]) -> RenderI
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("ColorRect Render Encoder"),
             });
+
+        // Colour is baked into the atlas texture at build time (no per-instance
+        // alpha uniform at draw time), so a live opacity animation (M7) must
+        // multiply it in here and rely on `RenderItem::invalidate()` to force
+        // a rebuild on every frame the opacity actually changes.
+        let color = [color[0], color[1], color[2], color[3] * ctx.opacity];
 
         let target_size = region.texture_size();
         let target_format = region.format();
@@ -151,12 +184,37 @@ impl Widget for ColorRect {
     }
 
     fn bundle(&self) -> impl Bundle {
+        let initial_opacity = if self.enter_fade.is_some() { 0.0 } else { 1.0 };
+
         (
             self.geometry(),
             RectColor(self.color),
             LayoutDispatch::of::<RectGeometry>(),
             solid_rect_render_item(self.w, self.h, self.color),
+            Target(Opacity(1.0)),
+            Animated(Opacity(initial_opacity)),
         )
+    }
+
+    fn after_spawn(&self, entity: &mut EntityWorldMut) {
+        // `Tween<Opacity>`/`ExitTransition<Opacity>` are SparseSet and only
+        // sometimes wanted, so they're attached here rather than as part of
+        // `bundle()` (`Option<T>` isn't itself a `Bundle`).
+        if let Some((duration, easing)) = self.enter_fade {
+            entity.insert(Tween::<Opacity> {
+                from: Opacity(0.0),
+                start: web_time::Instant::now(),
+                duration,
+                easing,
+            });
+        }
+        if let Some((duration, easing)) = self.exit_fade {
+            entity.insert(ExitTransition::<Opacity> {
+                to: Opacity(0.0),
+                duration,
+                easing,
+            });
+        }
     }
 
     fn patch(&self, entity: &mut EntityWorldMut) {
@@ -173,6 +231,28 @@ impl Widget for ColorRect {
             let item = solid_rect_render_item(self.w, self.h, self.color);
             if let Some(mut existing) = entity.get_mut::<RenderItem>() {
                 *existing = item;
+            }
+        }
+
+        // Revival (M7): this entity was mid-exit-fade and has just been
+        // re-declared by the view. Reverse back toward full visibility,
+        // reusing the exit fade's own duration/easing. `view.rs` removes
+        // `ToBeDespawn` right after `patch` returns.
+        if entity.get::<ToBeDespawn>().is_some() {
+            if let Some(exit) = entity.get::<ExitTransition<Opacity>>().copied() {
+                let current = entity
+                    .get::<Animated<Opacity>>()
+                    .copied()
+                    .unwrap_or(Animated(Opacity(1.0)));
+                entity.insert((
+                    Target(Opacity(1.0)),
+                    Tween::<Opacity> {
+                        from: current.0,
+                        start: web_time::Instant::now(),
+                        duration: exit.duration,
+                        easing: exit.easing,
+                    },
+                ));
             }
         }
     }
