@@ -10,7 +10,6 @@
 use std::sync::{atomic::AtomicBool, Arc, OnceLock};
 
 use bevy_ecs::{
-    entity::Entity,
     schedule::{IntoScheduleConfigs, Schedule, SystemSet},
     system::{Query, Res, ResMut},
     world::World,
@@ -29,17 +28,16 @@ use matcha_window::{
     },
     window::{Window as OsWindow, WindowConfig, WindowId},
 };
-use renderer::{CoreRenderer, RenderNode};
+use renderer::CoreRenderer;
 use tokio::sync::mpsc;
 
 use crate::{
     components::{
-        layout::GlobalTransform,
-        render::{RenderCtx, RenderItem},
         view::ViewChildren,
         window::{Window as WindowComp, WindowBelonging},
     },
     model::{ModelHandle, ModelResource},
+    render::{extract_items, RenderDriver, RenderSnapshot, ThreadDriver},
     resources::{GpuResource, RenderWindowRoot, RendererResource},
     view::{run_view, Scope},
 };
@@ -100,6 +98,12 @@ where
     /// then). `ModelHandle::update` calls made earlier still queue correctly;
     /// `init()` self-heals by waking immediately if a mutation is pending.
     proxy_slot: Arc<OnceLock<Box<dyn EventLoopProxy<Self>>>>,
+
+    /// Turns per-frame snapshots into pixels. `ThreadDriver` by default (one
+    /// worker thread per window); wrapped in a `Mutex` only so the non-`Sync`
+    /// channel sender inside does not make `UiEcs` itself `!Sync` (accessed via
+    /// `get_mut()` — no runtime locking occurs, same pattern as `model_receiver`).
+    render_driver: parking_lot::Mutex<Box<dyn RenderDriver>>,
 }
 
 impl<M, F> UiEcs<M, F>
@@ -188,6 +192,7 @@ where
             model_receiver: parking_lot::Mutex::new(receiver),
             wake_pending,
             proxy_slot,
+            render_driver: parking_lot::Mutex::new(Box::new(ThreadDriver::default())),
         }
     }
 
@@ -230,21 +235,19 @@ where
         });
     }
 
-    /// Walk the window root's view tree and present one frame.
-    fn present(&mut self, window_id: WindowId) {
-        let Some(root) = self.world.get_resource::<RenderWindowRoot>() else {
-            return;
-        };
-        // M1/M2 are single-window; ignore redraws for any other id.
+    /// Build a [`RenderSnapshot`] for `window_id`: acquire the surface texture on
+    /// the main thread, extract the drawable items, and clone the GPU resources.
+    /// Returns `None` when the frame should be skipped (wrong window, no GPU/root,
+    /// or the surface could not yield a texture this frame).
+    fn build_snapshot(&mut self, window_id: WindowId) -> Option<RenderSnapshot> {
+        let root = self.world.get_resource::<RenderWindowRoot>()?;
+        // M1–M4 are single-window; ignore redraws for any other id.
         if root.window_id != window_id {
-            return;
+            return None;
         }
         let root_entity = root.entity;
 
-        let (device, queue) = match self.world.resource::<GpuResource>().gpu.context() {
-            Some(dq) => dq,
-            None => return,
-        };
+        let (device, queue) = self.world.resource::<GpuResource>().gpu.context()?;
         let (core, texture_atlas, stencil_atlas) = {
             let r = self.world.resource::<RendererResource>();
             (
@@ -254,71 +257,41 @@ where
             )
         };
 
-        let ctx = RenderCtx {
-            device: &device,
-            queue: &queue,
-            texture_atlas: &texture_atlas,
-            stencil_atlas: &stencil_atlas,
-        };
-        let mut pseudo_root = RenderNode::new();
-        collect_render_nodes(&self.world, root_entity, &ctx, &mut pseudo_root);
-
-        let Some(window_comp) = self.world.get::<WindowComp>(root_entity) else {
-            return;
-        };
+        let window_comp = self.world.get::<WindowComp>(root_entity)?;
         let window = &window_comp.window;
         let inner = window.inner_size();
-        let size = [inner[0] as f32, inner[1] as f32];
+        let viewport_size = [inner[0] as f32, inner[1] as f32];
         let format = window.format();
 
-        let _ = window
-            .surface()
-            .rendering_with_surface_texture(&device, |view, _texture| {
-                let _ = core.render(
-                    &device,
-                    &queue,
-                    format,
-                    view,
-                    size,
-                    &pseudo_root,
-                    wgpu::Color {
-                        r: 0.1,
-                        g: 0.1,
-                        b: 0.1,
-                        a: 1.0,
-                    },
-                    &texture_atlas.texture(),
-                    &stencil_atlas.texture(),
-                );
-            });
-    }
-}
+        let surface_texture = match window.surface().get_surface_texture(&device) {
+            Ok(Some(texture)) => texture,
+            Ok(None) => return None,
+            Err(e) => {
+                log::warn!("failed to acquire surface texture for {window_id:?}: {e}");
+                return None;
+            }
+        };
 
-/// Depth-first walk of `entity`'s view children, appending each entity's cached
-/// `RenderNode` (built on demand) to `out` under its `GlobalTransform`.
-///
-/// M1 places every widget with an absolute transform, so flattening the tree
-/// into a single pseudo root is correct. Nested transforms arrive with M3.
-fn collect_render_nodes(world: &World, entity: Entity, ctx: &RenderCtx, out: &mut RenderNode) {
-    let Some(view_children) = world.get::<ViewChildren>(entity) else {
-        return;
-    };
-    let children: Vec<Entity> = view_children.slots.iter().map(|(_, e)| *e).collect();
+        let items = extract_items(&self.world, root_entity);
 
-    for child in children {
-        if let (Some(item), Some(transform)) = (
-            world.get::<RenderItem>(child),
-            world.get::<GlobalTransform>(child),
-        ) {
-            let node = {
-                let mut cache = item.cache.lock();
-                cache
-                    .get_or_insert_with(|| Arc::new((item.builder)(ctx)))
-                    .clone()
-            };
-            out.push_child(node, transform.affine);
-        }
-        collect_render_nodes(world, child, ctx, out);
+        Some(RenderSnapshot {
+            window_id,
+            surface_texture,
+            format,
+            viewport_size,
+            load_color: wgpu::Color {
+                r: 0.1,
+                g: 0.1,
+                b: 0.1,
+                a: 1.0,
+            },
+            items,
+            device,
+            queue,
+            core,
+            texture_atlas,
+            stencil_atlas,
+        })
     }
 }
 
@@ -435,8 +408,24 @@ where
     }
 
     fn render(&mut self, window_id: WindowId) {
+        // Coalesce: if the previous frame for this window is still encoding on its
+        // render thread, request another redraw and drop this one.
+        if self.render_driver.get_mut().is_busy(window_id) {
+            if let Some(root) = self.world.get_resource::<RenderWindowRoot>() {
+                if root.window_id == window_id {
+                    let root_entity = root.entity;
+                    if let Some(window_comp) = self.world.get::<WindowComp>(root_entity) {
+                        window_comp.window.request_redraw();
+                    }
+                }
+            }
+            return;
+        }
+
         self.render_schedule.run(&mut self.world);
-        self.present(window_id);
+        if let Some(snapshot) = self.build_snapshot(window_id) {
+            self.render_driver.get_mut().dispatch(snapshot);
+        }
     }
 
     fn window_event(
