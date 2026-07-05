@@ -100,6 +100,7 @@ struct StencilData {
 const _: () = {
     assert!(std::mem::size_of::<InstanceData>() == 96);
     assert!(std::mem::size_of::<StencilData>() == 176);
+    assert!(std::mem::size_of::<RenderPushConstants>() == 80);
 };
 
 #[repr(C)]

@@ -352,6 +352,20 @@ impl Text {
             color: self.color,
         }
     }
+
+    /// Build a fresh `RenderItem` for `entity`, fetching (or lazily
+    /// inserting) `FontCtx` and reusing `entity`'s existing `TextWrapWidth`
+    /// cell. Shared by `after_spawn` and `patch`, the two places a `Text`
+    /// entity's `RenderItem` gets (re)built.
+    fn rebuild_render_item(&self, entity: &mut EntityWorldMut) -> RenderItem {
+        let font_ctx = entity.world_scope(|world| world.get_resource_or_insert_with(FontCtx::new).clone());
+        let wrap_width = entity
+            .get::<TextWrapWidth>()
+            .expect("bundle() inserted TextWrapWidth")
+            .0
+            .clone();
+        text_render_item(font_ctx, wrap_width, self.content.clone(), self.font_size, self.color)
+    }
 }
 
 impl Widget for Text {
@@ -376,13 +390,7 @@ impl Widget for Text {
     }
 
     fn after_spawn(&self, entity: &mut EntityWorldMut) {
-        let font_ctx = entity.world_scope(|world| world.get_resource_or_insert_with(FontCtx::new).clone());
-        let wrap_width = entity
-            .get::<TextWrapWidth>()
-            .expect("bundle() just inserted TextWrapWidth")
-            .0
-            .clone();
-        let item = text_render_item(font_ctx, wrap_width, self.content.clone(), self.font_size, self.color);
+        let item = self.rebuild_render_item(entity);
         entity.insert(item);
 
         if let Some((duration, easing)) = self.enter_fade {
@@ -411,13 +419,7 @@ impl Widget for Text {
             changed |= s.set_if_neq(self.style());
         }
         if changed {
-            let font_ctx = entity.world_scope(|world| world.get_resource_or_insert_with(FontCtx::new).clone());
-            let wrap_width = entity
-                .get::<TextWrapWidth>()
-                .expect("bundle() inserted TextWrapWidth")
-                .0
-                .clone();
-            let item = text_render_item(font_ctx, wrap_width, self.content.clone(), self.font_size, self.color);
+            let item = self.rebuild_render_item(entity);
             if let Some(mut existing) = entity.get_mut::<RenderItem>() {
                 *existing = item;
             }
