@@ -76,7 +76,16 @@ struct VertexOutput {
 @group(1) @binding(1) var<storage, read> all_stencils: array<StencilData>;
 @group(1) @binding(2) var<storage, read_write> visible_instances: array<u32>;
 
-var<push_constant> normalize_matrix: mat4x4<f32>;
+// Half a texel, in normalized UV units, for each atlas — see the Rust-side
+// `RenderPushConstants` doc comment for why the fragment shader needs this
+// (avoiding bilinear bleed with the zero-initialised margin just outside
+// each atlas region's usable rectangle).
+struct Pc {
+    normalize_matrix: mat4x4<f32>,
+    texture_atlas_half_texel: vec2<f32>,
+    stencil_atlas_half_texel: vec2<f32>,
+};
+var<push_constant> pc: Pc;
 
 // vertices (y-axis is down, matches public UI unit-quad ordering):
 // 0 - 2
@@ -114,7 +123,7 @@ fn vertex_main(
 
     // vertex position
     let pre = instance.viewport_position * VERTICES[vertex_index];
-    let vertex_position = normalize_matrix * pre;
+    let vertex_position = pc.normalize_matrix * pre;
     let texture_uv = instance.in_atlas_offset + instance.in_atlas_size * UVS[vertex_index];
 
     // stencil uv
@@ -161,15 +170,20 @@ fn fragment_main(
 ) -> @location(0) vec4<f32> {
     let use_stencil = use_stencil_num != 0u;
 
-    // clump texture_uv and stencil_uv to the texture atlas bounds
+    // Clamp texture_uv/stencil_uv to the atlas bounds, inset by half a texel
+    // on each side. Clamping to the exact bounds edge would let bilinear
+    // filtering sample exactly halfway between the last real texel and the
+    // next (zero-initialised margin) texel, bleeding the margin's
+    // transparent black into every atlas region's border. Insetting to the
+    // last texel's centre instead guarantees a pure sample there.
     let clamped_texture_uv = vec2<f32>(
-        clamp(texture_uv.x, texture_atlas_bounds_x[0], texture_atlas_bounds_x[1]),
-        clamp(texture_uv.y, texture_atlas_bounds_y[0], texture_atlas_bounds_y[1])
+        clamp(texture_uv.x, texture_atlas_bounds_x[0] + pc.texture_atlas_half_texel.x, texture_atlas_bounds_x[1] - pc.texture_atlas_half_texel.x),
+        clamp(texture_uv.y, texture_atlas_bounds_y[0] + pc.texture_atlas_half_texel.y, texture_atlas_bounds_y[1] - pc.texture_atlas_half_texel.y)
     );
 
     let clamped_stencil_uv = vec2<f32>(
-        clamp(stencil_uv.x, stencil_atlas_bounds_x[0], stencil_atlas_bounds_x[1]),
-        clamp(stencil_uv.y, stencil_atlas_bounds_y[0], stencil_atlas_bounds_y[1])
+        clamp(stencil_uv.x, stencil_atlas_bounds_x[0] + pc.stencil_atlas_half_texel.x, stencil_atlas_bounds_x[1] - pc.stencil_atlas_half_texel.x),
+        clamp(stencil_uv.y, stencil_atlas_bounds_y[0] + pc.stencil_atlas_half_texel.y, stencil_atlas_bounds_y[1] - pc.stencil_atlas_half_texel.y)
     );
 
     let texture_color = textureSample(

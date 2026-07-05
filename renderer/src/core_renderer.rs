@@ -110,6 +110,22 @@ struct CullingPushConstants {
     _pad: [u32; 3],
 }
 
+/// Half a texel, in normalized UV units, for each atlas. Used by the render
+/// shader to inset the UV clamp bounds so that sampling at the very edge of
+/// an atlas region's usable (non-margin) rectangle can never land exactly on
+/// the boundary between the last real texel and the next (zero-initialised
+/// margin) texel — bilinear filtering would blend 50/50 with that margin
+/// texel there, bleeding the background colour into the edge of every
+/// texture/stencil sample. Insetting to the last texel's *centre* instead of
+/// its edge guarantees a pure, unblended sample.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct RenderPushConstants {
+    normalize_matrix: nalgebra::Matrix4<f32>,
+    texture_atlas_half_texel: [f32; 2],
+    stencil_atlas_half_texel: [f32; 2],
+}
+
 pub struct CoreRenderer {
     inner: parking_lot::RwLock<CoreRendererInner>,
 }
@@ -460,7 +476,7 @@ impl CoreRendererInner {
             bind_group_layouts: &[texture_bind_group_layout, data_bind_group_layout],
             push_constant_ranges: &[wgpu::PushConstantRange {
                 stages: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                range: 0..std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32,
+                range: 0..std::mem::size_of::<RenderPushConstants>() as u32,
             }],
         });
 
@@ -770,6 +786,19 @@ impl CoreRendererInner {
             instance_count: instances.len() as u32,
             _pad: [0; 3],
         };
+        let texture_atlas_size = texture_atlas.size();
+        let stencil_atlas_size = stencil_atlas.size();
+        let render_pc = RenderPushConstants {
+            normalize_matrix,
+            texture_atlas_half_texel: [
+                0.5 / texture_atlas_size.width as f32,
+                0.5 / texture_atlas_size.height as f32,
+            ],
+            stencil_atlas_half_texel: [
+                0.5 / stencil_atlas_size.width as f32,
+                0.5 / stencil_atlas_size.height as f32,
+            ],
+        };
 
         // culling compute pass
         {
@@ -834,7 +863,7 @@ impl CoreRendererInner {
             render_pass.set_push_constants(
                 wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 0,
-                bytemuck::cast_slice(normalize_matrix.as_slice()),
+                bytemuck::bytes_of(&render_pc),
             );
             render_pass.draw_indirect(&self.draw_command, 0);
         }
