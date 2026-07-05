@@ -13,12 +13,18 @@ bevy_ecs = "0.18.1"
 
 # graphics (for widgets that build render nodes directly)
 renderer = { workspace = true }
+gpu-utils = { workspace = true }
 wgpu = { workspace = true }
 nalgebra = { features = ["bytemuck"], workspace = true }
+
+# text shaping/rasterization (M6)
+suzuri = { path = "../../Suzuri" }
 
 # other
 log = { workspace = true }
 web-time = { workspace = true }
+fxhash = { workspace = true }
+parking_lot = { workspace = true }
 
 [lints]
 workspace = true

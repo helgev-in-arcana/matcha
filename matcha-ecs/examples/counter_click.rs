@@ -1,9 +1,11 @@
-//! M5 demo: click "+"/"-" to grow/shrink a rectangle. No text yet (M6) — the
-//! button labels aren't drawn — but the rect width visibly tracking clicks
-//! proves click -> hit-test -> reducer -> Phase B works end to end.
+//! M5+M6 demo: click "+"/"-" to grow/shrink a rectangle, with a real text
+//! label (M6) showing the current count. Button labels are still bare rects
+//! (M6 deliberately left `Button` label drawing out of scope) — the count
+//! text and the rect width both visibly tracking clicks proves
+//! click -> hit-test -> reducer -> Phase B -> text reshape works end to end.
 
 use matcha_ecs::{ui_ecs::UiEcs, view::Scope};
-use matcha_ecs_widgets::{Button, Column, ColorRect, Row};
+use matcha_ecs_widgets::{Button, Column, ColorRect, Row, Text};
 use matcha_window::adapter::Adapter;
 
 struct Model {
@@ -18,6 +20,7 @@ enum Msg {
 
 fn view(model: &Model, s: &mut Scope) {
     s.node(Column::new().gap(20.0), |s| {
+        s.leaf(Text::new(format!("count: {}", model.count)).font_size(24.0));
         let width = 50.0 + (model.count.max(0) as f32) * 20.0;
         s.leaf(ColorRect::new(width, 80.0).color([0.2, 0.4, 0.8, 1.0]));
         s.node(Row::new().gap(10.0), |s| {
