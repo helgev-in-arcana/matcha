@@ -41,13 +41,9 @@ use bevy_ecs::{
     world::EntityWorldMut,
 };
 use gpu_utils::texture_atlas::AtlasRegion;
-use nalgebra::{Matrix4, Point3, Vector3};
+use nalgebra::{Matrix4, Vector3};
 use parking_lot::Mutex;
-use renderer::{
-    vertex::colored_vertex::ColorVertex,
-    vertex_color::{RenderData, TargetData, VertexColor},
-    RenderNode,
-};
+use renderer::RenderNode;
 
 use matcha_ecs::{
     animation::{Animated, Easing, ExitTransition, Opacity, Target, ToBeDespawn, Tween},
@@ -187,11 +183,34 @@ fn shape(font_ctx: &FontCtx, content: &str, font_size: f32, max_width: f32) -> s
     font_ctx.0.font_system.layout_text(&data, &config)
 }
 
-/// Paint a `size`×`size` solid-colour region into `ctx.texture_atlas`, reused
-/// (UV-clamped) as every glyph's stencil "tint". Mirrors `ColorRect`'s
-/// `solid_rect_render_item` rasterisation but returns the bare region instead
-/// of a whole `RenderItem`/`RenderNode`, since many glyph instances share one
-/// tint region here.
+/// Gamma-encode a linear colour component into the sRGB space the atlas
+/// texture is stored in (matches what a render pass writing to an
+/// `Rgba8UnormSrgb` target does automatically; `write_data` is a raw byte
+/// copy with no such conversion, so it must be done by hand here).
+fn linear_to_srgb_u8(c: f32) -> u8 {
+    let c = c.clamp(0.0, 1.0);
+    let encoded = if c <= 0.0031308 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round() as u8
+}
+
+/// Paint a 1x1 solid-colour region into `ctx.texture_atlas`, reused
+/// (UV-clamped to any on-screen size) as every glyph's stencil "tint".
+///
+/// Written directly via `write_data` rather than `ColorRect`'s render-pass +
+/// `VertexColor` approach: a real GPU render pass whose viewport is scoped to
+/// a 1x1 (or otherwise very small, single-digit-pixel) atlas region was found
+/// to rasterise incorrectly (a soft, mispositioned blob instead of a flat
+/// fill — reproduced in isolation with a hand-built 4x4 case, unrelated to
+/// glyphs/stencils). `ColorRect` never hits this because it always sizes
+/// regions to its own (typically much larger) rect, so the bug went
+/// unnoticed; text's single shared tint pixel triggers it directly. Root
+/// cause not identified (deferred — see `ECS_IMPLEMENTATION_PLAN.md` §8);
+/// `write_data` sidesteps it entirely and is a strictly simpler upload for a
+/// flat fill anyway.
 fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<AtlasRegion> {
     let region = match ctx.texture_atlas.allocate(ctx.device, ctx.queue, [1, 1]) {
         Ok(region) => region,
@@ -201,50 +220,17 @@ fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<AtlasRegion> {
         }
     };
 
-    let mut encoder = ctx
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Text Tint Render Encoder"),
-        });
-
-    let color = [color[0], color[1], color[2], color[3] * ctx.opacity];
-    let target_size = region.texture_size();
-    let target_format = region.format();
-    if let Ok(mut render_pass) = region.begin_render_pass(&mut encoder) {
-        let vertices = [
-            ColorVertex {
-                position: Point3::new(0.0, 0.0, 0.0),
-                color,
-            },
-            ColorVertex {
-                position: Point3::new(1.0, 0.0, 0.0),
-                color,
-            },
-            ColorVertex {
-                position: Point3::new(1.0, 1.0, 0.0),
-                color,
-            },
-            ColorVertex {
-                position: Point3::new(0.0, 1.0, 0.0),
-                color,
-            },
-        ];
-        let indices: [u16; 6] = [0, 1, 2, 0, 2, 3];
-        VertexColor::default().render(
-            &mut render_pass,
-            TargetData {
-                target_size,
-                target_format,
-            },
-            RenderData {
-                transform: Matrix4::identity(),
-                vertices: &vertices,
-                indices: &indices,
-            },
-            ctx.device,
-        );
+    let alpha = (color[3] * ctx.opacity).clamp(0.0, 1.0);
+    let bytes = [
+        linear_to_srgb_u8(color[0]),
+        linear_to_srgb_u8(color[1]),
+        linear_to_srgb_u8(color[2]),
+        (alpha * 255.0).round() as u8,
+    ];
+    if let Err(e) = region.write_data(ctx.queue, &bytes) {
+        log::error!("Text tint upload failed: {e}");
+        return None;
     }
-    ctx.queue.submit(Some(encoder.finish()));
 
     Some(region)
 }

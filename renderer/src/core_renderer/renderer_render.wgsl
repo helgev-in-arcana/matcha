@@ -120,7 +120,13 @@ fn vertex_main(
     // stencil uv
     // space that stencil position becomes {(0, 0), (0, 1), (1, 1), (1, 0)}
     let stencil_space = stencil.viewport_position_inverse * pre;
-    let stencil_uv = (stencil_space.xy / stencil_space.w);
+    let stencil_local_uv = (stencil_space.xy / stencil_space.w);
+    // Map the local [0,1] unit-square coordinate into the stencil's atlas
+    // sub-rectangle, exactly like `texture_uv` does above. Without this, the
+    // fragment shader's clamp to `stencil_atlas_bounds` pins almost every
+    // fragment to one corner of the atlas region instead of sweeping across
+    // it, producing a smeared blob instead of the actual stencil shape.
+    let stencil_uv = stencil.in_atlas_offset + stencil.in_atlas_size * stencil_local_uv;
 
     // output
     var output: VertexOutput;
