@@ -6,6 +6,10 @@ use std::sync::Arc;
 pub struct GpuDescriptor {
     /// Which wgpu backends to enable.
     pub backends: wgpu::Backends,
+    /// Per-backend instance options. Needed e.g. to enable the noop backend,
+    /// which stays inert unless `backend_options.noop.enable` is set even when
+    /// `backends` includes [`wgpu::Backends::NOOP`].
+    pub backend_options: wgpu::BackendOptions,
     /// Power preference for adapter selection.
     pub power_preference: wgpu::PowerPreference,
     /// Features that must be available on the device.
@@ -20,10 +24,28 @@ impl Default for GpuDescriptor {
     fn default() -> Self {
         Self {
             backends: crate::gpu_defaults::BACKENDS,
+            backend_options: wgpu::BackendOptions::default(),
             power_preference: wgpu::PowerPreference::LowPower,
             required_features: crate::gpu_defaults::REQUIRED_FEATURES,
             required_limits: None,
             preferred_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
+        }
+    }
+}
+
+impl GpuDescriptor {
+    /// GPU-less preset for headless tests: selects wgpu's noop backend, which
+    /// needs no OS, driver or hardware. The noop adapter reports every feature
+    /// as supported, so the default `required_features` pass unchanged. It can
+    /// never present to a window surface.
+    pub fn noop() -> Self {
+        Self {
+            backends: wgpu::Backends::NOOP,
+            backend_options: wgpu::BackendOptions {
+                noop: wgpu::NoopBackendOptions { enable: true },
+                ..Default::default()
+            },
+            ..Default::default()
         }
     }
 }
@@ -44,6 +66,7 @@ impl Gpu {
     pub async fn new(desc: GpuDescriptor) -> Result<Self, GpuError> {
         let GpuDescriptor {
             backends,
+            backend_options,
             power_preference,
             required_features,
             required_limits,
@@ -54,6 +77,7 @@ impl Gpu {
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends,
+            backend_options,
             ..Default::default()
         });
 
@@ -164,6 +188,22 @@ impl Gpu {
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Gate for the whole headless-testing stack: `request_adapter` must find
+    /// the noop backend (it is selected via the same code path as real
+    /// backends, not `enumerate_adapters`), and the noop adapter must satisfy
+    /// the default `required_features`.
+    #[test]
+    fn noop_gpu_initializes() {
+        let gpu = futures::executor::block_on(Gpu::new(GpuDescriptor::noop()))
+            .expect("noop backend adapter/device request should succeed without any GPU");
+        assert!(gpu.context().is_some());
+    }
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum GpuError {

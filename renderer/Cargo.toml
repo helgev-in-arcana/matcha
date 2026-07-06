@@ -22,6 +22,9 @@ parking_lot.workspace = true
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 moka.workspace = true
 
+[dev-dependencies]
+futures = { workspace = true }
+
 [build-dependencies]
 cfg_aliases = { workspace = true }
 

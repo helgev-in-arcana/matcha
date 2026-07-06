@@ -59,6 +59,12 @@ impl<App: Application> Adapter<App> {
             app,
         }
     }
+
+    /// The wrapped application (headless tests inspect it between the
+    /// `Adapter` calls they drive manually).
+    pub fn app(&self) -> &App {
+        &self.app
+    }
 }
 
 // Platform-specific impls (`run`).
@@ -228,6 +234,7 @@ pub enum EventLoopCommand {
     SetControlFlow(ControlFlow),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ControlFlow {
     Wait,
     Poll,

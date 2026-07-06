@@ -126,6 +126,12 @@ where
     /// to the model, the same way `ModelHandle::update` applies a queued
     /// mutation.
     pub fn new(model: M, view_fn: F, reducer: R) -> Self {
+        Self::new_with_gpu(model, view_fn, reducer, GpuDescriptor::default())
+    }
+
+    /// [`Self::new`] with an explicit GPU descriptor. Headless tests pass
+    /// [`GpuDescriptor::noop`] to run the full driver without any GPU.
+    pub fn new_with_gpu(model: M, view_fn: F, reducer: R, gpu_desc: GpuDescriptor) -> Self {
         // First-wins statics (T-1): initialise explicitly before any bevy_ecs
         // system (e.g. a future `par_iter`) has a chance to lazily default-init
         // `ComputeTaskPool` to an all-cores pool of its own choosing.
@@ -142,8 +148,8 @@ where
                 .build()
         });
 
-        let gpu = futures::executor::block_on(Gpu::new(GpuDescriptor::default()))
-            .expect("GPU initialisation failed");
+        let gpu =
+            futures::executor::block_on(Gpu::new(gpu_desc)).expect("GPU initialisation failed");
         let (device, _queue) = gpu
             .context()
             .expect("GPU device/queue available immediately after Gpu::new");

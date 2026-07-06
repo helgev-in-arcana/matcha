@@ -221,12 +221,15 @@ impl Window {
     }
 }
 
+// Backend-agnostic surface + the NativeWindow trait each backend implements.
+mod surface;
+pub(crate) use surface::*;
+
 #[cfg(feature = "winit")]
 mod winit_window;
-#[cfg(feature = "winit")]
-pub(crate) use winit_window::*;
 
 #[cfg(feature = "baseview")]
 mod baseview_window;
-#[cfg(feature = "baseview")]
-pub(crate) use baseview_window::*;
+
+#[cfg(feature = "headless")]
+mod headless_window;
