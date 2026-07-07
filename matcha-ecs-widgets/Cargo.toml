@@ -20,6 +20,11 @@ nalgebra = { features = ["bytemuck"], workspace = true }
 # text shaping/rasterization (M6)
 suzuri = { path = "../../Suzuri" }
 
+# text shaping/rasterization, parley-based (RichText)
+parley = { workspace = true }
+swash = { workspace = true }
+glyph-cache = { workspace = true }
+
 # other
 log = { workspace = true }
 web-time = { workspace = true }

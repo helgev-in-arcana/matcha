@@ -13,6 +13,7 @@ pub mod button;
 pub mod color_rect;
 pub mod layout;
 pub mod padding;
+pub mod rich_text;
 pub mod text;
 
 pub use button::{Button, ButtonLabel};
@@ -20,4 +21,5 @@ pub use color_rect::{ColorRect, RectColor};
 pub use layout::{Column, Container, Gap, LayoutKind, Row};
 pub use matcha_ecs::components::input::{Message, OnClick};
 pub use padding::{Padding, PaddingLayout};
+pub use rich_text::{RichText, RichTextContent};
 pub use text::{Text, TextContent};

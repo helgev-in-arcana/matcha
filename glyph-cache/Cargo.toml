@@ -1,0 +1,11 @@
+[package]
+name = "glyph-cache"
+version = { workspace = true }
+edition = "2024"
+publish = false
+
+[dependencies]
+fxhash = { workspace = true }
+
+[lints]
+workspace = true
