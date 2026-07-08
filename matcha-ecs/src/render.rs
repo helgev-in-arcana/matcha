@@ -12,20 +12,13 @@
 //! [`InlineDriver`] runs the same `build_and_present` synchronously; it exists to
 //! isolate regressions between "the snapshot/extract split" and "the threading".
 
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
-    },
-    thread::JoinHandle,
-};
+use std::{collections::HashMap, sync::mpsc, sync::Arc, thread::JoinHandle};
 
 use bevy_ecs::{entity::Entity, world::World};
 use gpu_utils::texture_atlas::TextureAtlas;
 use matcha_window::window::WindowId;
 use nalgebra::Matrix4;
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use renderer::{CoreRenderer, RenderNode};
 
 use crate::{
@@ -191,6 +184,15 @@ pub trait RenderDriver: Send {
     /// `true` if `window`'s previous frame is still in flight, in which case the
     /// caller should coalesce (request a redraw and skip this frame).
     fn is_busy(&self, window: WindowId) -> bool;
+
+    /// Block until `window`'s in-flight frame (if any) has finished presenting.
+    /// Must be called before any `Surface::configure` (e.g. on resize) for that
+    /// window: wgpu forbids reconfiguring a surface while a `SurfaceTexture`
+    /// acquired from it — via `get_surface_texture` on the main thread, moved
+    /// into a [`RenderSnapshot`] and only presented later, on the render thread
+    /// — has not yet been presented/dropped. A no-op if the window has no
+    /// render thread yet (nothing can be in flight).
+    fn wait_idle(&self, window: WindowId);
 }
 
 /// Synchronous driver: builds and presents on the calling (main) thread. Never
@@ -206,6 +208,8 @@ impl RenderDriver for InlineDriver {
     fn is_busy(&self, _window: WindowId) -> bool {
         false
     }
+
+    fn wait_idle(&self, _window: WindowId) {}
 }
 
 /// Per-window worker-thread driver (the M4 default). Each window gets one thread
@@ -218,9 +222,45 @@ pub struct ThreadDriver {
 
 struct WindowThread {
     sender: mpsc::Sender<RenderSnapshot>,
-    /// `true` between `dispatch` and the worker finishing that frame.
-    busy: Arc<AtomicBool>,
+    /// `true` between `dispatch` and the worker finishing that frame (i.e.
+    /// presenting its `SurfaceTexture`). A `Mutex`+`Condvar` rather than a bare
+    /// `AtomicBool` so [`Busy::wait_idle`] can block efficiently instead of
+    /// spin-polling.
+    busy: Arc<Busy>,
     _handle: JoinHandle<()>,
+}
+
+struct Busy {
+    flag: Mutex<bool>,
+    cvar: Condvar,
+}
+
+impl Busy {
+    fn new() -> Self {
+        Self {
+            flag: Mutex::new(false),
+            cvar: Condvar::new(),
+        }
+    }
+
+    fn set(&self, value: bool) {
+        let mut guard = self.flag.lock();
+        *guard = value;
+        if !value {
+            self.cvar.notify_all();
+        }
+    }
+
+    fn get(&self) -> bool {
+        *self.flag.lock()
+    }
+
+    fn wait_idle(&self) {
+        let mut guard = self.flag.lock();
+        while *guard {
+            self.cvar.wait(&mut guard);
+        }
+    }
 }
 
 impl RenderDriver for ThreadDriver {
@@ -231,9 +271,9 @@ impl RenderDriver for ThreadDriver {
             .entry(window_id)
             .or_insert_with(|| WindowThread::spawn(window_id));
 
-        thread.busy.store(true, Ordering::Release);
+        thread.busy.set(true);
         if let Err(e) = thread.sender.send(snapshot) {
-            thread.busy.store(false, Ordering::Release);
+            thread.busy.set(false);
             log::error!("render thread for window {window_id:?} has gone away: {e}");
         }
     }
@@ -241,15 +281,21 @@ impl RenderDriver for ThreadDriver {
     fn is_busy(&self, window: WindowId) -> bool {
         self.threads
             .get(&window)
-            .map(|t| t.busy.load(Ordering::Acquire))
+            .map(|t| t.busy.get())
             .unwrap_or(false)
+    }
+
+    fn wait_idle(&self, window: WindowId) {
+        if let Some(t) = self.threads.get(&window) {
+            t.busy.wait_idle();
+        }
     }
 }
 
 impl WindowThread {
     fn spawn(window_id: WindowId) -> Self {
         let (sender, receiver) = mpsc::channel::<RenderSnapshot>();
-        let busy = Arc::new(AtomicBool::new(false));
+        let busy = Arc::new(Busy::new());
         let busy_worker = busy.clone();
 
         let handle = std::thread::Builder::new()
@@ -257,7 +303,7 @@ impl WindowThread {
             .spawn(move || {
                 while let Ok(snapshot) = receiver.recv() {
                     build_and_present(snapshot);
-                    busy_worker.store(false, Ordering::Release);
+                    busy_worker.set(false);
                 }
             })
             .expect("OS refused to spawn a render thread");

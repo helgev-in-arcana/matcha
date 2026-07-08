@@ -527,14 +527,36 @@ where
     fn window_event(
         &mut self,
         event_loop: &impl EventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized { inner_size, .. } => {
-                // Surface reconfiguration lands in a later milestone; log for now.
-                log::debug!("window resized to {inner_size:?}");
+                // Must happen before any `Surface::configure` below: wgpu forbids
+                // reconfiguring a surface while a `SurfaceTexture` acquired from it
+                // hasn't been presented yet, which — under M4's `ThreadDriver` — can
+                // still be in flight on this window's render thread.
+                self.render_driver.get_mut().wait_idle(window_id);
+
+                let Some((device, _queue)) = self.world.resource::<GpuResource>().gpu.context()
+                else {
+                    return;
+                };
+
+                let mut windows = self.world.query::<&WindowComp>();
+                let Some(window_comp) = windows
+                    .iter(&self.world)
+                    .find(|window_comp| window_comp.window.id() == window_id)
+                else {
+                    return;
+                };
+
+                window_comp.window.surface().resize(
+                    [inner_size[0].round() as u32, inner_size[1].round() as u32],
+                    &device,
+                );
+                window_comp.window.request_redraw();
             }
             _ => {}
         }
