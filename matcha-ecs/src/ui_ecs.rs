@@ -44,7 +44,7 @@ use crate::{
     },
     input::{resolve_click_target, update_hit_test_cache, HitTestCache},
     model::{ModelHandle, ModelResource},
-    render::{extract_items, RenderDriver, RenderSnapshot, ThreadDriver},
+    render::{build_and_present, extract_items, RenderDriver, RenderSnapshot, ThreadDriver},
     resources::{GpuResource, RenderWindowRoot, RendererResource},
     view::{despawn_completed_exits, run_view, Scope},
 };
@@ -306,14 +306,25 @@ where
 
         self.rerun_view_and_redraw();
     }
+}
 
-    /// Build a [`RenderSnapshot`] for `window_id`: acquire the surface texture on
-    /// the main thread, extract the drawable items, and clone the GPU resources.
-    /// Returns `None` when the frame should be skipped (wrong window, no GPU/root,
-    /// or the surface could not yield a texture this frame).
+/// Rendering: building a frame's snapshot and presenting it, either dispatched
+/// to `render_driver` ([`Application::render`]) or synchronously on the calling
+/// thread ([`Self::render_sync`], used for resize).
+impl<M, Msg, F, R> UiEcs<M, Msg, F, R>
+where
+    M: Send + Sync + 'static,
+    Msg: Message,
+    F: Fn(&M, &mut Scope) + Send + Sync + 'static,
+    R: Fn(&mut M, Msg) + Send + Sync + 'static,
+{
+    /// Build a [`RenderSnapshot`] for `window_id`: acquire the surface texture,
+    /// extract the drawable items, and clone the GPU resources. Returns `None`
+    /// if the frame should be skipped (wrong window, no GPU/root, or the
+    /// surface has no texture to give this frame).
     fn build_snapshot(&mut self, window_id: WindowId) -> Option<RenderSnapshot> {
         let root = self.world.get_resource::<RenderWindowRoot>()?;
-        // M1–M4 are single-window; ignore redraws for any other id.
+        // Only one window is supported currently.
         if root.window_id != window_id {
             return None;
         }
@@ -364,6 +375,50 @@ where
             texture_atlas,
             stencil_atlas,
         })
+    }
+
+    /// Advance animation/layout and build this frame's snapshot for
+    /// `window_id`. Shared by [`Application::render`] and [`Self::render_sync`],
+    /// which differ only in how they hand the result off.
+    fn advance_and_snapshot(&mut self, window_id: WindowId) -> Option<RenderSnapshot> {
+        self.world
+            .insert_resource(FrameTime(web_time::Instant::now()));
+        self.render_schedule.run(&mut self.world);
+        self.build_snapshot(window_id)
+    }
+
+    /// Request another redraw while any `Tween<Opacity>` is in flight, so an
+    /// in-progress fade keeps animating. Shared by [`Application::render`] and
+    /// [`Self::render_sync`].
+    fn request_redraw_if_tweening(&mut self, window_id: WindowId) {
+        if self
+            .world
+            .query::<&Tween<Opacity>>()
+            .iter(&self.world)
+            .next()
+            .is_none()
+        {
+            return;
+        }
+        if let Some(root) = self.world.get_resource::<RenderWindowRoot>() {
+            if root.window_id == window_id {
+                let root_entity = root.entity;
+                if let Some(window_comp) = self.world.get::<WindowComp>(root_entity) {
+                    window_comp.window.request_redraw();
+                }
+            }
+        }
+    }
+
+    /// Render and present `window_id` synchronously on the calling thread,
+    /// bypassing `render_driver`. Used after a resize so the new-size frame
+    /// is presented before the resize handler returns, instead of being
+    /// deferred to the render thread.
+    fn render_sync(&mut self, window_id: WindowId) {
+        if let Some(snapshot) = self.advance_and_snapshot(window_id) {
+            build_and_present(snapshot);
+        }
+        self.request_redraw_if_tweening(window_id);
     }
 }
 
@@ -496,32 +551,11 @@ where
             return;
         }
 
-        self.world
-            .insert_resource(FrameTime(web_time::Instant::now()));
-        self.render_schedule.run(&mut self.world);
-        if let Some(snapshot) = self.build_snapshot(window_id) {
+        if let Some(snapshot) = self.advance_and_snapshot(window_id) {
             self.render_driver.get_mut().dispatch(snapshot);
         }
 
-        // Keep redrawing while any `Tween<Opacity>` is in flight (no dedicated
-        // `RedrawScheduler` resource — a direct query is simpler and this is
-        // the only `Animatable` type wired up so far).
-        if self
-            .world
-            .query::<&Tween<Opacity>>()
-            .iter(&self.world)
-            .next()
-            .is_some()
-        {
-            if let Some(root) = self.world.get_resource::<RenderWindowRoot>() {
-                if root.window_id == window_id {
-                    let root_entity = root.entity;
-                    if let Some(window_comp) = self.world.get::<WindowComp>(root_entity) {
-                        window_comp.window.request_redraw();
-                    }
-                }
-            }
-        }
+        self.request_redraw_if_tweening(window_id);
     }
 
     fn window_event(
@@ -533,10 +567,9 @@ where
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized { inner_size, .. } => {
-                // Must happen before any `Surface::configure` below: wgpu forbids
-                // reconfiguring a surface while a `SurfaceTexture` acquired from it
-                // hasn't been presented yet, which — under M4's `ThreadDriver` — can
-                // still be in flight on this window's render thread.
+                // wgpu forbids reconfiguring a surface while a SurfaceTexture
+                // acquired from it hasn't been presented yet, so wait for any
+                // frame still in flight on the render thread first.
                 self.render_driver.get_mut().wait_idle(window_id);
 
                 let Some((device, _queue)) = self.world.resource::<GpuResource>().gpu.context()
@@ -556,7 +589,12 @@ where
                     [inner_size[0].round() as u32, inner_size[1].round() as u32],
                     &device,
                 );
-                window_comp.window.request_redraw();
+
+                // Render synchronously instead of just requesting a redraw, so
+                // the resized frame is presented before this handler returns.
+                // Blocks the event loop (all windows) for one frame; accepted
+                // tradeoff for now.
+                self.render_sync(window_id);
             }
             _ => {}
         }
