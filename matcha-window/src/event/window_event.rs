@@ -46,9 +46,7 @@ impl WindowEventState {
             } => {
                 self.inner_size = inner_size;
                 self.outer_size = outer_size;
-                WindowEvent::PositionSize {
-                    inner_position: self.inner_position,
-                    outer_position: self.outer_position,
+                WindowEvent::Resized {
                     inner_size: self.inner_size,
                     outer_size: self.outer_size,
                 }
@@ -59,11 +57,9 @@ impl WindowEventState {
             } => {
                 self.inner_position = inner_position;
                 self.outer_position = outer_position;
-                WindowEvent::PositionSize {
+                WindowEvent::Moved {
                     inner_position: self.inner_position,
                     outer_position: self.outer_position,
-                    inner_size: self.inner_size,
-                    outer_size: self.outer_size,
                 }
             }
             _ => event,
@@ -91,13 +87,6 @@ pub enum WindowEvent {
     Moved {
         inner_position: [f32; 2],
         outer_position: [f32; 2],
-    },
-    /// Combined position and size change (either a resize or a move was fired).
-    PositionSize {
-        inner_position: [f32; 2],
-        outer_position: [f32; 2],
-        inner_size: [f32; 2],
-        outer_size: [f32; 2],
     },
     Focus(bool),
     Theme(crate::window::window_config::Theme),
@@ -129,21 +118,33 @@ impl WindowEvent {
         }
     }
 
-    pub fn on_position_size<F, R>(&self, f: F) -> Option<R>
+    pub fn on_resized<F, R>(&self, f: F) -> Option<R>
     where
-        F: FnOnce([f32; 2], [f32; 2], [f32; 2], [f32; 2]) -> R,
+        F: FnOnce([f32; 2], [f32; 2]) -> R,
     {
         match self {
-            WindowEvent::PositionSize {
-                inner_position,
-                outer_position,
+            WindowEvent::Resized {
                 inner_size,
                 outer_size,
             } => Some(f(
-                *inner_position,
-                *outer_position,
                 *inner_size,
                 *outer_size,
+            )),
+            _ => None,
+        }
+    }
+
+    pub fn on_moved<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce([f32; 2], [f32; 2]) -> R,
+    {
+        match self {
+            WindowEvent::Moved {
+                inner_position,
+                outer_position,
+            } => Some(f(
+                *inner_position,
+                *outer_position,
             )),
             _ => None,
         }
