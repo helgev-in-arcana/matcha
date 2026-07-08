@@ -16,10 +16,17 @@ pub mod padding;
 pub mod rich_text;
 pub mod text;
 
+// Re-exported so downstream code (including this workspace's own tests/demos)
+// constructs `RichText`'s style parameter types (`FontWeight`, `FontStyle`,
+// `Alignment`, ...) against the exact same `parley` version this crate was
+// built against, rather than adding a separate, potentially-mismatched
+// dependency.
+pub use parley;
+
 pub use button::{Button, ButtonLabel};
 pub use color_rect::{ColorRect, RectColor};
 pub use layout::{Column, Container, Gap, LayoutKind, Row};
 pub use matcha_ecs::components::input::{Message, OnClick};
 pub use padding::{Padding, PaddingLayout};
-pub use rich_text::{RichText, RichTextContent};
+pub use rich_text::{RichSpan, RichText, RichTextContent, TextTransform, WhiteSpace};
 pub use text::{Text, TextContent};
