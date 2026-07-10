@@ -8,6 +8,9 @@ members = [
     "gpu-utils",
     "shared-buffer",
     "matcha-window",
+    "matcha-ecs",
+    "matcha-ecs-widgets",
+    "glyph-cache",
 ]
 resolver = "3"
 
@@ -20,11 +23,13 @@ matcha = { path = "matcha" }
 matcha-tree = { path = "matcha-tree" }
 matcha-window = { path = "matcha-window" }
 matcha-tree-widgets = { path = "matcha-tree-widgets" }
+matcha-ecs = { path = "matcha-ecs" }
+matcha-ecs-widgets = { path = "matcha-ecs-widgets" }
 shared-buffer = { path = "shared-buffer" }
 renderer = { path = "renderer" }
-text-render = { path = "text-render" }
 utils = { path = "utils" }
 gpu-utils = { path = "gpu-utils" }
+glyph-cache = { path = "glyph-cache" }
 
 # async runtime, utilities
 # `rt-multi-thread` is intentionally omitted: it is not supported on wasm.
@@ -61,6 +66,8 @@ image = "0.25"
 
 # font
 suzuri = { version = "0.2.1", features = ["wgpu"] }
+parley = { version = "0.11.0", features = ["complex-scripts"] }
+swash = "0.2.6"
 
 # other
 rand = "0.9"

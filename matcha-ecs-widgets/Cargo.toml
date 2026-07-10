@@ -1,0 +1,38 @@
+[package]
+name = "matcha-ecs-widgets"
+version = { workspace = true }
+edition = "2024"
+publish = false
+
+[dependencies]
+# self
+matcha-ecs = { workspace = true }
+
+# ecs
+bevy_ecs = "0.18.1"
+
+# graphics (for widgets that build render nodes directly)
+renderer = { workspace = true }
+gpu-utils = { workspace = true }
+wgpu = { workspace = true }
+nalgebra = { features = ["bytemuck"], workspace = true }
+
+# text shaping/rasterization (M6)
+suzuri = { path = "../../Suzuri" }
+
+# text shaping/rasterization, parley-based (RichText)
+parley = { workspace = true }
+swash = { workspace = true }
+glyph-cache = { workspace = true }
+
+# raster image decode (Image)
+image = { workspace = true }
+
+# other
+log = { workspace = true }
+web-time = { workspace = true }
+fxhash = { workspace = true }
+parking_lot = { workspace = true }
+
+[lints]
+workspace = true

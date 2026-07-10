@@ -1,5 +1,5 @@
 [package]
-name = "matcha-tree"
+name = "matcha-ecs"
 version = { workspace = true }
 edition = "2024"
 publish = false
@@ -7,17 +7,16 @@ publish = false
 [dependencies]
 # self
 renderer = { workspace = true }
-utils = { workspace = true }
 gpu-utils = { workspace = true }
-shared-buffer = { workspace = true }
+matcha-window = { workspace = true }
+
+# ecs
+bevy_ecs = "0.18.1"
+bevy_tasks = "0.18.1"
 
 # async runtime, utility
-tokio = { workspace = true, features = ["rt-multi-thread"] }
 futures = { workspace = true }
 parking_lot = { workspace = true }
-
-# window
-matcha-window = { workspace = true }
 
 # graphics
 wgpu = { workspace = true }
@@ -39,9 +38,19 @@ smallvec = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 enum-map = "2.7.3"
+web-time = { workspace = true }
 
-[build-dependencies]
-cfg_aliases = { workspace = true }
+[dev-dependencies]
+# Widget implementations are only needed by tests/examples. A dev-dependency
+# keeps the one-way crate rule (matcha-ecs-widgets -> matcha-ecs) intact.
+matcha-ecs-widgets = { workspace = true }
+# Headless windows/event-loop for tests/headless_app.rs. `headless` is an
+# additive feature (rides on the winit backend), so unifying it into test
+# builds leaves the winit path unchanged; normal builds never see it.
+matcha-window = { workspace = true, features = ["headless"] }
+# Examples call env_logger::init() so RUST_LOG surfaces wgpu validation errors,
+# which otherwise go through the `log` facade silently with no backend installed.
+env_logger = "^0.11.8"
 
 [features]
 default = ["winit"]

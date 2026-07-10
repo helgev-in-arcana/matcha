@@ -100,6 +100,7 @@ struct StencilData {
 const _: () = {
     assert!(std::mem::size_of::<InstanceData>() == 96);
     assert!(std::mem::size_of::<StencilData>() == 176);
+    assert!(std::mem::size_of::<RenderPushConstants>() == 80);
 };
 
 #[repr(C)]
@@ -108,6 +109,22 @@ struct CullingPushConstants {
     normalize_matrix: nalgebra::Matrix4<f32>,
     instance_count: u32,
     _pad: [u32; 3],
+}
+
+/// Half a texel, in normalized UV units, for each atlas. Used by the render
+/// shader to inset the UV clamp bounds so that sampling at the very edge of
+/// an atlas region's usable (non-margin) rectangle can never land exactly on
+/// the boundary between the last real texel and the next (zero-initialised
+/// margin) texel — bilinear filtering would blend 50/50 with that margin
+/// texel there, bleeding the background colour into the edge of every
+/// texture/stencil sample. Insetting to the last texel's *centre* instead of
+/// its edge guarantees a pure, unblended sample.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct RenderPushConstants {
+    normalize_matrix: nalgebra::Matrix4<f32>,
+    texture_atlas_half_texel: [f32; 2],
+    stencil_atlas_half_texel: [f32; 2],
 }
 
 pub struct CoreRenderer {
@@ -150,6 +167,35 @@ impl CoreRenderer {
             destination_view,
             destination_size,
             render_node,
+            load_color,
+            texture_atlas,
+            stencil_atlas,
+        )
+    }
+
+    /// Flat render entry point: draw several pre-transformed render trees in one
+    /// frame. See [`CoreRendererInner::render_flat`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_flat(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+        destination_view: &wgpu::TextureView,
+        destination_size: [f32; 2],
+        items: &[(Arc<RenderNode>, nalgebra::Matrix4<f32>)],
+        load_color: wgpu::Color,
+        texture_atlas: &wgpu::Texture,
+        stencil_atlas: &wgpu::Texture,
+    ) -> Result<(), TextureValidationError> {
+        let inner_lock = self.inner.read();
+        inner_lock.render_flat(
+            device,
+            queue,
+            surface_format,
+            destination_view,
+            destination_size,
+            items,
             load_color,
             texture_atlas,
             stencil_atlas,
@@ -431,7 +477,7 @@ impl CoreRendererInner {
             bind_group_layouts: &[texture_bind_group_layout, data_bind_group_layout],
             push_constant_ranges: &[wgpu::PushConstantRange {
                 stages: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                range: 0..std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32,
+                range: 0..std::mem::size_of::<RenderPushConstants>() as u32,
             }],
         });
 
@@ -523,8 +569,77 @@ impl CoreRendererInner {
             texture_atlas.format(),
             stencil_atlas.format(),
         )?;
+
+        self.render_instances(
+            device,
+            queue,
+            surface_format,
+            destination_view,
+            destination_size,
+            &instances,
+            &stencils,
+            load_color,
+            texture_atlas,
+            stencil_atlas,
+        )
+    }
+
+    /// Flat variant of [`render`](Self::render): renders several already
+    /// window-space-transformed render trees (paint order) in a single frame.
+    /// Used by the M4 render-thread path, which extracts one `(RenderNode,
+    /// transform)` per widget entity instead of building a pseudo root.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_flat(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+        destination_view: &wgpu::TextureView,
+        destination_size: [f32; 2],
+        items: &[(Arc<RenderNode>, nalgebra::Matrix4<f32>)],
+        load_color: wgpu::Color,
+        texture_atlas: &wgpu::Texture,
+        stencil_atlas: &wgpu::Texture,
+    ) -> Result<(), TextureValidationError> {
+        let (instances, stencils) = create_instance_and_stencil_data_flat(
+            items,
+            texture_atlas.format(),
+            stencil_atlas.format(),
+        )?;
+
+        self.render_instances(
+            device,
+            queue,
+            surface_format,
+            destination_view,
+            destination_size,
+            &instances,
+            &stencils,
+            load_color,
+            texture_atlas,
+            stencil_atlas,
+        )
+    }
+
+    /// Encode and submit a prepared instance/stencil set. Shared by
+    /// [`render`](Self::render) (single tree) and [`render_flat`](Self::render_flat)
+    /// (multiple pre-transformed roots).
+    #[allow(clippy::too_many_arguments)]
+    fn render_instances(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+        destination_view: &wgpu::TextureView,
+        destination_size: [f32; 2],
+        instances: &[InstanceData],
+        stencils: &[StencilData],
+        load_color: wgpu::Color,
+        texture_atlas: &wgpu::Texture,
+        stencil_atlas: &wgpu::Texture,
+    ) -> Result<(), TextureValidationError> {
         trace!(
-            "CoreRenderer::render: prepared {} instances and {} stencils",
+            "CoreRenderer::render_instances: prepared {} instances and {} stencils",
             instances.len(),
             stencils.len()
         );
@@ -635,11 +750,11 @@ impl CoreRendererInner {
         queue.write_buffer(
             &all_instance_data_buffer,
             0,
-            bytemuck::cast_slice(&instances),
+            bytemuck::cast_slice(instances),
         );
 
         if !stencils.is_empty() {
-            queue.write_buffer(&all_stencil_data_buffer, 0, bytemuck::cast_slice(&stencils));
+            queue.write_buffer(&all_stencil_data_buffer, 0, bytemuck::cast_slice(stencils));
         } else {
             let default_stencil = StencilData {
                 viewport_position: nalgebra::Matrix4::identity(),
@@ -671,6 +786,19 @@ impl CoreRendererInner {
             normalize_matrix,
             instance_count: instances.len() as u32,
             _pad: [0; 3],
+        };
+        let texture_atlas_size = texture_atlas.size();
+        let stencil_atlas_size = stencil_atlas.size();
+        let render_pc = RenderPushConstants {
+            normalize_matrix,
+            texture_atlas_half_texel: [
+                0.5 / texture_atlas_size.width as f32,
+                0.5 / texture_atlas_size.height as f32,
+            ],
+            stencil_atlas_half_texel: [
+                0.5 / stencil_atlas_size.width as f32,
+                0.5 / stencil_atlas_size.height as f32,
+            ],
         };
 
         // culling compute pass
@@ -736,7 +864,7 @@ impl CoreRendererInner {
             render_pass.set_push_constants(
                 wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 0,
-                bytemuck::cast_slice(normalize_matrix.as_slice()),
+                bytemuck::bytes_of(&render_pc),
             );
             render_pass.draw_indirect(&self.draw_command, 0);
         }
@@ -747,6 +875,37 @@ impl CoreRendererInner {
 
         Ok(())
     }
+}
+
+/// Flatten several `(render tree, window-space transform)` pairs into a single
+/// instance/stencil array. Each root is walked with its own transform; the
+/// shared atlas-id checks in the recursive walk still apply across all roots.
+fn create_instance_and_stencil_data_flat(
+    items: &[(Arc<RenderNode>, nalgebra::Matrix4<f32>)],
+    texture_format: wgpu::TextureFormat,
+    stencil_format: wgpu::TextureFormat,
+) -> Result<(Vec<InstanceData>, Vec<StencilData>), TextureValidationError> {
+    let mut instances = Vec::new();
+    let mut stencils = Vec::new();
+
+    let mut texture_atlas_id = None;
+    let mut stencil_atlas_id = None;
+
+    for (node, transform) in items {
+        create_instance_and_stencil_data_recursive(
+            texture_format,
+            stencil_format,
+            node,
+            *transform,
+            &mut instances,
+            &mut stencils,
+            &mut texture_atlas_id,
+            &mut stencil_atlas_id,
+            0,
+        )?;
+    }
+
+    Ok((instances, stencils))
 }
 
 fn create_instance_and_stencil_data(

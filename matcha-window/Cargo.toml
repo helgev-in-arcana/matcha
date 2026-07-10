@@ -36,9 +36,6 @@ web-time = { workspace = true }
 
 # NOTE: the `cfg` expressions below must stay in sync with the `web` alias
 # defined in build.rs (`all(target_arch = "wasm32", target_os = "unknown")`).
-[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread"] }
-
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 wasm-bindgen-futures = { workspace = true }
 wasm-bindgen = { workspace = true }
@@ -51,6 +48,15 @@ cfg_aliases = { workspace = true }
 default = ["winit"]
 winit = ["dep:winit"]
 baseview = ["dep:baseview"]
+# Additive (NOT a third exclusive backend): in-memory windows + a test-driven
+# event loop for headless tests. Implies `winit` because the crate's common
+# event types re-export winit keyboard types. Enabled by downstream
+# dev-dependencies only, so normal builds are unaffected.
+headless = ["winit"]
+
+[[test]]
+name = "headless"
+required-features = ["headless"]
 
 [lints]
 workspace = true
