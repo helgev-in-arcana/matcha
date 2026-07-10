@@ -11,7 +11,7 @@ struct PushConstants {
     source_texture_position_min: vec2<f32>,
     source_texture_position_max: vec2<f32>,
 };
-var<push_constant> pc: PushConstants;
+var<immediate> pc: PushConstants;
 
 // vertex shader
 @vertex

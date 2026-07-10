@@ -283,6 +283,7 @@ impl AtlasRegion {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             clear_pass.set_viewport(
@@ -321,6 +322,7 @@ impl AtlasRegion {
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
 
         // Set the viewport to the usable texture area (excluding margins)
@@ -781,6 +783,7 @@ impl TextureAtlas {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
         }
 
@@ -1383,6 +1386,7 @@ mod tests {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             region.set_viewport(&mut pass).unwrap();
         }
@@ -1422,6 +1426,7 @@ mod tests {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             let err = region.set_viewport(&mut pass).unwrap_err();
             assert!(matches!(err, RegionError::AtlasGone));
@@ -1441,7 +1446,7 @@ mod tests {
         )
         .await;
         let region = atlas.allocate(&device, &queue, [2, 2]).unwrap();
-        if !device.features().contains(wgpu::Features::PUSH_CONSTANTS) {
+        if !device.features().contains(wgpu::Features::IMMEDIATES) {
             return;
         }
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());

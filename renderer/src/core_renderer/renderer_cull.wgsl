@@ -63,7 +63,7 @@ struct Pc {
     instance_count: u32,
     _pad: vec3<u32>,
 };
-var<push_constant> pc: Pc;
+var<immediate> pc: Pc;
 
 // vertices:
 // 0 - 3
@@ -119,16 +119,21 @@ fn culling_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         !use_stencil || (stencil_is_in_viewport && texture_and_stencil_overlap)
     );
 
-    // if (is_visible) {
-    //     let visible_count = atomicAdd(&visible_instance_count, 1u);
-    //     visible_instances[visible_count] = instance_index;
-    // }
-
-    // currently show every instance for debugging purposes
-    // todo: implement proper visibility culling
+    // IMPORTANT: the write below must preserve submission order. Instances are
+    // alpha-blended UI quads whose paint order IS their stacking order (a panel
+    // background must draw before the label glyphs on top of it), and the render
+    // pass draws `all_instances[visible_instances[i]]` in `i` order. An earlier
+    // version compacted with `visible_instances[atomicAdd(&count)] = index`,
+    // which shuffles the array in GPU-scheduling order and intermittently drew
+    // backgrounds over their own children (observed as text glyphs/images
+    // flickering out). Culling is currently disabled (every instance is kept,
+    // `is_visible` unused), so identity order is trivially correct; when real
+    // culling is implemented it must use an order-preserving compaction (e.g.
+    // prefix sum), NOT the atomicAdd pattern.
+    // todo: implement proper visibility culling (order-preserving)
     if true {
-        let visible_count = atomicAdd(&visible_instance_count, 1u);
-        visible_instances[visible_count] = instance_index;
+        atomicAdd(&visible_instance_count, 1u);
+        visible_instances[instance_index] = instance_index;
     }
 }
 

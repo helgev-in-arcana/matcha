@@ -85,7 +85,7 @@ struct Pc {
     texture_atlas_half_texel: vec2<f32>,
     stencil_atlas_half_texel: vec2<f32>,
 };
-var<push_constant> pc: Pc;
+var<immediate> pc: Pc;
 
 // vertices (y-axis is down, matches public UI unit-quad ordering):
 // 0 - 2

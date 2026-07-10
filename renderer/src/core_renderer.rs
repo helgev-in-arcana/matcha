@@ -2,7 +2,7 @@ use log::{debug, trace, warn};
 use std::sync::Arc;
 
 use crate::render_node::RenderNode;
-use gpu_utils::{ texture_atlas};
+use gpu_utils::texture_atlas;
 use texture_atlas::RegionError;
 use thiserror::Error;
 
@@ -239,7 +239,7 @@ impl CoreRendererInner {
             border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
 
@@ -412,11 +412,8 @@ impl CoreRendererInner {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Culling Pipeline Layout"),
-            bind_group_layouts: &[bind_group_layout],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::COMPUTE,
-                range: 0..std::mem::size_of::<CullingPushConstants>() as u32,
-            }],
+            bind_group_layouts: &[Some(bind_group_layout)],
+            immediate_size: std::mem::size_of::<CullingPushConstants>() as u32,
         });
 
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -444,8 +441,8 @@ impl CoreRendererInner {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Command Pipeline Layout"),
-            bind_group_layouts: &[bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(bind_group_layout)],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -474,11 +471,11 @@ impl CoreRendererInner {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[texture_bind_group_layout, data_bind_group_layout],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                range: 0..std::mem::size_of::<RenderPushConstants>() as u32,
-            }],
+            bind_group_layouts: &[
+                Some(texture_bind_group_layout),
+                Some(data_bind_group_layout),
+            ],
+            immediate_size: std::mem::size_of::<RenderPushConstants>() as u32,
         });
 
         (pipeline_layout, module)
@@ -522,7 +519,7 @@ impl CoreRendererInner {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         })
     }
@@ -810,7 +807,7 @@ impl CoreRendererInner {
                 });
             culling_pass.set_pipeline(&self.culling_pipeline);
             culling_pass.set_bind_group(0, &data_bind_group, &[]);
-            culling_pass.set_push_constants(0, bytemuck::bytes_of(&cull_pc));
+            culling_pass.set_immediates(0, bytemuck::bytes_of(&cull_pc));
             culling_pass.dispatch_workgroups(
                 (instances.len() as u32).div_ceil(COMPUTE_WORKGROUP_SIZE),
                 1,
@@ -855,17 +852,14 @@ impl CoreRendererInner {
                 })],
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
                 timestamp_writes: None,
             });
 
             render_pass.set_pipeline(render_pipeline.as_ref());
             render_pass.set_bind_group(0, &texture_bind_group, &[]);
             render_pass.set_bind_group(1, &data_bind_group, &[]);
-            render_pass.set_push_constants(
-                wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                0,
-                bytemuck::bytes_of(&render_pc),
-            );
+            render_pass.set_immediates(0, bytemuck::bytes_of(&render_pc));
             render_pass.draw_indirect(&self.draw_command, 0);
         }
         trace!("CoreRenderer::render: render pass completed");

@@ -22,7 +22,6 @@ matcha-window = { workspace = true }
 # graphics
 wgpu = { workspace = true }
 bytemuck = { features = ["derive"], workspace = true }
-vello = { workspace = true }
 
 # math
 nalgebra = { features = ["bytemuck"], workspace = true }

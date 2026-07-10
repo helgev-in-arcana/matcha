@@ -21,7 +21,7 @@ impl DebugRenderer {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -59,8 +59,8 @@ impl DebugRenderer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("DebugRenderer Pipeline Layout"),
-            bind_group_layouts: &[&texture_bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&texture_bind_group_layout)],
+            immediate_size: 0,
         });
 
         let render_pipeline_cache = crate::pipeline_cache::PipelineCache::new(4);
@@ -105,7 +105,7 @@ impl DebugRenderer {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         })
     }
@@ -215,6 +215,7 @@ fn fragment_main(in_ : VertexOutput) -> @location(0) vec4<f32> {{
                 })],
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
                 timestamp_writes: None,
             });
 

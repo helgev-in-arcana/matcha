@@ -9,15 +9,11 @@
 //! `Row > (Checkbox, Text)`), matching HTML where `<input type=checkbox>` and
 //! its `<label>` are siblings, not one element.
 //!
-//! **Known issue, not yet fixed** (2026-07-10): rebuilding this widget's
-//! `RenderItem` on every `checked` toggle churns the shared texture atlas
-//! rapidly, which can intermittently corrupt *other*, unrelated widgets'
-//! already-rendered atlas regions due to a pre-existing `gpu-utils`
-//! GPU-fencing gap. A mitigation (a persistent atlas-region cache keyed by
-//! size+colour) was tried and reverted — it didn't sufficiently fix the
-//! symptom in testing. See CLAUDE.md's dated entry for the full
-//! investigation and root-cause writeup; deferred to a dedicated future
-//! session.
+//! (A formerly-documented "known issue" here — intermittent corruption of
+//! unrelated widgets while this widget rebuilt per toggle — was root-caused
+//! and fixed on 2026-07-10: it was never atlas churn, but nondeterministic
+//! instance ordering in `renderer`'s culling compute shader. See
+//! `renderer/src/core_renderer/renderer_cull.wgsl` and CLAUDE.md.)
 
 use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, world::EntityWorldMut,

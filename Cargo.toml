@@ -54,9 +54,8 @@ accesskit = "0.21"
 accesskit_winit = { version = "0.29", features = ["tokio"] }
 
 # graphics
-wgpu = { version = "27.0.1", features = ["noop"] }
+wgpu = { version = "29", features = ["noop"] }
 bytemuck = { version = "1", features = ["derive"] }
-vello = { git = "https://github.com/linebender/vello.git", branch = "main" }
 
 # math
 nalgebra = { version = "0.34", features = ["bytemuck"] }
@@ -65,7 +64,10 @@ nalgebra = { version = "0.34", features = ["bytemuck"] }
 image = "0.25"
 
 # font
-suzuri = { version = "0.2.1", features = ["wgpu"] }
+# Disabled: crates.io suzuri 0.2.1 pins wgpu ^27, blocking the workspace's wgpu 29
+# upgrade. Only the legacy matcha-tree stack used this (with the `wgpu` feature);
+# matcha-ecs-widgets uses the sibling path dependency (CPU shaping only, no wgpu).
+# suzuri = { version = "0.2.1", features = ["wgpu"] }
 parley = { version = "0.11.0", features = ["complex-scripts"] }
 swash = "0.2.6"
 

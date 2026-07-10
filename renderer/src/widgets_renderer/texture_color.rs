@@ -52,11 +52,8 @@ impl TextureColorImpl {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("TextureColor: Pipeline Layout"),
-            bind_group_layouts: &[&texture_bind_group_layout],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::VERTEX,
-                range: 0..(std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32),
-            }],
+            bind_group_layouts: &[Some(&texture_bind_group_layout)],
+            immediate_size: (std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32),
         });
 
         let pipeline = crate::pipeline_cache::PipelineCache::new(PIPELINE_CACHE_SIZE);
@@ -68,7 +65,7 @@ impl TextureColorImpl {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -163,8 +160,7 @@ impl TextureColor {
 
         // set pipeline and resources
         render_pass.set_pipeline(&render_pipeline);
-        render_pass.set_push_constants(
-            wgpu::ShaderStages::VERTEX,
+        render_pass.set_immediates(
             0,
             bytemuck::cast_slice(view_port_affine_transform.as_slice()),
         );
@@ -210,7 +206,7 @@ fn make_pipeline(
             mask: !0,
             alpha_to_coverage_enabled: false,
         },
-        multiview: None,
+        multiview_mask: None,
         cache: None,
     })
 }

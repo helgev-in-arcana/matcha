@@ -332,7 +332,7 @@ impl WindowSurface {
         &self,
         device: &wgpu::Device,
         f: impl FnOnce(&wgpu::TextureView, &wgpu::Texture) -> R,
-    ) -> Result<Option<R>, wgpu::SurfaceError> {
+    ) -> Result<Option<R>, SurfaceTextureError> {
         match self.get_surface_texture(device)? {
             Some(surface_texture) => {
                 let view = surface_texture
@@ -350,7 +350,7 @@ impl WindowSurface {
         &self,
         device: &wgpu::Device,
         f: impl FnOnce(wgpu::TextureView) -> Result<R, E>,
-    ) -> Result<Option<Result<R, E>>, wgpu::SurfaceError> {
+    ) -> Result<Option<Result<R, E>>, SurfaceTextureError> {
         match self.get_surface_texture(device)? {
             Some(surface_texture) => {
                 let view = surface_texture
@@ -368,24 +368,32 @@ impl WindowSurface {
 impl WindowSurface {
     /// Return Value:
     /// - `Ok(Some(texture))`: Success to acquire surface texture.
-    /// - `Ok(None)`: No surface, timeout, or zero-size texture. Frame will be skipped.
-    /// - `Err(wgpu::SurfaceError)`: Other unrecoverable error.
+    /// - `Ok(None)`: No surface, timeout, occlusion, or zero-size texture. Frame will be skipped.
+    /// - `Err(SurfaceTextureError)`: Other unrecoverable error.
     pub fn get_surface_texture(
         &self,
         device: &wgpu::Device,
-    ) -> Result<Option<wgpu::SurfaceTexture>, wgpu::SurfaceError> {
+    ) -> Result<Option<wgpu::SurfaceTexture>, SurfaceTextureError> {
         let surface = match &self.surface {
             Some(s) => s,
             None => return Ok(None),
         };
 
+        // wgpu 29: `get_current_texture` returns the `CurrentSurfaceTexture` enum
+        // (the old `Result<_, SurfaceError>` API is gone). `Suboptimal` still
+        // hands us a presentable texture, so treat it as success.
         match surface.get_current_texture() {
-            Ok(texture) => Ok(Some(texture)),
-            Err(wgpu::SurfaceError::Timeout) => {
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Ok(Some(texture)),
+            wgpu::CurrentSurfaceTexture::Timeout => {
                 log::warn!("Surface texture acquire timed out. Skipping frame.");
                 Ok(None)
             }
-            Err(wgpu::SurfaceError::Outdated) | Err(wgpu::SurfaceError::Lost) => {
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                log::debug!("Surface is occluded. Skipping frame.");
+                Ok(None)
+            }
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 log::warn!("Surface is outdated or lost. Reconfiguring and retrying...");
                 let [width, height] = self.window.inner_size();
                 if width == 0 || height == 0 {
@@ -393,27 +401,42 @@ impl WindowSurface {
                 } else {
                     self.reconfigure(device);
                     match surface.get_current_texture() {
-                        Ok(texture) => Ok(Some(texture)),
-                        Err(wgpu::SurfaceError::Timeout) => {
+                        wgpu::CurrentSurfaceTexture::Success(texture)
+                        | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Ok(Some(texture)),
+                        wgpu::CurrentSurfaceTexture::Timeout
+                        | wgpu::CurrentSurfaceTexture::Occluded => {
                             log::warn!(
                                 "Surface texture acquire timed out on retry. Skipping frame."
                             );
                             Ok(None)
                         }
-                        Err(e) => Err(e),
+                        wgpu::CurrentSurfaceTexture::Outdated
+                        | wgpu::CurrentSurfaceTexture::Lost => {
+                            Err(SurfaceTextureError::StillOutdatedAfterReconfigure)
+                        }
+                        wgpu::CurrentSurfaceTexture::Validation => {
+                            Err(SurfaceTextureError::Validation)
+                        }
                     }
                 }
             }
-            Err(wgpu::SurfaceError::OutOfMemory) => {
-                log::error!("System is out of memory. Application should probably exit.");
-                Err(wgpu::SurfaceError::OutOfMemory)
-            }
-            Err(wgpu::SurfaceError::Other) => {
-                log::error!("Unknown surface error");
-                Err(wgpu::SurfaceError::Other)
+            wgpu::CurrentSurfaceTexture::Validation => {
+                log::error!("Surface texture acquire raised a validation error.");
+                Err(SurfaceTextureError::Validation)
             }
         }
     }
+}
+
+/// Unrecoverable failures from [`WindowSurface::get_surface_texture`]
+/// (recoverable conditions — timeout, occlusion, outdated-then-reconfigured —
+/// are reported as `Ok(None)` / retried instead).
+#[derive(Debug, thiserror::Error)]
+pub enum SurfaceTextureError {
+    #[error("surface texture acquire raised a validation error")]
+    Validation,
+    #[error("surface is still outdated/lost after reconfiguring")]
+    StillOutdatedAfterReconfigure,
 }
 
 #[derive(Debug, thiserror::Error)]

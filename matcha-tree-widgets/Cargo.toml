@@ -23,7 +23,6 @@ winit = { workspace = true }
 # graphics
 wgpu = { workspace = true }
 bytemuck = { features = ["derive"], workspace = true }
-vello = { workspace = true }
 
 # math
 nalgebra = { features = ["bytemuck"], workspace = true }
@@ -32,7 +31,7 @@ nalgebra = { features = ["bytemuck"], workspace = true }
 image = { workspace = true }
 
 # text
-suzuri = { workspace = true }
+# suzuri = { workspace = true } # disabled: pins wgpu ^27 (see workspace Cargo.toml)
 
 # other
 num = { workspace = true }

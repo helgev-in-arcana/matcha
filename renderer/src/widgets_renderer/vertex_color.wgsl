@@ -8,7 +8,7 @@ struct VertexOutput {
     @location(0) color: vec4<f32>,
 };
 
-var<push_constant> normalize_affine: mat4x4<f32>;
+var<immediate> normalize_affine: mat4x4<f32>;
 
 @vertex
 fn vs_main(

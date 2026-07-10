@@ -1,7 +1,9 @@
 pub mod image;
 pub mod polygon;
 pub mod solid_box;
-pub mod text;
+// Disabled: depends on crates.io suzuri 0.2.1 (pins wgpu ^27), which blocks the
+// workspace's wgpu 29 upgrade. Re-enable once suzuri supports wgpu 29.
+// pub mod text;
 pub mod viewport_clear;
 
 use std::sync::Arc;

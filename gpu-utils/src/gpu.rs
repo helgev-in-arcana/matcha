@@ -75,10 +75,10 @@ impl Gpu {
 
         trace!("Gpu::new: backends={backends:?} power_preference={power_preference:?}");
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends,
             backend_options,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         trace!("Gpu::new: requesting adapter");

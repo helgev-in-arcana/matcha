@@ -30,7 +30,7 @@ struct PushConstant {
 
 const _: () = {
     assert!(
-        wgpu::PUSH_CONSTANT_ALIGNMENT == 4,
+        wgpu::IMMEDIATE_DATA_ALIGNMENT == 4,
         "PushConstant alignment changed. check memory layout"
     );
 };
@@ -87,17 +87,14 @@ impl TextureCopyImpl {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("texture_copy_pipeline_layout"),
-            bind_group_layouts: &[&texture_bind_group_layout],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                range: 0..PUSH_CONSTANTS_SIZE,
-            }],
+            bind_group_layouts: &[Some(&texture_bind_group_layout)],
+            immediate_size: PUSH_CONSTANTS_SIZE,
         });
 
         let pipeline = crate::pipeline_cache::PipelineCache::new(PIPELINE_CACHE_SIZE);
@@ -180,11 +177,7 @@ impl TextureCopy {
             color_transformation: color_transformation.unwrap_or_else(Matrix4::identity),
             color_offset: color_offset.unwrap_or([0.0; 4]),
         };
-        render_pass.set_push_constants(
-            wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-            0,
-            bytemuck::cast_slice(&[push_constants]),
-        );
+        render_pass.set_immediates(0, bytemuck::cast_slice(&[push_constants]));
         render_pass.draw(0..4, 0..1);
     }
 }
@@ -229,7 +222,7 @@ fn make_pipeline(
             mask: !0,
             alpha_to_coverage_enabled: false,
         },
-        multiview: None,
+        multiview_mask: None,
         cache: None,
     })
 }
