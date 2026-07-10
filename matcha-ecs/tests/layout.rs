@@ -9,7 +9,7 @@ use matcha_ecs::{
     layout::{layout_root, Constraints},
     view::run_view,
 };
-use matcha_ecs_widgets::{Column, ColorRect, Row};
+use matcha_ecs_widgets::{AlignItems, Column, ColorRect, Row};
 
 fn setup() -> (World, Entity) {
     let mut world = World::new();
@@ -34,7 +34,13 @@ fn output(world: &World, e: Entity) -> LayoutOutput {
 fn column_stacks_children_with_gap() {
     let (mut world, root) = setup();
     run_view(&mut world, root, |s| {
-        s.node(Column::new().gap(10.0), |s| {
+        // Pin `AlignItems::Start` explicitly: this test is about gap-stacking,
+        // not cross-axis alignment, and the default `AlignItems::Stretch`
+        // (CSS's default) would otherwise stretch the narrower second child
+        // to the column's own (widest-child) width — see
+        // `align_items_stretch_expands_narrower_children_to_container_width`
+        // below for a test of that behaviour.
+        s.node(Column::new().gap(10.0).align_items(AlignItems::Start), |s| {
             s.leaf(ColorRect::new(50.0, 20.0));
             s.leaf(ColorRect::new(30.0, 40.0));
         });
@@ -113,6 +119,45 @@ fn nested_column_of_row_positions_grandchildren_in_window_space() {
         .unwrap();
     let translation = global.affine.column(3);
     assert_eq!((translation.x, translation.y), (120.0, 120.0));
+}
+
+#[test]
+fn align_items_stretch_expands_narrower_children_to_container_width() {
+    // Default `AlignItems::Stretch` (CSS's default): a Column auto-sizes its
+    // own width to its widest child (50), so a narrower second child (30)
+    // gets stretched to fill that width.
+    let (mut world, root) = setup();
+    run_view(&mut world, root, |s| {
+        s.node(Column::new().gap(10.0), |s| {
+            s.leaf(ColorRect::new(50.0, 20.0));
+            s.leaf(ColorRect::new(30.0, 40.0));
+        });
+    });
+    layout_root(&mut world, root, Constraints::from_max_size([800.0, 600.0]));
+
+    let column = children(&world, root)[0];
+    let [_first, second]: [Entity; 2] = children(&world, column).try_into().unwrap();
+    assert_eq!(output(&world, second).size, [50.0, 40.0]);
+}
+
+#[test]
+fn align_items_center_centres_narrower_children_on_the_cross_axis() {
+    let (mut world, root) = setup();
+    run_view(&mut world, root, |s| {
+        s.node(Column::new().gap(0.0).align_items(AlignItems::Center), |s| {
+            s.leaf(ColorRect::new(50.0, 20.0));
+            s.leaf(ColorRect::new(30.0, 40.0));
+        });
+    });
+    layout_root(&mut world, root, Constraints::from_max_size([800.0, 600.0]));
+
+    let column = children(&world, root)[0];
+    let [_first, second]: [Entity; 2] = children(&world, column).try_into().unwrap();
+    let second_out = output(&world, second);
+    // Column width is 50 (widest child); a natural-width (30) child under
+    // `Center` sits at x = (50 - 30) / 2 = 10, keeping its own size.
+    assert_eq!(second_out.size, [30.0, 40.0]);
+    assert_eq!(second_out.origin, [10.0, 20.0]);
 }
 
 #[test]

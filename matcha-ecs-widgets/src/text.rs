@@ -104,10 +104,10 @@ struct FontCtxInner {
 /// Cheap to `Clone` (an `Arc` handle), so it can be captured directly into a
 /// `RenderItem`'s `Send + Sync` builder closure.
 #[derive(Resource, Clone)]
-struct FontCtx(Arc<FontCtxInner>);
+pub(crate) struct FontCtx(Arc<FontCtxInner>);
 
 impl FontCtx {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let font_system = suzuri::FontSystem::new();
         font_system.load_system_fonts();
         Self(Arc::new(FontCtxInner {
@@ -119,7 +119,7 @@ impl FontCtx {
     /// Look up (or rasterise-and-cache) the stencil atlas region holding
     /// `glyph_id`'s coverage bitmap, plus its pixel size. Returns `None` for
     /// glyphs with no visible bitmap (e.g. space) or on allocation failure.
-    fn stencil_region(
+    pub(crate) fn stencil_region(
         &self,
         glyph_id: suzuri::GlyphId,
         device: &wgpu::Device,
@@ -162,7 +162,7 @@ impl FontCtx {
 /// Shape `content` fresh (no caching — see module docs) at `font_size`,
 /// word-wrapping at `max_width`. Returns an empty layout if no matching font
 /// is found rather than panicking.
-fn shape(font_ctx: &FontCtx, content: &str, font_size: f32, max_width: f32) -> suzuri::text::TextLayout<()> {
+pub(crate) fn shape(font_ctx: &FontCtx, content: &str, font_size: f32, max_width: f32) -> suzuri::text::TextLayout<()> {
     let mut data = suzuri::text::TextData::<()>::new();
     if let Some((font_id, _font)) = font_ctx.0.font_system.query(&suzuri::fontdb::Query {
         families: &[suzuri::fontdb::Family::SansSerif],
@@ -211,7 +211,7 @@ fn linear_to_srgb_u8(c: f32) -> u8 {
 /// cause not identified (deferred — see `ECS_IMPLEMENTATION_PLAN.md` §8);
 /// `write_data` sidesteps it entirely and is a strictly simpler upload for a
 /// flat fill anyway.
-fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<AtlasRegion> {
+pub(crate) fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<AtlasRegion> {
     let region = match ctx.texture_atlas.allocate(ctx.device, ctx.queue, [1, 1]) {
         Ok(region) => region,
         Err(e) => {
@@ -235,6 +235,36 @@ fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<AtlasRegion> {
     Some(region)
 }
 
+/// Composite `layout`'s glyphs into `(node, local_translation)` pairs, each a
+/// tint-texture quad masked by its cached stencil coverage bitmap, tinted
+/// uniformly by `tint_region` (see `paint_tint_region`). Shared by `Text`'s
+/// own render item and by any other widget (e.g. `Button`'s label) that needs
+/// to draw a shaped single-style glyph run without duplicating the
+/// suzuri-shaping/stencil-cache glue.
+pub(crate) fn glyph_run_nodes(
+    font_ctx: &FontCtx,
+    ctx: &RenderCtx,
+    layout: &suzuri::text::TextLayout<()>,
+    tint_region: &AtlasRegion,
+) -> Vec<(RenderNode, Matrix4<f32>)> {
+    let mut out = Vec::new();
+    for line in &layout.lines {
+        for glyph in &line.glyphs {
+            let Some((stencil_region, size)) =
+                font_ctx.stencil_region(glyph.glyph_id, ctx.device, ctx.queue, ctx.stencil_atlas)
+            else {
+                continue;
+            };
+            let transform = Matrix4::new_translation(&Vector3::new(glyph.x, glyph.y, 0.0));
+            let glyph_node = RenderNode::new()
+                .with_texture(tint_region.clone(), size, Matrix4::identity())
+                .with_stencil(stencil_region, size, Matrix4::identity());
+            out.push((glyph_node, transform));
+        }
+    }
+    out
+}
+
 /// Build a `RenderItem` that shapes `content` fresh every rebuild (reading
 /// the live wrap width from `wrap_width`) and draws each glyph as a
 /// tint-texture quad masked by its cached stencil coverage bitmap.
@@ -255,19 +285,8 @@ fn text_render_item(
             return node;
         };
 
-        for line in &layout.lines {
-            for glyph in &line.glyphs {
-                let Some((stencil_region, size)) =
-                    font_ctx.stencil_region(glyph.glyph_id, ctx.device, ctx.queue, ctx.stencil_atlas)
-                else {
-                    continue;
-                };
-                let transform = Matrix4::new_translation(&Vector3::new(glyph.x, glyph.y, 0.0));
-                let glyph_node = RenderNode::new()
-                    .with_texture(tint_region.clone(), size, Matrix4::identity())
-                    .with_stencil(stencil_region, size, Matrix4::identity());
-                node.push_child(glyph_node, transform);
-            }
+        for (glyph_node, transform) in glyph_run_nodes(&font_ctx, ctx, &layout, &tint_region) {
+            node.push_child(glyph_node, transform);
         }
 
         node

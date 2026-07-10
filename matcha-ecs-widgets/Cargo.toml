@@ -25,6 +25,9 @@ parley = { workspace = true }
 swash = { workspace = true }
 glyph-cache = { workspace = true }
 
+# raster image decode (Image)
+image = { workspace = true }
+
 # other
 log = { workspace = true }
 web-time = { workspace = true }

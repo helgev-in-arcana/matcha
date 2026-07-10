@@ -103,79 +103,84 @@ impl ColorRect {
     }
 }
 
-/// Build a `RenderItem` that rasterises a `w`×`h` solid `color` quad into the
-/// colour atlas and returns a textured `RenderNode` (positioned later by the
-/// entity's `GlobalTransform`). Shared with `Button`, which is also a solid
-/// rect until M6 adds label drawing.
-pub(crate) fn solid_rect_render_item(w: f32, h: f32, color: [f32; 4]) -> RenderItem {
-    RenderItem::new(move |ctx: &RenderCtx| {
-        let node = RenderNode::new();
-        if w <= 0.0 || h <= 0.0 {
+/// Rasterise a `w`×`h` solid `color` quad into the colour atlas and return a
+/// textured `RenderNode` (positioned later by the entity's `GlobalTransform`).
+/// Shared by every widget that needs to composite one or more flat-colour
+/// rects into a larger `RenderItem` (`ColorRect`, `Button`'s box, `Checkbox`'s
+/// border/fill, `Panel`'s border/background) without duplicating the
+/// render-pass/`VertexColor` boilerplate.
+pub(crate) fn solid_rect_node(ctx: &RenderCtx, w: f32, h: f32, color: [f32; 4]) -> RenderNode {
+    let node = RenderNode::new();
+    if w <= 0.0 || h <= 0.0 {
+        return node;
+    }
+
+    let size_px = [w.ceil() as u32, h.ceil() as u32];
+    let region = match ctx.texture_atlas.allocate(ctx.device, ctx.queue, size_px) {
+        Ok(region) => region,
+        Err(e) => {
+            log::error!("solid_rect_node atlas allocation failed: {e}");
             return node;
         }
+    };
 
-        let size_px = [w.ceil() as u32, h.ceil() as u32];
-        let region = match ctx.texture_atlas.allocate(ctx.device, ctx.queue, size_px) {
-            Ok(region) => region,
-            Err(e) => {
-                log::error!("ColorRect atlas allocation failed: {e}");
-                return node;
-            }
-        };
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("solid_rect_node Render Encoder"),
+        });
 
-        let mut encoder = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("ColorRect Render Encoder"),
-            });
+    // Colour is baked into the atlas texture at build time (no per-instance
+    // alpha uniform at draw time), so a live opacity animation (M7) must
+    // multiply it in here and rely on `RenderItem::invalidate()` to force
+    // a rebuild on every frame the opacity actually changes.
+    let color = [color[0], color[1], color[2], color[3] * ctx.opacity];
 
-        // Colour is baked into the atlas texture at build time (no per-instance
-        // alpha uniform at draw time), so a live opacity animation (M7) must
-        // multiply it in here and rely on `RenderItem::invalidate()` to force
-        // a rebuild on every frame the opacity actually changes.
-        let color = [color[0], color[1], color[2], color[3] * ctx.opacity];
+    let target_size = region.texture_size();
+    let target_format = region.format();
+    if let Ok(mut render_pass) = region.begin_render_pass(&mut encoder) {
+        let vertices = [
+            ColorVertex {
+                position: Point3::new(0.0, 0.0, 0.0),
+                color,
+            },
+            ColorVertex {
+                position: Point3::new(w, 0.0, 0.0),
+                color,
+            },
+            ColorVertex {
+                position: Point3::new(w, h, 0.0),
+                color,
+            },
+            ColorVertex {
+                position: Point3::new(0.0, h, 0.0),
+                color,
+            },
+        ];
+        let indices: [u16; 6] = [0, 1, 2, 0, 2, 3];
 
-        let target_size = region.texture_size();
-        let target_format = region.format();
-        if let Ok(mut render_pass) = region.begin_render_pass(&mut encoder) {
-            let vertices = [
-                ColorVertex {
-                    position: Point3::new(0.0, 0.0, 0.0),
-                    color,
-                },
-                ColorVertex {
-                    position: Point3::new(w, 0.0, 0.0),
-                    color,
-                },
-                ColorVertex {
-                    position: Point3::new(w, h, 0.0),
-                    color,
-                },
-                ColorVertex {
-                    position: Point3::new(0.0, h, 0.0),
-                    color,
-                },
-            ];
-            let indices: [u16; 6] = [0, 1, 2, 0, 2, 3];
+        VertexColor::default().render(
+            &mut render_pass,
+            TargetData {
+                target_size,
+                target_format,
+            },
+            RenderData {
+                transform: Matrix4::identity(),
+                vertices: &vertices,
+                indices: &indices,
+            },
+            ctx.device,
+        );
+    }
+    ctx.queue.submit(Some(encoder.finish()));
 
-            VertexColor::default().render(
-                &mut render_pass,
-                TargetData {
-                    target_size,
-                    target_format,
-                },
-                RenderData {
-                    transform: Matrix4::identity(),
-                    vertices: &vertices,
-                    indices: &indices,
-                },
-                ctx.device,
-            );
-        }
-        ctx.queue.submit(Some(encoder.finish()));
+    node.with_texture(region, [w, h], Matrix4::identity())
+}
 
-        node.with_texture(region, [w, h], Matrix4::identity())
-    })
+/// Build a `RenderItem` around a single [`solid_rect_node`] call.
+pub(crate) fn solid_rect_render_item(w: f32, h: f32, color: [f32; 4]) -> RenderItem {
+    RenderItem::new(move |ctx: &RenderCtx| solid_rect_node(ctx, w, h, color))
 }
 
 impl Widget for ColorRect {

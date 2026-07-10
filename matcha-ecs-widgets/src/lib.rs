@@ -10,9 +10,13 @@
 //! `.key(id)` builder to set its intrinsic reconciliation key.
 
 pub mod button;
+pub mod checkbox;
 pub mod color_rect;
+pub mod image;
 pub mod layout;
+pub mod link;
 pub mod padding;
+pub mod panel;
 pub mod rich_text;
 pub mod text;
 
@@ -24,9 +28,13 @@ pub mod text;
 pub use parley;
 
 pub use button::{Button, ButtonLabel};
+pub use checkbox::Checkbox;
 pub use color_rect::{ColorRect, RectColor};
-pub use layout::{Column, Container, Gap, LayoutKind, Row};
+pub use image::{Image, ImageSource};
+pub use layout::{AlignItems, Column, Container, Gap, JustifyContent, LayoutKind, Row};
+pub use link::Link;
 pub use matcha_ecs::components::input::{Message, OnClick};
 pub use padding::{Padding, PaddingLayout};
+pub use panel::{Panel, PanelLayout};
 pub use rich_text::{RichSpan, RichText, RichTextContent, TextTransform, WhiteSpace};
 pub use text::{Text, TextContent};
