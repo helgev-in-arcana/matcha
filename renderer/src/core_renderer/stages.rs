@@ -450,12 +450,15 @@ impl ComputeStage for CommandStage {
 
 #[cfg(test)]
 mod tests {
-    //! Correctness tests for the prefix-sum stage contract, checked against a
-    //! CPU exclusive scan. These need a real GPU adapter (the noop backend
-    //! does not execute shaders) and skip themselves when none is available —
-    //! run `cargo test -p renderer` on a machine with a GPU to exercise them.
+    //! Correctness tests for the compute stages: the prefix-sum contract is
+    //! checked against a CPU exclusive scan, and the visibility stage against
+    //! hand-computed cull expectations. These need a real GPU adapter (the
+    //! noop backend does not execute shaders) and skip themselves when none
+    //! is available — run `cargo test -p renderer` on a machine with a GPU
+    //! to exercise them.
 
     use super::*;
+    use crate::core_renderer::{InstanceData, StencilData, make_normalize_matrix};
 
     struct TestGpu {
         device: wgpu::Device,
@@ -706,6 +709,267 @@ mod tests {
                 .collect();
             assert_eq!(count as usize, expected.len(), "count mismatch (n={n})");
             assert_eq!(visible, expected, "compaction order mismatch (n={n})");
+        }
+    }
+
+    /// Transform mapping the unit quad to the pixel-space rectangle
+    /// (x, y)-(x+w, y+h), same construction the widget layer uses.
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> nalgebra::Matrix4<f32> {
+        nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(x, y, 0.0))
+            * nalgebra::Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(w, h, 1.0))
+    }
+
+    fn instance(viewport_position: nalgebra::Matrix4<f32>, stencil_index: u32) -> InstanceData {
+        InstanceData {
+            viewport_position,
+            atlas_page: 0,
+            in_atlas_offset: [0.0, 0.0],
+            in_atlas_size: [1.0, 1.0],
+            stencil_index,
+            _padding1: 0,
+            _padding2: 0,
+        }
+    }
+
+    fn stencil(viewport_position: nalgebra::Matrix4<f32>) -> StencilData {
+        let (exists, inverse) = viewport_position
+            .try_inverse()
+            .map(|m| (1, m))
+            .unwrap_or((0, nalgebra::Matrix4::identity()));
+        StencilData {
+            viewport_position,
+            viewport_position_inverse_exists: exists,
+            viewport_position_inverse: inverse,
+            atlas_page: 0,
+            in_atlas_offset: [0.0, 0.0],
+            in_atlas_size: [1.0, 1.0],
+            _padding1: [0; 3],
+            _padding2: 0,
+            _padding3: [0; 2],
+        }
+    }
+
+    /// Run the visibility stage over real instance/stencil data and read the
+    /// visibility flags back.
+    fn run_visibility(
+        gpu: &TestGpu,
+        instances: &[InstanceData],
+        stencils: &[StencilData],
+        viewport: [f32; 2],
+    ) -> Vec<u32> {
+        let device = &gpu.device;
+        let n = instances.len();
+        let flags_bytes = (std::mem::size_of::<u32>() * n) as u64;
+
+        let make_storage = |label: &str, size: u64, extra: wgpu::BufferUsages| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::STORAGE | extra,
+                mapped_at_creation: false,
+            })
+        };
+
+        let instances_buffer = make_storage(
+            "vis test instances",
+            std::mem::size_of_val(instances) as u64,
+            wgpu::BufferUsages::COPY_DST,
+        );
+        let stencils_buffer = make_storage(
+            "vis test stencils",
+            (std::mem::size_of::<StencilData>() * stencils.len().max(1)) as u64,
+            wgpu::BufferUsages::COPY_DST,
+        );
+        let visible_instances = make_storage(
+            "vis test visible_instances",
+            flags_bytes,
+            wgpu::BufferUsages::empty(),
+        );
+        let counter = make_storage("vis test counter", 4, wgpu::BufferUsages::empty());
+        let draw_command = make_storage("vis test draw_command", 16, wgpu::BufferUsages::empty());
+        let flags_buffer = make_storage(
+            "vis test visibility_flags",
+            flags_bytes,
+            wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        );
+        let offsets_buffer =
+            make_storage("vis test scan_offsets", flags_bytes, wgpu::BufferUsages::empty());
+
+        let data_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vis test data bind group"),
+            layout: &gpu.data_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: instances_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: stencils_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: visible_instances.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: counter.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: draw_command.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: flags_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: offsets_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        gpu.queue
+            .write_buffer(&instances_buffer, 0, bytemuck::cast_slice(instances));
+        if !stencils.is_empty() {
+            gpu.queue
+                .write_buffer(&stencils_buffer, 0, bytemuck::cast_slice(stencils));
+        } else {
+            gpu.queue.write_buffer(
+                &stencils_buffer,
+                0,
+                bytemuck::bytes_of(&stencil(nalgebra::Matrix4::identity())),
+            );
+        }
+        // Poison the flags so stale values can't fake a pass in either direction.
+        gpu.queue
+            .write_buffer(&flags_buffer, 0, &vec![0xffu8; flags_bytes as usize]);
+
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vis test readback"),
+            size: flags_bytes,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let stage = VisibilityStage::new(device, &gpu.data_bind_group_layout);
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let params = StageParams {
+            normalize_matrix: make_normalize_matrix(viewport),
+            instance_count: n as u32,
+        };
+        stage.encode(&mut encoder, &data_bind_group, &params);
+        encoder.copy_buffer_to_buffer(&flags_buffer, 0, &readback, 0, flags_bytes);
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.expect("buffer map"));
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll");
+        let flags: Vec<u32> = bytemuck::cast_slice(&readback.slice(..).get_mapped_range()).to_vec();
+        flags
+    }
+
+    /// SAT visibility test against hand-computed expectations on an 800x600
+    /// viewport, covering the false-negative classes of the previous
+    /// vertex-containment algorithm (identical glyph/stencil quads,
+    /// cross-shaped overlaps, boundary contact) alongside plain in/out cases.
+    #[test]
+    fn visibility_stage_culls_correctly() {
+        let Some(gpu) = test_gpu() else {
+            eprintln!("skipping: no real GPU adapter available");
+            return;
+        };
+        let viewport = [800.0, 600.0];
+
+        // Stencils (stencil_index on the instance is index + 1; 0 = none).
+        let stencils = vec![
+            stencil(rect(300.0, 300.0, 20.0, 20.0)), // 1: identical to the glyph quad below
+            stencil(rect(400.0, 400.0, 50.0, 50.0)), // 2: disjoint from its instance
+            stencil(rect(900.0, 100.0, 100.0, 50.0)), // 3: overlaps instance, but off-screen
+            stencil(rect(0.0, 0.0, 0.0, 0.0)),       // 4: zero scale -> non-invertible
+        ];
+        assert_eq!(
+            stencils[3].viewport_position_inverse_exists, 0,
+            "test setup: stencil 4 must be non-invertible"
+        );
+
+        let cases: Vec<(&str, InstanceData, u32)> = vec![
+            (
+                "plain quad inside the viewport",
+                instance(rect(100.0, 100.0, 200.0, 150.0), 0),
+                1,
+            ),
+            (
+                "fully off-screen to the right",
+                instance(rect(900.0, 100.0, 50.0, 50.0), 0),
+                0,
+            ),
+            (
+                "fully off-screen below",
+                instance(rect(100.0, 700.0, 50.0, 50.0), 0),
+                0,
+            ),
+            (
+                // Corners of the bar lie outside the viewport and viewport
+                // corners lie outside the bar: only edges cross. The previous
+                // vertex-containment test culled this.
+                "bar wider than the viewport (cross-shaped overlap)",
+                instance(rect(-100.0, 250.0, 1000.0, 100.0), 0),
+                1,
+            ),
+            (
+                // Every vertex sits exactly on the other quad's boundary.
+                "background exactly matching the viewport",
+                instance(rect(0.0, 0.0, 800.0, 600.0), 0),
+                1,
+            ),
+            (
+                // The glyph pattern: stencil quad bit-identical to the
+                // texture quad. The previous test culled every such glyph.
+                "glyph with stencil identical to its texture quad",
+                instance(rect(300.0, 300.0, 20.0, 20.0), 1),
+                1,
+            ),
+            (
+                "instance disjoint from its stencil",
+                instance(rect(100.0, 100.0, 50.0, 50.0), 2),
+                0,
+            ),
+            (
+                // Instance spans the right viewport edge; the part of it the
+                // stencil lets through is entirely off-screen.
+                "stencil off-screen (masked pixels never visible)",
+                instance(rect(700.0, 100.0, 400.0, 50.0), 3),
+                0,
+            ),
+            (
+                // Render draws unmasked when the stencil transform is not
+                // invertible; culling must mirror that and keep the instance.
+                "non-invertible stencil falls back to unmasked",
+                instance(rect(100.0, 100.0, 50.0, 50.0), 4),
+                1,
+            ),
+            (
+                // Shares only the x = 800 edge with the viewport:
+                // boundary-inclusive SAT keeps it (conservative).
+                "touching the viewport edge only",
+                instance(rect(800.0, 100.0, 50.0, 50.0), 0),
+                1,
+            ),
+        ];
+
+        let instances: Vec<InstanceData> = cases.iter().map(|(_, i, _)| *i).collect();
+        let flags = run_visibility(&gpu, &instances, &stencils, viewport);
+        for (i, (label, _, expected)) in cases.iter().enumerate() {
+            assert_eq!(
+                flags[i], *expected,
+                "visibility mismatch for case {i}: {label}"
+            );
         }
     }
 }
