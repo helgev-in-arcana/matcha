@@ -55,8 +55,7 @@ struct StencilData {
 
 @group(0) @binding(0) var<storage, read> all_instances: array<InstanceData>;
 @group(0) @binding(1) var<storage, read> all_stencils: array<StencilData>;
-@group(0) @binding(2) var<storage, read_write> visible_instances: array<u32>;
-@group(0) @binding(3) var<storage, read_write> visible_instance_count: atomic<u32>;
+@group(0) @binding(5) var<storage, read_write> visibility_flags: array<u32>;
 
 struct Pc {
     normalize_matrix: mat4x4<f32>,
@@ -119,22 +118,22 @@ fn culling_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         !use_stencil || (stencil_is_in_viewport && texture_and_stencil_overlap)
     );
 
-    // IMPORTANT: the write below must preserve submission order. Instances are
+    // IMPORTANT: compaction must preserve submission order. Instances are
     // alpha-blended UI quads whose paint order IS their stacking order (a panel
     // background must draw before the label glyphs on top of it), and the render
     // pass draws `all_instances[visible_instances[i]]` in `i` order. An earlier
-    // version compacted with `visible_instances[atomicAdd(&count)] = index`,
+    // version compacted here with `visible_instances[atomicAdd(&count)] = index`,
     // which shuffles the array in GPU-scheduling order and intermittently drew
     // backgrounds over their own children (observed as text glyphs/images
-    // flickering out). Culling is currently disabled (every instance is kept,
-    // `is_visible` unused), so identity order is trivially correct; when real
-    // culling is implemented it must use an order-preserving compaction (e.g.
-    // prefix sum), NOT the atomicAdd pattern.
-    // todo: implement proper visibility culling (order-preserving)
-    if true {
-        atomicAdd(&visible_instance_count, 1u);
-        visible_instances[instance_index] = instance_index;
-    }
+    // flickering out). This stage therefore only emits a 0/1 visibility flag;
+    // the prefix-sum + scatter stages downstream turn the flags into an
+    // order-preserving compaction of `visible_instances`.
+    //
+    // TODO(follow-up): the visibility test above has a known bug, so every
+    // instance is kept for now (`is_visible` is computed but unused). Once the
+    // test is fixed, switch to: visibility_flags[instance_index] = select(0u, 1u, is_visible);
+    _ = is_visible;
+    visibility_flags[instance_index] = 1u;
 }
 
 fn is_overlapping(
