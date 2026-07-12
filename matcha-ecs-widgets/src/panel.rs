@@ -109,13 +109,17 @@ impl Panel {
 }
 
 /// Build a `RenderItem` compositing the border box with an inset background
-/// box on top.
-fn panel_render_item(layout: PanelLayout, colors: PanelColors) -> RenderItem {
+/// box on top, drawn at the layout-allocated size (`ctx.size`) — the same
+/// size `PanelLayout::arrange` centres the child within, so paint and child
+/// placement can never disagree even when a parent layout stretches the panel
+/// beyond its declared `w`×`h`.
+fn panel_render_item(border_width: f32, colors: PanelColors) -> RenderItem {
     RenderItem::new(move |ctx: &RenderCtx| {
-        let mut node = solid_rect_node(ctx, layout.w, layout.h, colors.border_color);
-        let inset = layout.border_width;
-        let inner_w = (layout.w - inset * 2.0).max(0.0);
-        let inner_h = (layout.h - inset * 2.0).max(0.0);
+        let [w, h] = ctx.size;
+        let mut node = solid_rect_node(ctx, w, h, colors.border_color);
+        let inset = border_width;
+        let inner_w = (w - inset * 2.0).max(0.0);
+        let inner_h = (h - inset * 2.0).max(0.0);
         let fill = solid_rect_node(ctx, inner_w, inner_h, colors.background_color);
         let transform = Matrix4::new_translation(&Vector3::new(inset, inset, 0.0));
         node.push_child(fill, transform);
@@ -133,7 +137,7 @@ impl Widget for Panel {
             self.layout(),
             self.colors(),
             LayoutDispatch::of::<PanelLayout>(),
-            panel_render_item(self.layout(), self.colors()),
+            panel_render_item(self.border_width, self.colors()),
         )
     }
 
@@ -146,7 +150,7 @@ impl Widget for Panel {
             changed |= c.set_if_neq(self.colors());
         }
         if changed {
-            let item = panel_render_item(self.layout(), self.colors());
+            let item = panel_render_item(self.border_width, self.colors());
             if let Some(mut existing) = entity.get_mut::<RenderItem>() {
                 *existing = item;
             }

@@ -138,8 +138,6 @@ impl<Msg: Message> Button<Msg> {
         let font_ctx = entity.world_scope(|world| world.get_resource_or_insert_with(FontCtx::new).clone());
         button_render_item(
             font_ctx,
-            self.w,
-            self.h,
             self.color,
             self.label.clone(),
             self.font_size,
@@ -150,16 +148,16 @@ impl<Msg: Message> Button<Msg> {
 
 /// Build a `RenderItem` compositing a solid box with a single-line, centred,
 /// shaped text label on top (no word-wrap — a button label is one line).
+/// Drawn at the layout-allocated size (`ctx.size`), not the declared one.
 fn button_render_item(
     font_ctx: FontCtx,
-    w: f32,
-    h: f32,
     box_color: [f32; 4],
     label: String,
     font_size: f32,
     label_color: [f32; 4],
 ) -> RenderItem {
     RenderItem::new(move |ctx: &RenderCtx| {
+        let [w, h] = ctx.size;
         let mut node = solid_rect_node(ctx, w, h, box_color);
 
         let layout = shape(&font_ctx, &label, font_size, f32::MAX);

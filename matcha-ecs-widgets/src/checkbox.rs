@@ -120,14 +120,18 @@ impl<Msg: Message> Checkbox<Msg> {
 }
 
 /// Build a `RenderItem` compositing the outer border box with an inset fill
-/// box on top, only when `checked`.
-fn checkbox_render_item(size: f32, state: CheckboxState) -> RenderItem {
+/// box on top, only when `checked`. Drawn at the layout-allocated size
+/// (`ctx.size`) — normally the declared square, but a stretching parent
+/// layout may allocate a non-square box, and paint must track layout.
+fn checkbox_render_item(state: CheckboxState) -> RenderItem {
     RenderItem::new(move |ctx: &RenderCtx| {
-        let mut node = solid_rect_node(ctx, size, size, state.border_color);
+        let [w, h] = ctx.size;
+        let mut node = solid_rect_node(ctx, w, h, state.border_color);
         if state.checked {
             let inset = state.border_width;
-            let fill_size = (size - inset * 2.0).max(0.0);
-            let fill_node = solid_rect_node(ctx, fill_size, fill_size, state.fill_color);
+            let fill_w = (w - inset * 2.0).max(0.0);
+            let fill_h = (h - inset * 2.0).max(0.0);
+            let fill_node = solid_rect_node(ctx, fill_w, fill_h, state.fill_color);
             let transform = Matrix4::new_translation(&Vector3::new(inset, inset, 0.0));
             node.push_child(fill_node, transform);
         }
@@ -147,7 +151,7 @@ impl<Msg: Message> Widget for Checkbox<Msg> {
             OnClick(self.msg),
             LayoutDispatch::of::<RectGeometry>(),
             HitTestEnabled,
-            checkbox_render_item(self.size, self.state()),
+            checkbox_render_item(self.state()),
         )
     }
 
@@ -164,7 +168,7 @@ impl<Msg: Message> Widget for Checkbox<Msg> {
         }
 
         if changed {
-            let item = checkbox_render_item(self.size, self.state());
+            let item = checkbox_render_item(self.state());
             if let Some(mut existing) = entity.get_mut::<RenderItem>() {
                 *existing = item;
             }

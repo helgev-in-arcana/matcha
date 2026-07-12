@@ -143,11 +143,13 @@ fn decode(source: &ImageSource) -> Option<image::DynamicImage> {
     }
 }
 
-/// Build a `RenderItem` fitting `source` within `box_w`×`box_h` (CSS
-/// `object-fit: contain`), decoding/resizing/uploading at most once per
-/// distinct `(source, box size)` pair via `image_ctx`.
-fn image_render_item(image_ctx: ImageCtx, source: ImageSource, box_w: f32, box_h: f32) -> RenderItem {
+/// Build a `RenderItem` fitting `source` within the layout-allocated box
+/// (`ctx.size` — which a parent layout may have stretched beyond the declared
+/// `w`×`h`; CSS `object-fit: contain`), decoding/resizing/uploading at most
+/// once per distinct `(source, box size)` pair via `image_ctx`.
+fn image_render_item(image_ctx: ImageCtx, source: ImageSource) -> RenderItem {
     RenderItem::new(move |ctx: &RenderCtx| {
+        let [box_w, box_h] = ctx.size;
         let mut node = RenderNode::new();
         if box_w <= 0.0 || box_h <= 0.0 {
             return node;
@@ -262,7 +264,7 @@ impl Image {
 
     fn rebuild_render_item(&self, entity: &mut EntityWorldMut) -> RenderItem {
         let image_ctx = entity.world_scope(|world| world.get_resource_or_insert_with(ImageCtx::new).clone());
-        image_render_item(image_ctx, self.source.clone(), self.w, self.h)
+        image_render_item(image_ctx, self.source.clone())
     }
 }
 

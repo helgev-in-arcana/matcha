@@ -26,6 +26,14 @@ pub struct RenderCtx<'a> {
     /// per-instance alpha uniform at draw time), so a builder that wants to
     /// fade must multiply this into its vertex colours itself.
     pub opacity: f32,
+    /// The size layout allocated to this entity (`LayoutOutput::size`).
+    /// Builders must draw at *this* size, not a constructor-declared one: a
+    /// parent layout may allocate more than the widget asked for (e.g.
+    /// `AlignItems::Stretch`, or a min-size constraint), and the entity's
+    /// hit-test rect and child arrangement already use the allocated size —
+    /// drawing at any other size desynchronises paint from layout.
+    /// `[0.0, 0.0]` if the entity has never been laid out.
+    pub size: [f32; 2],
 }
 
 /// A widget's current opacity, `0.0` (invisible) to `1.0` (fully visible).

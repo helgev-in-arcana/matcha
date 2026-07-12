@@ -179,9 +179,11 @@ pub(crate) fn solid_rect_node(ctx: &RenderCtx, w: f32, h: f32, color: [f32; 4]) 
     node.with_texture(region, [w, h], Matrix4::identity())
 }
 
-/// Build a `RenderItem` around a single [`solid_rect_node`] call.
-pub(crate) fn solid_rect_render_item(w: f32, h: f32, color: [f32; 4]) -> RenderItem {
-    RenderItem::new(move |ctx: &RenderCtx| solid_rect_node(ctx, w, h, color))
+/// Build a `RenderItem` around a single [`solid_rect_node`] call, drawn at the
+/// layout-allocated size (`ctx.size`) — not the widget's declared size, which
+/// a parent layout (e.g. `AlignItems::Stretch`) may have overridden.
+pub(crate) fn solid_rect_render_item(color: [f32; 4]) -> RenderItem {
+    RenderItem::new(move |ctx: &RenderCtx| solid_rect_node(ctx, ctx.size[0], ctx.size[1], color))
 }
 
 impl Widget for ColorRect {
@@ -196,7 +198,7 @@ impl Widget for ColorRect {
             self.geometry(),
             RectColor(self.color),
             LayoutDispatch::of::<RectGeometry>(),
-            solid_rect_render_item(self.w, self.h, self.color),
+            solid_rect_render_item(self.color),
             RenderOpacity(initial_opacity),
         )
     }
@@ -234,7 +236,7 @@ impl Widget for ColorRect {
         }
         // Rebuild the cached render node only when a draw-relevant prop changed.
         if changed {
-            let item = solid_rect_render_item(self.w, self.h, self.color);
+            let item = solid_rect_render_item(self.color);
             if let Some(mut existing) = entity.get_mut::<RenderItem>() {
                 *existing = item;
             }

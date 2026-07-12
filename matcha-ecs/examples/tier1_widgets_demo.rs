@@ -114,8 +114,12 @@ fn view(model: &Model, s: &mut Scope) {
         });
 
         // --- Panel: background-only (no border) vs bordered ---
+        // `align_items(Start)`: the default `Stretch` would allocate every
+        // panel the row's full cross size (the tallest sibling's height) and
+        // — now that widgets draw at their *allocated* size — visibly grow
+        // them. This demo wants the declared sizes compared side by side.
         section_label(s, "Panel — background-only (border_width 0) vs bordered");
-        s.node(Row::new().gap(16.0), |s| {
+        s.node(Row::new().gap(16.0).align_items(AlignItems::Start), |s| {
             s.node(Panel::new(150.0, 60.0).background_color([0.18, 0.22, 0.3, 1.0]), |s| {
                 s.leaf(Text::new("no border").font_size(13.0));
             });
@@ -131,8 +135,11 @@ fn view(model: &Model, s: &mut Scope) {
         });
 
         // --- Image: object-fit: contain against a wide box and a tall box, same source ---
+        // `align_items(Start)` for the same reason as the Panel row above:
+        // the point here is a *wide* box next to a *tall* box, which Stretch
+        // would erase by stretching both to the same 180px height.
         section_label(s, "Image — object-fit: contain, same source in a wide box and a tall box");
-        s.node(Row::new().gap(16.0), |s| {
+        s.node(Row::new().gap(16.0).align_items(AlignItems::Start), |s| {
             s.node(
                 Panel::new(220.0, 100.0).border_width(2.0).border_color([0.5, 0.5, 0.55, 1.0]).background_color([0.12, 0.12, 0.14, 1.0]),
                 |s| {

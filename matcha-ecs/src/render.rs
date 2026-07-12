@@ -22,18 +22,20 @@ use parking_lot::{Condvar, Mutex};
 use renderer::{CoreRenderer, RenderNode};
 
 use crate::components::{
-    layout::GlobalTransform,
+    layout::{GlobalTransform, LayoutOutput},
     render::{RenderCtx, RenderItem, RenderOpacity},
     view::ViewChildren,
 };
 
 /// One drawable entity captured for a frame: the shared node cache, its deferred
-/// builder, its window-space transform (already composed by M3 layout), and its
-/// current opacity (`1.0` if the entity has no `RenderOpacity`).
+/// builder, its window-space transform (already composed by M3 layout), the size
+/// layout allocated to it (`LayoutOutput::size` — what the builder must draw at),
+/// and its current opacity (`1.0` if the entity has no `RenderOpacity`).
 pub struct RenderItemSnapshot {
     pub cache: Arc<Mutex<Option<Arc<RenderNode>>>>,
     pub builder: Arc<dyn Fn(&RenderCtx) -> RenderNode + Send + Sync>,
     pub transform: Matrix4<f32>,
+    pub size: [f32; 2],
     pub opacity: f32,
 }
 
@@ -78,10 +80,19 @@ fn extract_recursive(world: &World, entity: Entity, out: &mut Vec<RenderItemSnap
                 .get::<RenderOpacity>(child)
                 .map(|o| o.0)
                 .unwrap_or(1.0);
+            // `LayoutOutput` is written by the same `arrange_child` call that
+            // writes `GlobalTransform` (which gated this branch), so it is
+            // present on every laid-out entity; `[0.0, 0.0]` only for an
+            // entity that somehow carries a hand-inserted transform.
+            let size = world
+                .get::<LayoutOutput>(child)
+                .map(|l| l.size)
+                .unwrap_or([0.0, 0.0]);
             out.push(RenderItemSnapshot {
                 cache: item.cache.clone(),
                 builder: item.builder.clone(),
                 transform: transform.affine,
+                size,
                 opacity,
             });
         }
@@ -116,6 +127,7 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
             texture_atlas: &texture_atlas,
             stencil_atlas: &stencil_atlas,
             opacity: item.opacity,
+            size: item.size,
         };
         let node = build_node(&item.cache, &item.builder, &ctx);
         nodes.push((node, item.transform));
