@@ -6,12 +6,15 @@ use gpu_utils::texture_atlas;
 use texture_atlas::RegionError;
 use thiserror::Error;
 
-const WGSL_CULL: &str = include_str!("core_renderer/renderer_cull.wgsl");
-const WGSL_COMMAND: &str = include_str!("core_renderer/renderer_command.wgsl");
+mod stages;
+use stages::{
+    BlellochPrefixSumStage, CommandStage, ComputeStage, ScatterStage, StageParams,
+    VisibilityStage,
+};
+
 const WGSL_RENDER: &str = include_str!("core_renderer/renderer_render.wgsl");
 
 const PIPELINE_CACHE_SIZE: u64 = 3;
-const COMPUTE_WORKGROUP_SIZE: u32 = 64;
 
 // PERF NOTE:
 // - BindGroup/Buffer の再利用・リング化を検討（毎フレームの生成/全量 write を抑制）
@@ -102,14 +105,6 @@ const _: () = {
     assert!(std::mem::size_of::<StencilData>() == 176);
     assert!(std::mem::size_of::<RenderPushConstants>() == 80);
 };
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct CullingPushConstants {
-    normalize_matrix: nalgebra::Matrix4<f32>,
-    instance_count: u32,
-    _pad: [u32; 3],
-}
 
 /// Half a texel, in normalized UV units, for each atlas. Used by the render
 /// shader to inset the UV clamp bounds so that sampling at the very edge of
@@ -210,14 +205,15 @@ pub struct CoreRendererInner {
     data_bind_group_layout: wgpu::BindGroupLayout,
 
     // Pipeline Layouts
-    culling_pipeline_layout: wgpu::PipelineLayout,
-    command_pipeline_layout: wgpu::PipelineLayout,
     render_pipeline_layout: wgpu::PipelineLayout,
     render_pipeline_shader_module: wgpu::ShaderModule,
 
+    // Compute stages of the compaction pipeline (visibility -> prefix sum ->
+    // scatter -> command), run in order. Each stage is an interchangeable
+    // `ComputeStage` implementation; see `stages.rs`.
+    compaction_stages: Vec<Box<dyn ComputeStage>>,
+
     // Pipelines
-    culling_pipeline: wgpu::ComputePipeline,
-    command_pipeline: wgpu::ComputePipeline,
     render_pipeline:
         crate::pipeline_cache::PipelineCache<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>>, // key: surface format
 
@@ -225,6 +221,99 @@ pub struct CoreRendererInner {
     atomic_counter: wgpu::Buffer,
     draw_command: wgpu::Buffer,
     draw_command_storage: wgpu::Buffer,
+}
+
+/// Bind group layout for the data buffers shared by every compute stage and
+/// the render pass. Bindings 0-4 are also visible to the render shaders;
+/// bindings 5-6 are compute-only intermediates of the order-preserving
+/// compaction (see `stages.rs`).
+fn create_data_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("ObjectRenderer Data Bind Group Layout"),
+        entries: &[
+            // All Instances Buffer
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // All Stencils Buffer
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE
+                    | wgpu::ShaderStages::FRAGMENT
+                    | wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // Visible Instances Buffer (compacted, submission order)
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // Atomic Counter (visible instance count)
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // command buffer (indirect draw args)
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // Visibility flags (0/1 per instance; written by the visibility
+            // stage, consumed by the prefix-sum and scatter stages)
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // Scan offsets (exclusive prefix sum of the visibility flags;
+            // written by the prefix-sum stage, consumed by the scatter stage)
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
 }
 
 impl CoreRendererInner {
@@ -279,76 +368,16 @@ impl CoreRendererInner {
                 ],
             });
 
-        // Culling Pipeline
-        let data_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Culling Bind Group Layout"),
-                entries: &[
-                    // All Instances Buffer
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    // All Stencils Buffer
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE
-                            | wgpu::ShaderStages::FRAGMENT
-                            | wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    // Visible Instances Buffer
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    // Atomic Counter
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    // command buffer
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 4,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
+        let data_bind_group_layout = create_data_bind_group_layout(device);
 
-        let (culling_pipeline_layout, culling_pipeline) =
-            Self::create_culling_pipeline(device, &data_bind_group_layout);
-
-        let (command_pipeline_layout, command_pipeline) =
-            Self::create_command_pipeline(device, &data_bind_group_layout);
+        let compaction_stages: Vec<Box<dyn ComputeStage>> = vec![
+            Box::new(VisibilityStage::new(device, &data_bind_group_layout)),
+            // Swap the scan algorithm by constructing a different stage here
+            // (e.g. `SingleThreadPrefixSumStage` as the naive reference).
+            Box::new(BlellochPrefixSumStage::new(device, &data_bind_group_layout)),
+            Box::new(ScatterStage::new(device, &data_bind_group_layout)),
+            Box::new(CommandStage::new(device, &data_bind_group_layout)),
+        ];
 
         let (render_pipeline_layout, render_pipeline_shader_module) =
             Self::create_render_pipeline_layout(
@@ -387,75 +416,14 @@ impl CoreRendererInner {
             texture_sampler,
             texture_bind_group_layout,
             data_bind_group_layout,
-            culling_pipeline_layout,
-            command_pipeline_layout,
             render_pipeline_layout,
             render_pipeline_shader_module,
-            culling_pipeline,
-            command_pipeline,
+            compaction_stages,
             render_pipeline,
             atomic_counter,
             draw_command,
             draw_command_storage,
         }
-    }
-
-    fn create_culling_pipeline(
-        device: &wgpu::Device,
-        bind_group_layout: &wgpu::BindGroupLayout,
-    ) -> (wgpu::PipelineLayout, wgpu::ComputePipeline) {
-        trace!("CoreRenderer::create_culling_pipeline: creating pipeline");
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Culling Shader"),
-            source: wgpu::ShaderSource::Wgsl(WGSL_CULL.into()),
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Culling Pipeline Layout"),
-            bind_group_layouts: &[Some(bind_group_layout)],
-            immediate_size: std::mem::size_of::<CullingPushConstants>() as u32,
-        });
-
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Culling Pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &module,
-            entry_point: Some("culling_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        trace!("CoreRenderer::create_culling_pipeline: pipeline ready");
-
-        (pipeline_layout, pipeline)
-    }
-
-    fn create_command_pipeline(
-        device: &wgpu::Device,
-        bind_group_layout: &wgpu::BindGroupLayout,
-    ) -> (wgpu::PipelineLayout, wgpu::ComputePipeline) {
-        trace!("CoreRenderer::create_command_pipeline: creating pipeline");
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Command Shader"),
-            source: wgpu::ShaderSource::Wgsl(WGSL_COMMAND.into()),
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Command Pipeline Layout"),
-            bind_group_layouts: &[Some(bind_group_layout)],
-            immediate_size: 0,
-        });
-
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Command Pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &module,
-            entry_point: Some("command_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        trace!("CoreRenderer::create_command_pipeline: pipeline ready");
-
-        (pipeline_layout, pipeline)
     }
 
     fn create_render_pipeline_layout(
@@ -684,6 +652,20 @@ impl CoreRendererInner {
             mapped_at_creation: false,
         });
 
+        let visibility_flags_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ObjectRenderer Visibility Flags Buffer"),
+            size: (std::mem::size_of::<u32>() * instances.len()) as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        let scan_offsets_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ObjectRenderer Scan Offsets Buffer"),
+            size: (std::mem::size_of::<u32>() * instances.len()) as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
         // Create bind groups
         let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ObjectRenderer Texture Bind Group"),
@@ -740,6 +722,14 @@ impl CoreRendererInner {
                     binding: 4,
                     resource: self.draw_command_storage.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: visibility_flags_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: scan_offsets_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -779,10 +769,9 @@ impl CoreRendererInner {
         trace!("CoreRenderer::render: command encoder created");
 
         let normalize_matrix = make_normalize_matrix(destination_size);
-        let cull_pc = CullingPushConstants {
+        let stage_params = StageParams {
             normalize_matrix,
             instance_count: instances.len() as u32,
-            _pad: [0; 3],
         };
         let texture_atlas_size = texture_atlas.size();
         let stencil_atlas_size = stencil_atlas.size();
@@ -798,36 +787,13 @@ impl CoreRendererInner {
             ],
         };
 
-        // culling compute pass
-        {
-            let mut culling_pass =
-                command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("ObjectRenderer: Culling Pass"),
-                    timestamp_writes: None,
-                });
-            culling_pass.set_pipeline(&self.culling_pipeline);
-            culling_pass.set_bind_group(0, &data_bind_group, &[]);
-            culling_pass.set_immediates(0, bytemuck::bytes_of(&cull_pc));
-            culling_pass.dispatch_workgroups(
-                (instances.len() as u32).div_ceil(COMPUTE_WORKGROUP_SIZE),
-                1,
-                1,
-            );
+        // Compaction pipeline: visibility -> prefix sum -> scatter -> command.
+        // The stages together produce an order-preserving compaction of the
+        // instance indices in `visible_instances` plus the indirect draw args.
+        for stage in &self.compaction_stages {
+            stage.encode(&mut command_encoder, &data_bind_group, &stage_params);
         }
-        trace!("CoreRenderer::render: culling pass dispatched");
-
-        // command encoding pass
-        {
-            let mut command_pass =
-                command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("ObjectRenderer: Command Pass"),
-                    timestamp_writes: None,
-                });
-            command_pass.set_pipeline(&self.command_pipeline);
-            command_pass.set_bind_group(0, &data_bind_group, &[]);
-            command_pass.dispatch_workgroups(1, 1, 1);
-        }
-        trace!("CoreRenderer::render: command pass dispatched");
+        trace!("CoreRenderer::render: compaction stages dispatched");
 
         command_encoder.copy_buffer_to_buffer(
             &self.draw_command_storage,

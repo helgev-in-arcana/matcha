@@ -55,8 +55,7 @@ struct StencilData {
 
 @group(0) @binding(0) var<storage, read> all_instances: array<InstanceData>;
 @group(0) @binding(1) var<storage, read> all_stencils: array<StencilData>;
-@group(0) @binding(2) var<storage, read_write> visible_instances: array<u32>;
-@group(0) @binding(3) var<storage, read_write> visible_instance_count: atomic<u32>;
+@group(0) @binding(5) var<storage, read_write> visibility_flags: array<u32>;
 
 struct Pc {
     normalize_matrix: mat4x4<f32>,
@@ -76,11 +75,12 @@ const QUAD_VERTICES = array<vec4<f32>, 4>(
     vec4<f32>(1.0, 0.0, 0.0, 1.0),
 );
 
-const CLIP_VERTICES = array<vec4<f32>, 4>(
-    vec4<f32>(-1.0,  1.0, 0.0, 1.0),
-    vec4<f32>(-1.0, -1.0, 0.0, 1.0),
-    vec4<f32>( 1.0, -1.0, 0.0, 1.0),
-    vec4<f32>( 1.0,  1.0, 0.0, 1.0),
+// Viewport corners in clip space, perimeter order.
+const CLIP_VERTICES = array<vec2<f32>, 4>(
+    vec2<f32>(-1.0,  1.0),
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>( 1.0, -1.0),
+    vec2<f32>( 1.0,  1.0),
 );
 
 @compute @workgroup_size(64)
@@ -96,89 +96,114 @@ fn culling_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let stencil_index = max(stencil_index_add_1 - 1u, 0u);
     let stencil = all_stencils[stencil_index];
 
-    // Visible conditions:
-    // 1. instance is within the viewport
-    // 2. (no stencil) or (stencil is within the viewport)
-    // 3. instance's polygon and stencil's polygon have overlap
+    // Visible conditions (conservative: every pixel the render pass can shade
+    // lies inside texture-quad ∩ viewport, and — when a stencil masks the
+    // instance — inside texture ∩ stencil and stencil ∩ viewport as well, so
+    // the instance may be culled as soon as ANY of those pairwise
+    // intersections is provably empty):
+    // 1. instance quad overlaps the viewport
+    // 2. (no active stencil) or (stencil quad overlaps the viewport
+    //    and instance quad overlaps stencil quad)
+    //
+    // NOTE: positions are divided by w for form's sake, but the whole pipeline
+    // assumes affine transforms (w == 1); the render shader interpolates
+    // stencil UVs computed per-vertex, which would also break under a real
+    // projective transform.
 
-    var texture_position: array<vec4<f32>, 4>;
+    var texture_position: array<vec2<f32>, 4>;
     for (var i = 0u; i < 4u; i++) {
-        texture_position[i] = pc.normalize_matrix * instance.viewport_position * QUAD_VERTICES[i];
+        let p = pc.normalize_matrix * instance.viewport_position * QUAD_VERTICES[i];
+        texture_position[i] = p.xy / p.w;
     }
 
-    var stencil_position: array<vec4<f32>, 4>;
+    var stencil_position: array<vec2<f32>, 4>;
     for (var i = 0u; i < 4u; i++) {
-        stencil_position[i] = pc.normalize_matrix * stencil.viewport_position * QUAD_VERTICES[i];
+        let p = pc.normalize_matrix * stencil.viewport_position * QUAD_VERTICES[i];
+        stencil_position[i] = p.xy / p.w;
     }
+
+    // Mirror the render shader's stencil fallback: a non-invertible stencil
+    // transform draws the instance unmasked there, so it must not participate
+    // in culling here either (its degenerate quad could otherwise cull an
+    // instance the render pass would draw).
+    let stencil_active = use_stencil && (stencil.viewport_position_inverse_exists != 0u);
 
     let texture_is_in_viewport = is_overlapping(texture_position, CLIP_VERTICES);
     let stencil_is_in_viewport = is_overlapping(stencil_position, CLIP_VERTICES);
     let texture_and_stencil_overlap = is_overlapping(texture_position, stencil_position);
 
     let is_visible = texture_is_in_viewport && (
-        !use_stencil || (stencil_is_in_viewport && texture_and_stencil_overlap)
+        !stencil_active || (stencil_is_in_viewport && texture_and_stencil_overlap)
     );
 
-    // IMPORTANT: the write below must preserve submission order. Instances are
+    // IMPORTANT: compaction must preserve submission order. Instances are
     // alpha-blended UI quads whose paint order IS their stacking order (a panel
     // background must draw before the label glyphs on top of it), and the render
     // pass draws `all_instances[visible_instances[i]]` in `i` order. An earlier
-    // version compacted with `visible_instances[atomicAdd(&count)] = index`,
+    // version compacted here with `visible_instances[atomicAdd(&count)] = index`,
     // which shuffles the array in GPU-scheduling order and intermittently drew
     // backgrounds over their own children (observed as text glyphs/images
-    // flickering out). Culling is currently disabled (every instance is kept,
-    // `is_visible` unused), so identity order is trivially correct; when real
-    // culling is implemented it must use an order-preserving compaction (e.g.
-    // prefix sum), NOT the atomicAdd pattern.
-    // todo: implement proper visibility culling (order-preserving)
-    if true {
-        atomicAdd(&visible_instance_count, 1u);
-        visible_instances[instance_index] = instance_index;
-    }
+    // flickering out). This stage therefore only emits a 0/1 visibility flag;
+    // the prefix-sum + scatter stages downstream turn the flags into an
+    // order-preserving compaction of `visible_instances`.
+    visibility_flags[instance_index] = select(0u, 1u, is_visible);
 }
 
+//// Convex-quad overlap test via the separating axis theorem (SAT).
+////
+//// Both quads are affine images of the unit quad in perimeter order, i.e.
+//// convex (parallelograms), so SAT with the edge normals of both quads is
+//// exact. Two convex shapes are disjoint iff some edge normal is a
+//// separating axis; testing all 8 edges (with strict interval comparison
+//// inside `axis_separates`) therefore:
+////   - treats identical quads and quads sharing only a vertex/edge as
+////     overlapping (boundary-inclusive — critical because glyph instances
+////     use a stencil quad bit-identical to their texture quad; the previous
+////     vertex-containment test judged those "not overlapping" and culled
+////     every glyph),
+////   - catches cross-shaped overlaps where neither quad contains a vertex
+////     of the other (e.g. a bar wider than the viewport), which the previous
+////     test also missed.
+//// A degenerate (zero-area) quad projects to a point/segment per axis and
+//// still yields the conservative result.
 fn is_overlapping(
-    a: array<vec4<f32>, 4>,
-    b: array<vec4<f32>, 4>
+    a: array<vec2<f32>, 4>,
+    b: array<vec2<f32>, 4>
 ) -> bool {
-    var flag = false;
     for (var i = 0u; i < 4u; i++) {
-        flag = flag || point_in_polygon(a[i], b);
+        let next = (i + 1u) % 4u;
+        let edge_a = a[next] - a[i];
+        if (axis_separates(a, b, vec2<f32>(-edge_a.y, edge_a.x))) {
+            return false;
+        }
+        let edge_b = b[next] - b[i];
+        if (axis_separates(a, b, vec2<f32>(-edge_b.y, edge_b.x))) {
+            return false;
+        }
     }
-    for (var i = 0u; i < 4u; i++) {
-        flag = flag || point_in_polygon(b[i], a);
-    }
-    return flag;
+    return true;
 }
 
-fn cross_2d(a: vec2<f32>, b: vec2<f32>) -> f32 {
-    return a.x * b.y - a.y * b.x;
-}
-
-fn point_in_polygon(
-    point: vec4<f32>,
-    polygon: array<vec4<f32>, 4>
+//// True if the projections of `a` and `b` onto `axis` are strictly disjoint
+//// intervals. A zero-length edge yields a zero axis, whose projections all
+//// collapse to 0 — never reported as separating, which is the safe (keep)
+//// direction.
+fn axis_separates(
+    a: array<vec2<f32>, 4>,
+    b: array<vec2<f32>, 4>,
+    axis: vec2<f32>
 ) -> bool {
-    // use cross product to determine if the point is inside the polygon
-    let points = array<vec2<f32>, 4>(
-        polygon[0].xy - point.xy,
-        polygon[1].xy - point.xy,
-        polygon[2].xy - point.xy,
-        polygon[3].xy - point.xy,
-    );
-    let lines = array<vec2<f32>, 4>(
-        polygon[1].xy - polygon[0].xy,
-        polygon[2].xy - polygon[1].xy,
-        polygon[3].xy - polygon[2].xy,
-        polygon[0].xy - polygon[3].xy,
-    );
-
-    let signs = array<bool, 4>(
-        cross_2d(points[0], lines[0]) > 0.0,
-        cross_2d(points[1], lines[1]) > 0.0,
-        cross_2d(points[2], lines[2]) > 0.0,
-        cross_2d(points[3], lines[3]) > 0.0,
-    );
-
-    return signs[0] == signs[1] && signs[1] == signs[2] && signs[2] == signs[3];
+    var min_a = dot(a[0], axis);
+    var max_a = min_a;
+    var min_b = dot(b[0], axis);
+    var max_b = min_b;
+    for (var i = 1u; i < 4u; i++) {
+        let pa = dot(a[i], axis);
+        min_a = min(min_a, pa);
+        max_a = max(max_a, pa);
+        let pb = dot(b[i], axis);
+        min_b = min(min_b, pb);
+        max_b = max(max_b, pb);
+    }
+    return max_a < min_b || max_b < min_a;
 }
