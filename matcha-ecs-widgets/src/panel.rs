@@ -174,7 +174,15 @@ impl Layout for PanelLayout {
             let inner_size = [(size[0] - inset * 2.0).max(0.0), (size[1] - inset * 2.0).max(0.0)];
             let child_c = Constraints::from_max_size(inner_size);
             let child_size = ctx.measure_child(child, child_c);
-            ctx.arrange_child(child, [inset, inset], my_affine, child_size);
+            // Unlike `Padding` (which sizes itself to its child, so the child
+            // always fills the inner area exactly), `Panel` is fixed-size:
+            // the inner area can be larger than the child. Centre the child
+            // in the leftover space rather than anchoring it top-left.
+            let origin = [
+                inset + ((inner_size[0] - child_size[0]) / 2.0).max(0.0),
+                inset + ((inner_size[1] - child_size[1]) / 2.0).max(0.0),
+            ];
+            ctx.arrange_child(child, origin, my_affine, child_size);
         }
     }
 }

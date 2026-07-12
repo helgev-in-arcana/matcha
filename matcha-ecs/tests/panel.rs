@@ -48,7 +48,7 @@ fn own_size_is_fixed_regardless_of_a_much_smaller_child() {
 }
 
 #[test]
-fn child_is_inset_by_border_width_on_all_sides() {
+fn child_is_centred_within_the_border_inset_inner_area() {
     let (mut world, root) = setup();
     run_view(&mut world, root, |s| {
         s.node(Panel::new(200.0, 100.0).border_width(5.0), |s| {
@@ -57,10 +57,28 @@ fn child_is_inset_by_border_width_on_all_sides() {
     });
     layout_root(&mut world, root, Constraints::from_max_size([800.0, 600.0]));
 
+    // Inner area is 190x90 (5px border inset on all sides); the 50x50 child
+    // is centred in it: origin = 5 + (190-50)/2 = 75, 5 + (90-50)/2 = 25.
+    let panel = children(&world, root)[0];
+    let child = children(&world, panel)[0];
+    assert_eq!(output(&world, child).origin, [75.0, 25.0]);
+    assert_eq!(output(&world, child).size, [50.0, 50.0]);
+}
+
+#[test]
+fn child_filling_the_inner_area_sits_exactly_at_the_border_inset() {
+    let (mut world, root) = setup();
+    run_view(&mut world, root, |s| {
+        s.node(Panel::new(200.0, 100.0).border_width(5.0), |s| {
+            s.leaf(ColorRect::new(190.0, 90.0));
+        });
+    });
+    layout_root(&mut world, root, Constraints::from_max_size([800.0, 600.0]));
+
     let panel = children(&world, root)[0];
     let child = children(&world, panel)[0];
     assert_eq!(output(&world, child).origin, [5.0, 5.0]);
-    assert_eq!(output(&world, child).size, [50.0, 50.0]);
+    assert_eq!(output(&world, child).size, [190.0, 90.0]);
 }
 
 #[test]
