@@ -21,11 +21,28 @@ pub struct RenderCtx<'a> {
     pub queue: &'a wgpu::Queue,
     pub texture_atlas: &'a TextureAtlas,
     pub stencil_atlas: &'a TextureAtlas,
-    /// The entity's current `Animated<Opacity>` (M7), or `1.0` if it doesn't
-    /// carry one. Colours are baked into the atlas at build time (there is no
+    /// The entity's current [`RenderOpacity`], or `1.0` if it doesn't carry
+    /// one. Colours are baked into the atlas at build time (there is no
     /// per-instance alpha uniform at draw time), so a builder that wants to
     /// fade must multiply this into its vertex colours itself.
     pub opacity: f32,
+}
+
+/// A widget's current opacity, `0.0` (invisible) to `1.0` (fully visible).
+///
+/// One of the two components the extract stage reads off a drawable entity
+/// (the other being `GlobalTransform`). The core only ever *reads* it: whoever
+/// wants to animate opacity writes it from a registered PreLayout system, and
+/// [`crate::systems::invalidate_on_opacity_change`] takes care of rebuilding
+/// the entity's cached render node whenever it changes. An entity without this
+/// component renders at full opacity.
+#[derive(Component, Clone, Copy, PartialEq, Debug)]
+pub struct RenderOpacity(pub f32);
+
+impl Default for RenderOpacity {
+    fn default() -> Self {
+        RenderOpacity(1.0)
+    }
 }
 
 /// A cached, deferred render-tree source for one widget entity.

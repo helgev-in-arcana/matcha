@@ -20,14 +20,15 @@ use renderer::{
 };
 
 use matcha_ecs::{
-    animation::{Animated, Easing, ExitTransition, Opacity, Target, ToBeDespawn, Tween},
     components::{
-        render::{RenderCtx, RenderItem},
-        view::Key,
+        render::{RenderCtx, RenderItem, RenderOpacity},
+        view::{Key, ManualDespawn},
     },
     layout::{Constraints, Layout, LayoutCtx, LayoutDispatch},
     view::Widget,
 };
+
+use crate::animation::{Easing, ExitFade, OpacityTween};
 
 /// A [`ColorRect`]'s requested (unconstrained) size.
 #[derive(Component, Clone, Copy, PartialEq, Debug)]
@@ -46,14 +47,14 @@ pub struct ColorRect {
     w: f32,
     h: f32,
     color: [f32; 4],
-    /// If set, this rect fades in from transparent when first spawned
-    /// (`ECS_ARCHITECTURE.md` §9, M7 — baked directly into `bundle()`'s
-    /// initial `Animated<Opacity>`/`Tween<Opacity>` mismatch; there is no
-    /// persisted "enter transition" component).
+    /// If set, this rect fades in from transparent when first spawned (baked
+    /// directly into `bundle()`'s initial `RenderOpacity` plus an
+    /// `OpacityTween` that closes the gap; there is no persisted "enter
+    /// transition" component).
     enter_fade: Option<(Duration, Easing)>,
     /// If set, this rect fades out instead of vanishing immediately when
-    /// pruned from the view (`view.rs`'s `begin_or_continue_exit` reads
-    /// the resulting `ExitTransition<Opacity>`).
+    /// pruned from the view (`after_spawn` attaches `ExitFade` +
+    /// `ManualDespawn`; `crate::animation`'s systems do the rest).
     exit_fade: Option<(Duration, Easing)>,
 }
 
@@ -196,29 +197,29 @@ impl Widget for ColorRect {
             RectColor(self.color),
             LayoutDispatch::of::<RectGeometry>(),
             solid_rect_render_item(self.w, self.h, self.color),
-            Target(Opacity(1.0)),
-            Animated(Opacity(initial_opacity)),
+            RenderOpacity(initial_opacity),
         )
     }
 
     fn after_spawn(&self, entity: &mut EntityWorldMut) {
-        // `Tween<Opacity>`/`ExitTransition<Opacity>` are SparseSet and only
-        // sometimes wanted, so they're attached here rather than as part of
-        // `bundle()` (`Option<T>` isn't itself a `Bundle`).
+        // These are only sometimes wanted, so they're attached here rather than
+        // as part of `bundle()` (`Option<T>` isn't itself a `Bundle`).
         if let Some((duration, easing)) = self.enter_fade {
-            entity.insert(Tween::<Opacity> {
-                from: Opacity(0.0),
+            entity.insert(OpacityTween {
+                from: 0.0,
+                to: 1.0,
                 start: web_time::Instant::now(),
                 duration,
                 easing,
             });
         }
         if let Some((duration, easing)) = self.exit_fade {
-            entity.insert(ExitTransition::<Opacity> {
-                to: Opacity(0.0),
-                duration,
-                easing,
-            });
+            // `ManualDespawn` is what actually defers the despawn; `ExitFade`
+            // only says what to do with the reprieve. Attaching it *only* when
+            // an exit fade is configured is what keeps every other widget on
+            // the despawn-immediately path (and keeps this one from leaking:
+            // `crate::animation`'s systems are what eventually despawn it).
+            entity.insert((ManualDespawn::new(), ExitFade { duration, easing }));
         }
     }
 
@@ -239,25 +240,21 @@ impl Widget for ColorRect {
             }
         }
 
-        // Revival (M7): this entity was mid-exit-fade and has just been
-        // re-declared by the view. Reverse back toward full visibility,
-        // reusing the exit fade's own duration/easing. `view.rs` removes
-        // `ToBeDespawn` right after `patch` returns.
-        if entity.get::<ToBeDespawn>().is_some() {
-            if let Some(exit) = entity.get::<ExitTransition<Opacity>>().copied() {
-                let current = entity
-                    .get::<Animated<Opacity>>()
-                    .copied()
-                    .unwrap_or(Animated(Opacity(1.0)));
-                entity.insert((
-                    Target(Opacity(1.0)),
-                    Tween::<Opacity> {
-                        from: current.0,
-                        start: web_time::Instant::now(),
-                        duration: exit.duration,
-                        easing: exit.easing,
-                    },
-                ));
+        // Revival: this entity was mid-exit-fade and has just been re-declared
+        // by the view. Reverse back toward full visibility, reusing the exit
+        // fade's own duration/easing. The reconciler clears the pruned flag
+        // right after `patch` returns, which is what stops the animation
+        // systems from despawning it.
+        if entity.get::<ManualDespawn>().is_some_and(|m| m.is_pruned()) {
+            if let Some(exit) = entity.get::<ExitFade>().copied() {
+                let current = entity.get::<RenderOpacity>().copied().unwrap_or_default();
+                entity.insert(OpacityTween {
+                    from: current.0,
+                    to: 1.0,
+                    start: web_time::Instant::now(),
+                    duration: exit.duration,
+                    easing: exit.easing,
+                });
             }
         }
     }

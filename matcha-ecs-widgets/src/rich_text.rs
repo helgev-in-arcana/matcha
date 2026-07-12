@@ -66,14 +66,15 @@ use parking_lot::Mutex;
 use renderer::RenderNode;
 
 use matcha_ecs::{
-    animation::{Animated, Easing, ExitTransition, Opacity, Target, ToBeDespawn, Tween},
     components::{
-        render::{RenderCtx, RenderItem},
-        view::Key,
+        render::{RenderCtx, RenderItem, RenderOpacity},
+        view::{Key, ManualDespawn},
     },
     layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, SUB_PIXEL_QUANTIZE},
     view::Widget,
 };
+
+use crate::animation::{Easing, ExitFade, OpacityTween};
 
 /// The displayed content: a fully assembled string (base text + every span's
 /// text, in declaration order, each already transform/collapse-processed)
@@ -1224,8 +1225,7 @@ impl Widget for RichText {
             self.style(),
             RichTextWrapWidth::new(),
             LayoutDispatch::of::<RichTextStyle>(),
-            Target(Opacity(1.0)),
-            Animated(Opacity(initial_opacity)),
+            RenderOpacity(initial_opacity),
         )
     }
 
@@ -1234,19 +1234,16 @@ impl Widget for RichText {
         entity.insert(item);
 
         if let Some((duration, easing)) = self.enter_fade {
-            entity.insert(Tween::<Opacity> {
-                from: Opacity(0.0),
+            entity.insert(OpacityTween {
+                from: 0.0,
+                to: 1.0,
                 start: web_time::Instant::now(),
                 duration,
                 easing,
             });
         }
         if let Some((duration, easing)) = self.exit_fade {
-            entity.insert(ExitTransition::<Opacity> {
-                to: Opacity(0.0),
-                duration,
-                easing,
-            });
+            entity.insert((ManualDespawn::new(), ExitFade { duration, easing }));
         }
     }
 
@@ -1265,23 +1262,18 @@ impl Widget for RichText {
             }
         }
 
-        // Revival (M7 pattern): see `Text::patch`/`ColorRect::patch` for the
-        // identical reasoning.
-        if entity.get::<ToBeDespawn>().is_some() {
-            if let Some(exit) = entity.get::<ExitTransition<Opacity>>().copied() {
-                let current = entity
-                    .get::<Animated<Opacity>>()
-                    .copied()
-                    .unwrap_or(Animated(Opacity(1.0)));
-                entity.insert((
-                    Target(Opacity(1.0)),
-                    Tween::<Opacity> {
-                        from: current.0,
-                        start: web_time::Instant::now(),
-                        duration: exit.duration,
-                        easing: exit.easing,
-                    },
-                ));
+        // Revival: see `Text::patch`/`ColorRect::patch` for the identical
+        // reasoning.
+        if entity.get::<ManualDespawn>().is_some_and(|m| m.is_pruned()) {
+            if let Some(exit) = entity.get::<ExitFade>().copied() {
+                let current = entity.get::<RenderOpacity>().copied().unwrap_or_default();
+                entity.insert(OpacityTween {
+                    from: current.0,
+                    to: 1.0,
+                    start: web_time::Instant::now(),
+                    duration: exit.duration,
+                    easing: exit.easing,
+                });
             }
         }
     }

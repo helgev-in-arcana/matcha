@@ -1,12 +1,17 @@
-//! M7 demo: toasts fade in when added and fade out when removed, with a
-//! revival reversal if one gets re-added while still fading out. No text yet
-//! (M6) -- each toast is a plain coloured rectangle; a background thread adds
-//! one every ~2s and expires it ~2.5s after it appears.
+//! Animation demo: toasts fade in when added and fade out when removed, with a
+//! revival reversal if one gets re-added while still fading out. Each toast is
+//! a plain coloured rectangle; a background thread adds one every ~2s and
+//! expires it ~2.5s after it appears.
+//!
+//! Note the `.with_pre_layout_systems(animation::default_systems())` below:
+//! opacity animation is not part of the framework core, it is a plugin this
+//! crate registers into the `PreLayout` stage. Without it a `ColorRect` with an
+//! `.exit_fade(..)` would never fade *or* despawn (see `ManualDespawn`).
 
 use std::time::{Duration, Instant};
 
-use matcha_ecs::{animation::Easing, ui_ecs::UiEcs, view::Scope};
-use matcha_ecs_widgets::{Column, ColorRect};
+use matcha_ecs::{ui_ecs::UiEcs, view::Scope};
+use matcha_ecs_widgets::{animation, Column, ColorRect, Easing};
 use matcha_window::adapter::Adapter;
 
 const TOAST_LIFETIME: Duration = Duration::from_millis(2500);
@@ -48,7 +53,8 @@ fn main() {
         // Far enough in the past that the first tick spawns immediately.
         last_spawn: now - SPAWN_INTERVAL,
     };
-    let app = UiEcs::new(model, view, |_model: &mut Model, _msg: ()| {});
+    let app = UiEcs::new(model, view, |_model: &mut Model, _msg: ()| {})
+        .with_pre_layout_systems(animation::default_systems());
     let handle = app.model_handle();
 
     std::thread::spawn(move || loop {

@@ -58,3 +58,46 @@ pub type SlotKey = (Key, u32);
 pub struct ViewChildren {
     pub slots: Vec<(SlotKey, Entity)>,
 }
+
+/// Opts an entity out of the reconciler's automatic despawn, handing ownership
+/// of its lifetime to whatever system manages it (typically an exit animation).
+///
+/// Normally, a child the view no longer declares is despawned on the spot by
+/// the prune pass. An entity carrying this component is kept alive instead: the
+/// reconciler only flips [`is_pruned`](Self::is_pruned) to `true` and keeps the
+/// entity's slot (so it still lays out, paints and hit-tests), then walks away.
+/// From that point it is the responsibility of a registered system to eventually
+/// call [`despawn_ui_entity`](crate::view::despawn_ui_entity) — the core never
+/// despawns it and never watches for the component's removal.
+///
+/// If the view re-declares the entity while it is pruned (a "revival"), the
+/// reconciler flips the flag back to `false` — *after* running the widget's
+/// `patch`, so `patch` can observe the still-pruned state and reverse an
+/// in-flight exit animation. A system that despawns on animation completion
+/// must therefore re-check `is_pruned()` at that moment rather than assuming
+/// its own tween's existence implies the entity is still doomed.
+///
+/// **This is a leak footgun**: an entity carrying `ManualDespawn` with no
+/// system that ever despawns it stays alive forever, since the prune pass will
+/// keep skipping it. Only attach it when something is genuinely committed to
+/// tearing the entity down.
+#[derive(Component, Debug, Default)]
+pub struct ManualDespawn {
+    pruned: bool,
+}
+
+impl ManualDespawn {
+    pub fn new() -> Self {
+        Self { pruned: false }
+    }
+
+    /// `true` once the view has stopped declaring this entity. The entity is
+    /// alive only because this component defers its despawn.
+    pub fn is_pruned(&self) -> bool {
+        self.pruned
+    }
+
+    pub(crate) fn set_pruned(&mut self, pruned: bool) {
+        self.pruned = pruned;
+    }
+}

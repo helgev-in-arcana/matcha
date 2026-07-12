@@ -10,12 +10,11 @@ use std::sync::Arc;
 use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::{
-    animation::Easing,
     components::{layout::LayoutOutput, render::RenderItem, view::ViewChildren},
     layout::{layout_root, Constraints},
     view::run_view,
 };
-use matcha_ecs_widgets::{parley, RichText};
+use matcha_ecs_widgets::{parley, Easing, RichText};
 
 fn setup() -> (World, Entity) {
     let mut world = World::new();
@@ -772,13 +771,13 @@ fn normal_white_space_collapses_runs_to_a_narrower_block() {
 
 #[test]
 fn enter_fade_builder_starts_from_transparent() {
-    use matcha_ecs::animation::{Animated, Opacity};
+    use matcha_ecs::components::render::RenderOpacity;
 
     let (mut world, root) = setup();
     run_view(&mut world, root, |s| {
         s.leaf(RichText::new("hello").enter_fade(std::time::Duration::from_millis(200), Easing::Linear));
     });
     let child = first_child(&world, root);
-    let animated = world.get::<Animated<Opacity>>(child).expect("Animated<Opacity> present");
-    assert_eq!(animated.0, Opacity(0.0));
+    let opacity = world.get::<RenderOpacity>(child).expect("RenderOpacity present");
+    assert_eq!(*opacity, RenderOpacity(0.0));
 }

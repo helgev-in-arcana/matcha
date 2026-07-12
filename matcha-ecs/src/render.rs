@@ -21,18 +21,15 @@ use nalgebra::Matrix4;
 use parking_lot::{Condvar, Mutex};
 use renderer::{CoreRenderer, RenderNode};
 
-use crate::{
-    animation::{Animated, Opacity},
-    components::{
-        layout::GlobalTransform,
-        render::{RenderCtx, RenderItem},
-        view::ViewChildren,
-    },
+use crate::components::{
+    layout::GlobalTransform,
+    render::{RenderCtx, RenderItem, RenderOpacity},
+    view::ViewChildren,
 };
 
 /// One drawable entity captured for a frame: the shared node cache, its deferred
 /// builder, its window-space transform (already composed by M3 layout), and its
-/// current opacity (M7; `1.0` if the entity has no `Animated<Opacity>`).
+/// current opacity (`1.0` if the entity has no `RenderOpacity`).
 pub struct RenderItemSnapshot {
     pub cache: Arc<Mutex<Option<Arc<RenderNode>>>>,
     pub builder: Arc<dyn Fn(&RenderCtx) -> RenderNode + Send + Sync>,
@@ -78,8 +75,8 @@ fn extract_recursive(world: &World, entity: Entity, out: &mut Vec<RenderItemSnap
             world.get::<GlobalTransform>(child),
         ) {
             let opacity = world
-                .get::<Animated<Opacity>>(child)
-                .map(|a| a.0 .0)
+                .get::<RenderOpacity>(child)
+                .map(|o| o.0)
                 .unwrap_or(1.0);
             out.push(RenderItemSnapshot {
                 cache: item.cache.clone(),

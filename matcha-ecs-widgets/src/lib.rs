@@ -9,6 +9,7 @@
 //! distinct type (so the reconciler can tell them apart by `TypeId`) exposing a
 //! `.key(id)` builder to set its intrinsic reconciliation key.
 
+pub mod animation;
 pub mod button;
 pub mod checkbox;
 pub mod color_rect;
@@ -27,6 +28,7 @@ pub mod text;
 // dependency.
 pub use parley;
 
+pub use animation::Easing;
 pub use button::{Button, ButtonLabel};
 pub use checkbox::Checkbox;
 pub use color_rect::{ColorRect, RectColor};

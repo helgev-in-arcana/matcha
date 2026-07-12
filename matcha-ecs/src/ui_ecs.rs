@@ -15,7 +15,7 @@ use std::sync::{atomic::AtomicBool, mpsc, Arc, OnceLock};
 
 use bevy_ecs::{
     schedule::{IntoScheduleConfigs, Schedule, SystemSet},
-    system::{Query, Res, ResMut},
+    system::{Query, Res, ResMut, ScheduleSystem},
     world::World,
 };
 use bevy_tasks::{AsyncComputeTaskPool, ComputeTaskPool, TaskPoolBuilder};
@@ -36,7 +36,6 @@ use matcha_window::{
 use renderer::CoreRenderer;
 
 use crate::{
-    animation::{advance_tweens, FrameTime, Opacity, Tween},
     components::{
         input::{Message, OnClick},
         view::ViewChildren,
@@ -45,18 +44,34 @@ use crate::{
     input::{resolve_click_target, update_hit_test_cache, HitTestCache},
     model::{ModelHandle, ModelResource},
     render::{build_and_present, extract_items, RenderDriver, RenderSnapshot, ThreadDriver},
-    resources::{GpuResource, RenderWindowRoot, RendererResource},
-    view::{despawn_completed_exits, run_view, Scope},
+    resources::{FrameTime, GpuResource, RedrawRequest, RenderWindowRoot, RendererResource},
+    view::{run_view, Scope},
 };
 
-/// Ordering buckets for the render schedule (Phase C). Bodies are empty for now;
-/// the `.chain()` only fixes their relative order so systems added to each set
-/// run in the documented sequence as later milestones fill them in.
+/// The render schedule's stages, run in this order every frame.
+///
+/// These are **timing contracts**, not feature buckets: each says what must be
+/// true of the world by the time it ends, not what kind of work belongs in it.
+/// [`PreLayout`](Self::PreLayout) and [`PreExtract`](Self::PreExtract) are open
+/// extension points — see [`UiEcs::with_pre_layout_systems`] /
+/// [`UiEcs::with_pre_extract_systems`] — and the core registers nothing in the
+/// former and only contract plumbing in the latter.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MatchaSet {
-    Animation,
+    /// Settle everything layout reads, and the shape of the entity tree, for
+    /// this frame: animated values, tree structure (including despawning
+    /// entities whose [`ManualDespawn`](crate::components::view::ManualDespawn)
+    /// owner is done with them). Open to registered systems; empty by default.
+    PreLayout,
+    /// Core: measure and arrange the tree, writing `LayoutOutput` /
+    /// `GlobalTransform`.
     Layout,
-    Flush,
+    /// Settle the extract contract now that layout is known: the components
+    /// extract reads (`RenderOpacity`, …) and the validity of each entity's
+    /// cached render node. Open to registered systems; the core registers the
+    /// invalidation and hit-test-cache plumbing here.
+    PreExtract,
+    /// Core: collect the frame's drawable entities into a snapshot.
     Extract,
 }
 
@@ -184,6 +199,7 @@ where
         world.insert_resource(ModelResource(model));
         world.insert_resource(HitTestCache::default());
         world.insert_resource(FrameTime(web_time::Instant::now()));
+        world.insert_resource(RedrawRequest::default());
 
         let (sender, receiver) = mpsc::channel::<Box<dyn FnOnce(&mut M) + Send>>();
         let wake_pending = Arc::new(AtomicBool::new(false));
@@ -201,25 +217,22 @@ where
         let mut render_schedule = Schedule::default();
         render_schedule.configure_sets(
             (
-                MatchaSet::Animation,
+                MatchaSet::PreLayout,
                 MatchaSet::Layout,
-                MatchaSet::Flush,
+                MatchaSet::PreExtract,
                 MatchaSet::Extract,
             )
                 .chain(),
         );
-        render_schedule.add_systems(
-            (advance_tweens::<Opacity>, despawn_completed_exits)
-                .chain()
-                .in_set(MatchaSet::Animation),
-        );
+        // PreLayout is deliberately empty: nothing the core itself needs to do
+        // belongs there. Animation lives in `matcha-ecs-widgets` and registers
+        // itself via `with_pre_layout_systems`.
         render_schedule.add_systems(crate::layout::run_layout.in_set(MatchaSet::Layout));
         render_schedule
-            .add_systems(crate::systems::invalidate_on_layout_change.in_set(MatchaSet::Flush));
-        render_schedule.add_systems(
-            crate::systems::invalidate_on_animated_opacity_change.in_set(MatchaSet::Flush),
-        );
-        render_schedule.add_systems(update_hit_test_cache.in_set(MatchaSet::Flush));
+            .add_systems(crate::systems::invalidate_on_layout_change.in_set(MatchaSet::PreExtract));
+        render_schedule
+            .add_systems(crate::systems::invalidate_on_opacity_change.in_set(MatchaSet::PreExtract));
+        render_schedule.add_systems(update_hit_test_cache.in_set(MatchaSet::PreExtract));
 
         Self {
             world,
@@ -232,6 +245,40 @@ where
             proxy_slot,
             render_driver: parking_lot::Mutex::new(Box::new(ThreadDriver::default())),
         }
+    }
+
+    /// Register systems into [`MatchaSet::PreLayout`] — the stage that settles
+    /// everything layout reads (animated values, tree structure) for the frame.
+    ///
+    /// Takes anything `add_systems` takes, so a plugin can express its own
+    /// internal ordering (`(a, b).chain()`) or relate itself to another system
+    /// (`.after(..)`). No ordering is imposed *between* separately-registered
+    /// systems: if two of them depend on each other, say so explicitly.
+    ///
+    /// ```ignore
+    /// UiEcs::new(model, view, reduce)
+    ///     .with_pre_layout_systems(matcha_ecs_widgets::animation::default_systems())
+    /// ```
+    pub fn with_pre_layout_systems<Marker>(
+        mut self,
+        systems: impl IntoScheduleConfigs<ScheduleSystem, Marker>,
+    ) -> Self {
+        self.render_schedule
+            .add_systems(systems.in_set(MatchaSet::PreLayout));
+        self
+    }
+
+    /// Register systems into [`MatchaSet::PreExtract`] — the stage that settles
+    /// the extract contract (the components extract reads, and the validity of
+    /// each entity's cached render node) once layout is known. Same semantics
+    /// as [`Self::with_pre_layout_systems`].
+    pub fn with_pre_extract_systems<Marker>(
+        mut self,
+        systems: impl IntoScheduleConfigs<ScheduleSystem, Marker>,
+    ) -> Self {
+        self.render_schedule
+            .add_systems(systems.in_set(MatchaSet::PreExtract));
+        self
     }
 
     /// Clone a handle for mutating the model from any thread. Safe to call
@@ -383,21 +430,18 @@ where
     fn advance_and_snapshot(&mut self, window_id: WindowId) -> Option<RenderSnapshot> {
         self.world
             .insert_resource(FrameTime(web_time::Instant::now()));
+        // Systems that need a follow-up frame (an in-flight animation, say)
+        // re-request it during the run; start from a clean slate each frame.
+        self.world.resource_mut::<RedrawRequest>().reset();
         self.render_schedule.run(&mut self.world);
         self.build_snapshot(window_id)
     }
 
-    /// Request another redraw while any `Tween<Opacity>` is in flight, so an
-    /// in-progress fade keeps animating. Shared by [`Application::render`] and
-    /// [`Self::render_sync`].
-    fn request_redraw_if_tweening(&mut self, window_id: WindowId) {
-        if self
-            .world
-            .query::<&Tween<Opacity>>()
-            .iter(&self.world)
-            .next()
-            .is_none()
-        {
+    /// Request another redraw if any system asked for one during this frame
+    /// (via [`RedrawRequest::request`]), so e.g. an in-progress fade keeps
+    /// animating. Shared by [`Application::render`] and [`Self::render_sync`].
+    fn request_redraw_if_requested(&mut self, window_id: WindowId) {
+        if !self.world.resource::<RedrawRequest>().is_requested() {
             return;
         }
         if let Some(root) = self.world.get_resource::<RenderWindowRoot>() {
@@ -418,7 +462,7 @@ where
         if let Some(snapshot) = self.advance_and_snapshot(window_id) {
             build_and_present(snapshot);
         }
-        self.request_redraw_if_tweening(window_id);
+        self.request_redraw_if_requested(window_id);
     }
 }
 
@@ -555,7 +599,7 @@ where
             self.render_driver.get_mut().dispatch(snapshot);
         }
 
-        self.request_redraw_if_tweening(window_id);
+        self.request_redraw_if_requested(window_id);
     }
 
     fn window_event(
