@@ -56,6 +56,10 @@ pub(crate) trait NativeWindow: utils::MaybeSendSync {
     fn dpi(&self) -> f64;
     fn request_redraw(&self);
 
+    // --- IME ---
+    fn set_ime_allowed(&self, allowed: bool);
+    fn set_ime_cursor_area(&self, position: [f32; 2], size: [f32; 2]);
+
     /// Creates a wgpu surface targeting this window, or `Ok(None)` for
     /// backends that cannot present (headless). Raw-window-handle details stay
     /// inside each backend.
@@ -323,6 +327,14 @@ impl WindowSurface {
 
     pub fn request_redraw(&self) {
         self.window.request_redraw();
+    }
+
+    pub fn set_ime_allowed(&self, allowed: bool) {
+        self.window.set_ime_allowed(allowed);
+    }
+
+    pub fn set_ime_cursor_area(&self, position: [f32; 2], size: [f32; 2]) {
+        self.window.set_ime_cursor_area(position, size);
     }
 }
 

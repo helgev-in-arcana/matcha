@@ -162,6 +162,10 @@ impl NativeWindow for HeadlessWindow {
         self.redraw_requests.fetch_add(1, Ordering::Relaxed);
     }
 
+    // No platform IME to talk to.
+    fn set_ime_allowed(&self, _allowed: bool) {}
+    fn set_ime_cursor_area(&self, _position: [f32; 2], _size: [f32; 2]) {}
+
     fn create_wgpu_surface(
         &self,
         _instance: &wgpu::Instance,

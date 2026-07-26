@@ -185,6 +185,17 @@ impl NativeWindow for WinitWindow {
         self.0.request_redraw();
     }
 
+    fn set_ime_allowed(&self, allowed: bool) {
+        self.0.set_ime_allowed(allowed);
+    }
+
+    fn set_ime_cursor_area(&self, position: [f32; 2], size: [f32; 2]) {
+        self.0.set_ime_cursor_area(
+            winit::dpi::PhysicalPosition::new(position[0], position[1]),
+            winit::dpi::PhysicalSize::new(size[0], size[1]),
+        );
+    }
+
     fn create_wgpu_surface(
         &self,
         instance: &wgpu::Instance,

@@ -216,6 +216,23 @@ impl Window {
         &mut self.window_surface
     }
 
+    /// Allow or forbid the platform IME for this window.
+    ///
+    /// IME is **off by default**, so no [`ImeEvent`](crate::event::device_event::ImeEvent)
+    /// is produced until this is enabled — without it, non-Latin input methods
+    /// simply cannot type into the window at all. Enable it while a widget that
+    /// accepts text has focus, and disable it otherwise, so ordinary keyboard
+    /// shortcuts are not swallowed by the IME.
+    pub fn set_ime_allowed(&self, allowed: bool) {
+        self.window_surface.set_ime_allowed(allowed);
+    }
+
+    /// Tell the platform where the caret is, in physical window coordinates, so
+    /// it can place the candidate list next to the text instead of in a corner.
+    pub fn set_ime_cursor_area(&self, position: [f32; 2], size: [f32; 2]) {
+        self.window_surface.set_ime_cursor_area(position, size);
+    }
+
     pub fn request_redraw(&self) {
         self.window_surface.request_redraw();
     }

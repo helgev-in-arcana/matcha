@@ -2,6 +2,7 @@
 // Types that consumers need are re-exported below via `pub use`.
 mod button_state;
 mod element_state;
+mod ime;
 mod key_input;
 mod key_state;
 pub mod mouse_input;
@@ -16,6 +17,7 @@ use mouse_state::MouseState; // internal use only — not re-exported
 // Public API re-exports
 // ----------------------------------------------------------------------------
 pub use element_state::ElementState;
+pub use ime::ImeEvent;
 pub use key_input::{Key, KeyCode, KeyInput, KeyLocation, ModifiersState, PhysicalKey};
 pub use key_state::KeyboardState;
 pub use mouse_input::{MouseInput, MouseLogicalButton};
@@ -113,6 +115,9 @@ impl DeviceEventState {
                 self.keyboard.modifiers_changed(modifiers);
                 DeviceEventData::ModifiersChanged(modifiers)
             }
+            // IME needs no state machine of its own: the platform IME already
+            // tracks the composition, and each event is self-contained.
+            DeviceEventData::Ime(ime_event) => DeviceEventData::Ime(ime_event),
             DeviceEventData::FileDrop { path_buf } => DeviceEventData::FileDrop { path_buf },
             DeviceEventData::FileHover { path_buf } => DeviceEventData::FileHover { path_buf },
             DeviceEventData::FileHoverCancelled => DeviceEventData::FileHoverCancelled,
@@ -493,6 +498,20 @@ impl DeviceEvent {
     }
 }
 
+// IME convenience methods
+impl DeviceEvent {
+    /// Run `f` if this is an IME event.
+    pub fn on_ime<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&ImeEvent) -> R,
+    {
+        match &self.relative {
+            DeviceEventData::Ime(ime_event) => Some(f(ime_event)),
+            _ => None,
+        }
+    }
+}
+
 // File drag and drop convenience methods
 impl DeviceEvent {
     pub fn on_file_drop<F, R>(&self, f: F) -> Option<R>
@@ -535,8 +554,9 @@ pub enum DeviceEventData {
     FileHoverCancelled,
     Keyboard(KeyInput),
     ModifiersChanged(ModifiersState),
-    /// Not implemented yet.
-    Ime,
+    /// One step of an IME composition session. Delivered to the focused
+    /// widget; carries no backend types (see [`ImeEvent`]).
+    Ime(ImeEvent),
     MouseInput {
         dragging_from_primary: Option<[f32; 2]>,
         dragging_from_secondary: Option<[f32; 2]>,

@@ -251,8 +251,18 @@ impl<App: Application> winit::application::ApplicationHandler<WinitUserMessage<A
                 self.adapter.device_event(event_loop, window_id, e);
             }
 
-            winit::event::WindowEvent::Ime(_) => {
-                // Not mapped yet.
+            winit::event::WindowEvent::Ime(ime) => {
+                use crate::event::device_event::ImeEvent;
+                let ime_event = match ime {
+                    winit::event::Ime::Enabled => ImeEvent::Enabled,
+                    winit::event::Ime::Preedit(text, cursor) => ImeEvent::Preedit { text, cursor },
+                    winit::event::Ime::Commit(text) => ImeEvent::Commit { text },
+                    winit::event::Ime::Disabled => ImeEvent::Disabled,
+                };
+                let e = crate::event::device_event::DeviceEvent::stateless(
+                    crate::event::device_event::DeviceEventData::Ime(ime_event),
+                );
+                self.adapter.device_event(event_loop, window_id, e);
             }
 
             // --------------
