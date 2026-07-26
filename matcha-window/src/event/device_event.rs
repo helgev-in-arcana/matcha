@@ -18,7 +18,9 @@ use mouse_state::MouseState; // internal use only — not re-exported
 // ----------------------------------------------------------------------------
 pub use element_state::ElementState;
 pub use ime::ImeEvent;
-pub use key_input::{Key, KeyCode, KeyInput, KeyLocation, ModifiersState, PhysicalKey};
+pub use key_input::{
+    Key, KeyCode, KeyInput, KeyLocation, ModifiersState, NamedKey, PhysicalKey,
+};
 pub use key_state::KeyboardState;
 pub use mouse_input::{MouseInput, MouseLogicalButton};
 /// Configuration for the mouse state machine.

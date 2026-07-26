@@ -1,7 +1,6 @@
 use super::{ElementState, KeyboardState};
-use winit::keyboard::NamedKey;
 
-pub use winit::keyboard::{Key, KeyCode, KeyLocation, ModifiersState, PhysicalKey};
+pub use winit::keyboard::{Key, KeyCode, KeyLocation, ModifiersState, NamedKey, PhysicalKey};
 
 /// A keyboard event.
 ///

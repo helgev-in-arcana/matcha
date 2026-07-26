@@ -43,7 +43,7 @@ use crate::{
         window::{Window as WindowComp, WindowBelonging},
     },
     focus::{run_validate_focus, sync_focus_components, Focus, FocusConfig},
-    input::resolve_pointer_press,
+    input::{dispatch_pointer_drag, resolve_pointer_press, MessageQueue},
     keyboard::{dispatch_ime, dispatch_key, sync_ime_state},
     model::{ModelHandle, ModelResource},
     pick::{update_picker, PickQuery, Picker, PickerResource},
@@ -203,6 +203,7 @@ where
         world.insert_resource(ModelResource(model));
         world.insert_resource(PickerResource::default());
         world.insert_resource(Focus::default());
+        world.insert_resource(MessageQueue::<Msg>::default());
         world.insert_resource(FocusConfig::default());
         world.insert_resource(FrameTime(web_time::Instant::now()));
         world.insert_resource(RedrawRequest::default());
@@ -359,19 +360,39 @@ where
     /// A focus-only change does not: focus lives in the ECS world, not in the
     /// app model, so widgets read it straight from their entity — a redraw is
     /// enough, and re-running the view would be wasted work.
-    fn on_pointer_press(&mut self, pos: [f32; 2]) {
+    fn on_pointer_press(&mut self, pos: [f32; 2], count: u32) {
         let query = PickQuery { viewport_pos: pos };
-        let press = resolve_pointer_press::<Msg>(&mut self.world, &query);
+        let press = resolve_pointer_press::<Msg>(&mut self.world, &query, count);
 
         if let Some(msg) = press.click_msg {
-            {
-                let mut model = self.world.resource_mut::<ModelResource<M>>();
-                (self.reducer)(&mut model.0, msg);
-            }
+            let mut model = self.world.resource_mut::<ModelResource<M>>();
+            (self.reducer)(&mut model.0, msg);
+            drop(model);
             self.rerun_view_and_redraw();
-        } else if press.focus_changed {
+        } else if !self.drain_message_queue() && press.focus_changed {
             self.request_redraw_all();
         }
+    }
+
+    /// Apply everything queued in [`MessageQueue`] through the reducer, then
+    /// re-view once. Returns whether anything was applied.
+    ///
+    /// Keyboard/IME handlers and widget systems cannot reach the model or the
+    /// reducer from where they run, so they queue instead; this is where the
+    /// queue is redeemed.
+    fn drain_message_queue(&mut self) -> bool {
+        let messages = self.world.resource_mut::<MessageQueue<Msg>>().drain();
+        if messages.is_empty() {
+            return false;
+        }
+        {
+            let mut model = self.world.resource_mut::<ModelResource<M>>();
+            for msg in messages {
+                (self.reducer)(&mut model.0, msg);
+            }
+        }
+        self.rerun_view_and_redraw();
+        true
     }
 
     /// Ask every window for a redraw, without re-running the view.
@@ -610,6 +631,11 @@ where
     }
 
     fn render(&mut self, window_id: WindowId) {
+        // Messages queued by systems during the previous frame's schedule (a
+        // widget reacting to focus loss, say) are redeemed here, before this
+        // frame's layout, so the view reflects them.
+        self.drain_message_queue();
+
         // Coalesce: if the previous frame for this window is still encoding on its
         // render thread, request another redraw and drop this one.
         if self.render_driver.get_mut().is_busy(window_id) {
@@ -685,19 +711,33 @@ where
     ) {
         // `on_click` only fires on the primary-button press edge (not every
         // move/release), so a hit is always a genuine new click.
-        if event.on_click(|_count| ()).is_some() {
-            self.on_pointer_press(event.mouse_viewport_position());
+        if let Some(count) = event.on_click(|count| count) {
+            self.on_pointer_press(event.mouse_viewport_position(), count);
+        }
+
+        // A drag continues an interaction a press already started (dragging out
+        // a text selection, say), so it goes straight to positioned delivery
+        // without touching focus or click routing.
+        if event.on_drag(|_from, _button| ()).is_some() {
+            let query = PickQuery {
+                viewport_pos: event.mouse_viewport_position(),
+            };
+            if dispatch_pointer_drag(&mut self.world, &query) && !self.drain_message_queue() {
+                self.request_redraw_all();
+            }
         }
 
         // Keyboard and IME have no spatial origin: they go to whatever holds
         // focus. Both walk the focus path root->leaf; see `keyboard.rs`.
         if let Some(key_input) = event.on_key_down(|input| input.clone()) {
-            if dispatch_key(&mut self.world, &key_input) {
+            if dispatch_key(&mut self.world, &key_input) && !self.drain_message_queue() {
+                // Consumed but produced no message: ECS-side state changed
+                // (a caret moved, say), so redraw without re-running the view.
                 self.request_redraw_all();
             }
         }
         if let Some(ime_event) = event.on_ime(|ime| ime.clone()) {
-            if dispatch_ime(&mut self.world, &ime_event) {
+            if dispatch_ime(&mut self.world, &ime_event) && !self.drain_message_queue() {
                 self.request_redraw_all();
             }
         }

@@ -101,3 +101,47 @@ impl ImeDispatch {
 /// the OS window. The core treats it as an opaque rectangle.
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
 pub struct ImeCursorArea(pub [f32; 4]);
+
+/// What a pointer is doing, for [`PointerDispatch`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerPhase {
+    /// Button went down. `count` is 1 for a single click, 2 for a double, ...
+    Press { count: u32 },
+    /// Button held and moved since the press.
+    Drag,
+}
+
+/// A pointer event in the receiving entity's own coordinate space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PointerInput {
+    /// Position relative to the entity's top-left corner.
+    pub local_pos: [f32; 2],
+    pub phase: PointerPhase,
+}
+
+/// Handles a pointer event that landed on this entity (or a descendant),
+/// returning whether it was consumed.
+///
+/// This is the hook for widgets that need to know *where* inside themselves a
+/// click landed rather than merely that one happened — placing a text caret,
+/// dragging out a selection. `OnClick<Msg>` stays the right tool for a widget
+/// that only cares that it was clicked.
+///
+/// Unlike keyboard delivery this bubbles **leaf to root**, matching
+/// [`bubble_to_click_target`](crate::input::bubble_to_click_target): the event
+/// has a position, so the innermost entity containing it is the natural first
+/// responder.
+#[derive(Component, Clone, Copy)]
+pub struct PointerDispatch {
+    handle: fn(&mut EntityWorldMut, &PointerInput) -> bool,
+}
+
+impl PointerDispatch {
+    pub fn new(handle: fn(&mut EntityWorldMut, &PointerInput) -> bool) -> Self {
+        Self { handle }
+    }
+
+    pub(crate) fn call(&self, entity: &mut EntityWorldMut, input: &PointerInput) -> bool {
+        (self.handle)(entity, input)
+    }
+}

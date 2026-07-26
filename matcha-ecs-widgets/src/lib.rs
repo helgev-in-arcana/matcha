@@ -20,6 +20,7 @@ pub mod padding;
 pub mod panel;
 pub mod rich_text;
 pub mod text;
+pub mod text_box;
 
 // Re-exported so downstream code (including this workspace's own tests/demos)
 // constructs `RichText`'s style parameter types (`FontWeight`, `FontStyle`,
@@ -40,3 +41,4 @@ pub use padding::{Padding, PaddingLayout};
 pub use panel::{Panel, PanelLayout};
 pub use rich_text::{RichSpan, RichText, RichTextContent, TextTransform, WhiteSpace};
 pub use text::{Text, TextContent};
+pub use text_box::{TextBox, TextBoxStyle, TextEditor};
