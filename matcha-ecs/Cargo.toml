@@ -20,23 +20,12 @@ parking_lot = { workspace = true }
 
 # graphics
 wgpu = { workspace = true }
-bytemuck = { features = ["derive"], workspace = true }
 
 # math
 nalgebra = { features = ["bytemuck"], workspace = true }
 
-# image
-image = { workspace = true }
-
 # other
-bitflags = { workspace = true }
-num = { workspace = true }
-fxhash = { workspace = true }
-dashmap = { workspace = true }
-smallvec = { workspace = true }
-thiserror = { workspace = true }
 log = { workspace = true }
-enum-map = "2.7.3"
 web-time = { workspace = true }
 
 [dev-dependencies]
