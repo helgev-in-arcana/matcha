@@ -480,12 +480,12 @@ const GLYPH_CACHE_CAPACITY: usize = 1024;
 /// explicit colour pushed via `push_default`/`push` (widget default or span
 /// override), so a default-valued brush is never actually surfaced.
 #[derive(Clone, PartialEq, Debug, Default)]
-struct RichTextBrush([f32; 4]);
+pub(crate) struct RichTextBrush(pub(crate) [f32; 4]);
 
-struct ParleyFontCtxInner {
-    font_cx: Mutex<parley::FontContext>,
-    layout_cx: Mutex<parley::LayoutContext<RichTextBrush>>,
-    scale_cx: Mutex<swash::scale::ScaleContext>,
+pub(crate) struct ParleyFontCtxInner {
+    pub(crate) font_cx: Mutex<parley::FontContext>,
+    pub(crate) layout_cx: Mutex<parley::LayoutContext<RichTextBrush>>,
+    pub(crate) scale_cx: Mutex<swash::scale::ScaleContext>,
     /// Per-glyph rasterised coverage bitmap (or `None` for glyphs with no
     /// visible bitmap, e.g. space — caching that avoids re-rasterising them
     /// every frame), shared across every `RichText` entity/frame drawing the
@@ -497,10 +497,10 @@ struct ParleyFontCtxInner {
 /// `ScaleContext`, and the glyph stencil cache. Lazily inserted on first use,
 /// matching `Text`'s `FontCtx` pattern exactly.
 #[derive(Resource, Clone)]
-struct ParleyFontCtx(Arc<ParleyFontCtxInner>);
+pub(crate) struct ParleyFontCtx(pub(crate) Arc<ParleyFontCtxInner>);
 
 impl ParleyFontCtx {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(Arc::new(ParleyFontCtxInner {
             font_cx: Mutex::new(parley::FontContext::new()),
             layout_cx: Mutex::new(parley::LayoutContext::new()),
@@ -520,7 +520,7 @@ impl ParleyFontCtx {
     /// protects every glyph that pass touches from being evicted by a later
     /// glyph in the *same* pass, while still allowing eviction across
     /// different (unrelated, or later) rebuilds.
-    fn begin_glyph_batch(&self) {
+    pub(crate) fn begin_glyph_batch(&self) {
         self.0.stencil_cache.lock().new_batch();
     }
 
@@ -735,7 +735,7 @@ fn linear_to_srgb_u8(c: f32) -> u8 {
 /// (UV-clamped to any on-screen size) as every glyph's stencil "tint". See
 /// `Text`'s identical `paint_tint_region` for why this is written directly
 /// via `write_data` rather than a `ColorRect`-style render pass.
-fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<AtlasRegion> {
+pub(crate) fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<AtlasRegion> {
     let region = match ctx.texture_atlas.allocate(ctx.device, ctx.queue, [1, 1]) {
         Ok(region) => region,
         Err(e) => {
@@ -759,9 +759,136 @@ fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<AtlasRegion> {
     Some(region)
 }
 
-/// Build a `RenderItem` that shapes `content` fresh every rebuild (reading
-/// the live wrap width from `wrap_width`) and draws each glyph as a
-/// tint-texture quad masked by its cached stencil coverage bitmap.
+/// Composite a shaped parley layout into a `RenderNode`: one stencil-masked
+/// quad per glyph, plus any underline/strikethrough the run carries.
+///
+/// Shared by [`RichText`] and [`crate::TextBox`]: parley hands both of them the
+/// same `Layout` type (`PlainEditor::layout()` returns one too), so the drawing
+/// pass is identical and there is no reason to grow a second copy of it.
+pub(crate) fn draw_parley_layout(
+    font_ctx: &ParleyFontCtx,
+    ctx: &RenderCtx,
+    layout: &parley::Layout<RichTextBrush>,
+) -> RenderNode {
+    let mut node = RenderNode::new();
+
+    // Per-span colour means a single build can need several distinct tint
+    // regions (one per distinct colour actually used) — deduped locally,
+    // scoped to this one build, no persistent cache/eviction needed
+    // (typically only a handful of colours).
+    let mut tint_regions: HashMap<[u32; 4], AtlasRegion> = HashMap::new();
+    let mut tint_for = |color: [f32; 4]| -> Option<AtlasRegion> {
+        let key = [color[0].to_bits(), color[1].to_bits(), color[2].to_bits(), color[3].to_bits()];
+        if let Some(region) = tint_regions.get(&key) {
+            return Some(region.clone());
+        }
+        let region = paint_tint_region(ctx, color)?;
+        tint_regions.insert(key, region.clone());
+        Some(region)
+    };
+
+    font_ctx.begin_glyph_batch();
+    let mut scale_cx = font_ctx.0.scale_cx.lock();
+
+    for line in layout.lines() {
+        for item in line.items() {
+            let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                continue;
+            };
+            let run = glyph_run.run();
+            let font = run.font();
+            let font_size_px = run.font_size();
+            let coords = run.normalized_coords();
+
+            let Some(font_ref) = swash::FontRef::from_index(font.data.as_ref(), font.index as usize) else {
+                continue;
+            };
+            let mut scaler = scale_cx
+                .builder(font_ref)
+                .size(font_size_px)
+                .hint(true)
+                .normalized_coords(coords)
+                .build();
+
+            let font_size_bits = (font_size_px * SUB_PIXEL_QUANTIZE).round() as u32;
+            let coords_hash = fxhash::hash64(coords);
+
+            // Each `GlyphRun` carries one resolved style (parley starts a
+            // new run wherever a style — including brush — changes), so
+            // the run's colour is already fully resolved: no manual
+            // span/byte-range lookup needed here.
+            let Some(tint_region) = tint_for(glyph_run.style().brush.0) else {
+                continue;
+            };
+
+            let mut pen_x = glyph_run.offset();
+            let baseline = glyph_run.baseline();
+
+            for glyph in glyph_run.glyphs() {
+                let gx = pen_x + glyph.x;
+                let gy = baseline + glyph.y;
+                pen_x += glyph.advance;
+
+                let key = GlyphKey {
+                    font_blob_id: font.data.id(),
+                    font_index: font.index,
+                    glyph_id: glyph.id,
+                    font_size_bits,
+                    coords_hash,
+                };
+
+                let Some((stencil_region, size, placement)) = font_ctx.stencil_region(
+                    key,
+                    glyph.id as swash::GlyphId,
+                    &mut scaler,
+                    ctx.device,
+                    ctx.queue,
+                    ctx.stencil_atlas,
+                ) else {
+                    continue;
+                };
+
+                let px = gx.floor() + placement[0] as f32;
+                let py = gy.floor() - placement[1] as f32;
+                let transform = Matrix4::new_translation(&Vector3::new(px, py, 0.0));
+                let glyph_node = RenderNode::new()
+                    .with_texture(tint_region.clone(), size, Matrix4::identity())
+                    .with_stencil(stencil_region, size, Matrix4::identity());
+                node.push_child(glyph_node, transform);
+            }
+
+            // Underline/strikethrough: a flat filled rectangle, not a
+            // glyph — no `.with_stencil(..)` coverage mask needed.
+            // `y = baseline - offset` matches parley's own reference
+            // renderers (e.g. `examples/swash_render` in the parley
+            // repo) exactly.
+            let run_metrics = run.metrics();
+            let run_style = glyph_run.style();
+            for (decoration, default_offset, default_size) in [
+                (&run_style.underline, run_metrics.underline_offset, run_metrics.underline_size),
+                (&run_style.strikethrough, run_metrics.strikethrough_offset, run_metrics.strikethrough_size),
+            ] {
+                let Some(decoration) = decoration else {
+                    continue;
+                };
+                let Some(deco_tint) = tint_for(decoration.brush.0) else {
+                    continue;
+                };
+                let offset = decoration.offset.unwrap_or(default_offset);
+                let size = decoration.size.unwrap_or(default_size).max(1.0);
+                let y = baseline - offset;
+                let deco_transform = Matrix4::new_translation(&Vector3::new(glyph_run.offset(), y, 0.0));
+                let deco_node = RenderNode::new().with_texture(deco_tint, [glyph_run.advance(), size], Matrix4::identity());
+                node.push_child(deco_node, deco_transform);
+            }
+        }
+    }
+
+    node
+}
+
+/// Build a `RenderItem` that shapes `content` fresh every rebuild, reading the
+/// live wrap width from `wrap_width`.
 fn rich_text_render_item(
     font_ctx: ParleyFontCtx,
     wrap_width: Arc<AtomicU32>,
@@ -769,127 +896,13 @@ fn rich_text_render_item(
     style: RichTextStyle,
 ) -> RenderItem {
     RenderItem::new(move |ctx: &RenderCtx| {
-        let mut node = RenderNode::new();
         if content.text.is_empty() {
-            return node;
+            return RenderNode::new();
         }
 
         let max_width = f32::from_bits(wrap_width.load(Ordering::Relaxed));
         let layout = shape(&font_ctx, &content, &style, max_width);
-
-        // Per-span colour means a single build can need several distinct
-        // tint regions (one per distinct colour actually used) — deduped
-        // locally, scoped to this one `RenderItem` rebuild, no persistent
-        // cache/eviction needed (typically only a handful of colours).
-        let mut tint_regions: HashMap<[u32; 4], AtlasRegion> = HashMap::new();
-        let mut tint_for = |color: [f32; 4]| -> Option<AtlasRegion> {
-            let key = [color[0].to_bits(), color[1].to_bits(), color[2].to_bits(), color[3].to_bits()];
-            if let Some(region) = tint_regions.get(&key) {
-                return Some(region.clone());
-            }
-            let region = paint_tint_region(ctx, color)?;
-            tint_regions.insert(key, region.clone());
-            Some(region)
-        };
-
-        font_ctx.begin_glyph_batch();
-        let mut scale_cx = font_ctx.0.scale_cx.lock();
-
-        for line in layout.lines() {
-            for item in line.items() {
-                let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
-                    continue;
-                };
-                let run = glyph_run.run();
-                let font = run.font();
-                let font_size_px = run.font_size();
-                let coords = run.normalized_coords();
-
-                let Some(font_ref) = swash::FontRef::from_index(font.data.as_ref(), font.index as usize) else {
-                    continue;
-                };
-                let mut scaler = scale_cx
-                    .builder(font_ref)
-                    .size(font_size_px)
-                    .hint(true)
-                    .normalized_coords(coords)
-                    .build();
-
-                let font_size_bits = (font_size_px * SUB_PIXEL_QUANTIZE).round() as u32;
-                let coords_hash = fxhash::hash64(coords);
-
-                // Each `GlyphRun` carries one resolved style (parley starts a
-                // new run wherever a style — including brush — changes), so
-                // the run's colour is already fully resolved: no manual
-                // span/byte-range lookup needed here.
-                let Some(tint_region) = tint_for(glyph_run.style().brush.0) else {
-                    continue;
-                };
-
-                let mut pen_x = glyph_run.offset();
-                let baseline = glyph_run.baseline();
-
-                for glyph in glyph_run.glyphs() {
-                    let gx = pen_x + glyph.x;
-                    let gy = baseline + glyph.y;
-                    pen_x += glyph.advance;
-
-                    let key = GlyphKey {
-                        font_blob_id: font.data.id(),
-                        font_index: font.index,
-                        glyph_id: glyph.id,
-                        font_size_bits,
-                        coords_hash,
-                    };
-
-                    let Some((stencil_region, size, placement)) = font_ctx.stencil_region(
-                        key,
-                        glyph.id as swash::GlyphId,
-                        &mut scaler,
-                        ctx.device,
-                        ctx.queue,
-                        ctx.stencil_atlas,
-                    ) else {
-                        continue;
-                    };
-
-                    let px = gx.floor() + placement[0] as f32;
-                    let py = gy.floor() - placement[1] as f32;
-                    let transform = Matrix4::new_translation(&Vector3::new(px, py, 0.0));
-                    let glyph_node = RenderNode::new()
-                        .with_texture(tint_region.clone(), size, Matrix4::identity())
-                        .with_stencil(stencil_region, size, Matrix4::identity());
-                    node.push_child(glyph_node, transform);
-                }
-
-                // Underline/strikethrough: a flat filled rectangle, not a
-                // glyph — no `.with_stencil(..)` coverage mask needed.
-                // `y = baseline - offset` matches parley's own reference
-                // renderers (e.g. `examples/swash_render` in the parley
-                // repo) exactly.
-                let run_metrics = run.metrics();
-                let run_style = glyph_run.style();
-                for (decoration, default_offset, default_size) in [
-                    (&run_style.underline, run_metrics.underline_offset, run_metrics.underline_size),
-                    (&run_style.strikethrough, run_metrics.strikethrough_offset, run_metrics.strikethrough_size),
-                ] {
-                    let Some(decoration) = decoration else {
-                        continue;
-                    };
-                    let Some(deco_tint) = tint_for(decoration.brush.0) else {
-                        continue;
-                    };
-                    let offset = decoration.offset.unwrap_or(default_offset);
-                    let size = decoration.size.unwrap_or(default_size).max(1.0);
-                    let y = baseline - offset;
-                    let deco_transform = Matrix4::new_translation(&Vector3::new(glyph_run.offset(), y, 0.0));
-                    let deco_node = RenderNode::new().with_texture(deco_tint, [glyph_run.advance(), size], Matrix4::identity());
-                    node.push_child(deco_node, deco_transform);
-                }
-            }
-        }
-
-        node
+        draw_parley_layout(&font_ctx, ctx, &layout)
     })
 }
 
