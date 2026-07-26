@@ -41,8 +41,9 @@ use crate::{
         view::ViewChildren,
         window::{Window as WindowComp, WindowBelonging},
     },
-    input::{resolve_click_target, update_hit_test_cache, HitTestCache},
+    input::resolve_click_at,
     model::{ModelHandle, ModelResource},
+    pick::{update_picker, PickQuery, Picker, PickerResource},
     render::{build_and_present, extract_items, RenderDriver, RenderSnapshot, ThreadDriver},
     resources::{FrameTime, GpuResource, RedrawRequest, RenderWindowRoot, RendererResource},
     view::{run_view, Scope},
@@ -197,7 +198,7 @@ where
         });
         world.insert_resource(CanCreateSurface { flag: false });
         world.insert_resource(ModelResource(model));
-        world.insert_resource(HitTestCache::default());
+        world.insert_resource(PickerResource::default());
         world.insert_resource(FrameTime(web_time::Instant::now()));
         world.insert_resource(RedrawRequest::default());
 
@@ -232,7 +233,7 @@ where
             .add_systems(crate::systems::invalidate_on_layout_change.in_set(MatchaSet::PreExtract));
         render_schedule
             .add_systems(crate::systems::invalidate_on_opacity_change.in_set(MatchaSet::PreExtract));
-        render_schedule.add_systems(update_hit_test_cache.in_set(MatchaSet::PreExtract));
+        render_schedule.add_systems(update_picker.in_set(MatchaSet::PreExtract));
 
         Self {
             world,
@@ -278,6 +279,15 @@ where
     ) -> Self {
         self.render_schedule
             .add_systems(systems.in_set(MatchaSet::PreExtract));
+        self
+    }
+
+    /// Swap the picking backend (default: [`crate::pick::RectZPicker`], the 2D
+    /// flat-rect implementation). A 3D application would install a BVH or
+    /// GPU ID-buffer picker here instead; nothing downstream of picking cares
+    /// which one is in use.
+    pub fn with_picker(mut self, picker: impl Picker) -> Self {
+        self.world.insert_resource(PickerResource(Box::new(picker)));
         self
     }
 
@@ -327,14 +337,15 @@ where
         });
     }
 
-    /// Resolve a click at `pos` (window space) against the `HitTestCache`,
-    /// apply the matched `Msg` to the model via `reducer`, and re-view +
-    /// redraw. A no-op if nothing hit-testable with an assigned message was
-    /// under the pointer.
+    /// Resolve a click at `pos` (window space) by picking, then bubbling up to
+    /// the nearest click target; apply the matched `Msg` to the model via
+    /// `reducer`, and re-view + redraw. A no-op if nothing was under the
+    /// pointer, or if nothing from there to the root has an assigned message.
     fn dispatch_click(&mut self, pos: [f32; 2]) {
+        let query = PickQuery { viewport_pos: pos };
         let Some(entity) = ({
-            let cache = self.world.resource::<HitTestCache>();
-            resolve_click_target::<Msg>(&self.world, cache, pos)
+            let picker = self.world.resource::<PickerResource>();
+            resolve_click_at::<Msg>(&self.world, picker.0.as_ref(), &query)
         }) else {
             return;
         };

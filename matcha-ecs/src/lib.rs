@@ -2,6 +2,7 @@ pub mod components;
 pub mod input;
 pub mod layout;
 pub mod model;
+pub mod pick;
 pub mod render;
 pub mod resources;
 pub mod systems;

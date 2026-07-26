@@ -22,7 +22,7 @@ use bevy_ecs::{bundle::Bundle, change_detection::DetectChangesMut, world::Entity
 
 use matcha_ecs::{
     components::{
-        input::{HitTestEnabled, Message, OnClick},
+        input::{Message, OnClick, Pickable},
         view::Key,
     },
     view::Widget,
@@ -86,7 +86,7 @@ impl<Msg: Message> Widget for Link<Msg> {
     }
 
     fn bundle(&self) -> impl Bundle {
-        (self.text.bundle(), OnClick(self.msg), HitTestEnabled)
+        (self.text.bundle(), OnClick(self.msg), Pickable)
     }
 
     fn after_spawn(&self, entity: &mut EntityWorldMut) {

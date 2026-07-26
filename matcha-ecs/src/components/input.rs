@@ -1,22 +1,35 @@
-//! Input protocol: hit-testing membership/order and the Elm-style click
-//! message widgets carry.
+//! Input protocol: picking membership/order and the Elm-style click message
+//! widgets carry.
 //!
 //! `Message`/`OnClick<Msg>` originated in `matcha-ecs-widgets::button`; moved
-//! into core because hit-test dispatch (`ui_ecs.rs`'s `device_event`) must
-//! read `OnClick<Msg>` off *any* clickable entity without knowing about
-//! `Button` specifically — a protocol multiple widgets share, so it belongs
-//! in core per `ECS_IMPLEMENTATION_PLAN.md` §3.1's crate-direction test. The
-//! widgets crate re-exports both for source compatibility.
+//! into core because click dispatch (`ui_ecs.rs`'s `device_event`) must read
+//! `OnClick<Msg>` off *any* clickable entity without knowing about `Button`
+//! specifically — a protocol multiple widgets share, so it belongs in core per
+//! `ECS_IMPLEMENTATION_PLAN.md` §3.1's crate-direction test. The widgets crate
+//! re-exports both for source compatibility.
 
 use bevy_ecs::component::Component;
 
-/// Marker: this entity participates in hit-testing. [`crate::input::update_hit_test_cache`]
-/// only considers entities that carry it (plus `LayoutOutput`/`GlobalTransform`).
+/// Marker: this entity is **opaque to picking**.
+///
+/// Note this declares occlusion, not interest in events. A pick that lands on
+/// a `Pickable` entity stops there and is then resolved by walking *up* the
+/// tree ([`crate::input::bubble_to_click_target`]); it never falls through to
+/// something painted behind. An entity that should let clicks pass to whatever
+/// is underneath simply omits this component — already the default for every
+/// container.
+///
+/// The meaning carries across every picking backend: for [`crate::pick::RectZPicker`]
+/// it means "put my rect in the array", and for a future GPU ID-buffer backend
+/// it would mean "write my id into the buffer".
 #[derive(Component, Clone, Copy)]
-pub struct HitTestEnabled;
+pub struct Pickable;
 
-/// Hit-test stacking order: higher wins on overlap. Ties fall back to paint
+/// Stacking order for picking: higher wins on overlap. Ties fall back to paint
 /// order (later-painted wins). Entities without this component default to `0`.
+///
+/// **Backend-specific**: this is a hint for [`crate::pick::RectZPicker`] only.
+/// A BVH or ID-buffer backend derives order from actual depth and ignores it.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ZOrder(pub i32);
 

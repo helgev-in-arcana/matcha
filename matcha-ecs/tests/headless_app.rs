@@ -6,7 +6,7 @@
 //! interface would.
 //!
 //! This is one level stronger than `tests/input.rs`, which exercises the
-//! extracted pure functions (`build_hit_test_cache`/`resolve_click_target`):
+//! extracted pure functions (`RectZPicker::build`/`resolve_click_at`):
 //! here a synthetic Moved→Pressed→Released sequence travels the production
 //! dispatch path `Adapter::device_event` → `DeviceEventState::process` →
 //! `UiEcs::device_event` → `dispatch_click` → reducer → re-view.
@@ -83,9 +83,9 @@ struct Harness {
 }
 
 /// Boots the app the way `winit_interface` would: init → resumed →
-/// create_surface → one render. The render is required before any click:
-/// `HitTestCache` is built by `update_hit_test_cache` in `MatchaSet::Flush`,
-/// which only runs inside the render schedule.
+/// create_surface → one render. The render is required before any click: the
+/// picker's acceleration structure is built by `update_picker` in
+/// `MatchaSet::PreExtract`, which only runs inside the render schedule.
 fn boot() -> Harness {
     let model = Model::new();
     let count = model.count.clone();

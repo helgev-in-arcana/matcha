@@ -27,7 +27,7 @@ use nalgebra::{Matrix4, Vector3};
 
 use matcha_ecs::{
     components::{
-        input::{HitTestEnabled, Message, OnClick},
+        input::{Message, OnClick, Pickable},
         render::{RenderCtx, RenderItem},
         view::Key,
     },
@@ -191,7 +191,7 @@ impl<Msg: Message> Widget for Button<Msg> {
             self.geometry(),
             RectColor(self.color),
             LayoutDispatch::of::<RectGeometry>(),
-            HitTestEnabled,
+            Pickable,
         )
     }
 
