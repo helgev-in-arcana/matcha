@@ -1,6 +1,7 @@
 pub mod components;
 pub mod focus;
 pub mod input;
+pub mod keyboard;
 pub mod layout;
 pub mod model;
 pub mod pick;

@@ -1,5 +1,5 @@
-//! Input protocol: picking membership/order and the Elm-style click message
-//! widgets carry.
+//! Input protocol: picking membership/order, the Elm-style click message
+//! widgets carry, and the keyboard/IME dispatch hooks.
 //!
 //! `Message`/`OnClick<Msg>` originated in `matcha-ecs-widgets::button`; moved
 //! into core because click dispatch (`ui_ecs.rs`'s `device_event`) must read
@@ -8,7 +8,8 @@
 //! `ECS_IMPLEMENTATION_PLAN.md` §3.1's crate-direction test. The widgets crate
 //! re-exports both for source compatibility.
 
-use bevy_ecs::component::Component;
+use bevy_ecs::{component::Component, world::EntityWorldMut};
+use matcha_window::event::device_event::{ImeEvent, KeyInput};
 
 /// Marker: this entity is **opaque to picking**.
 ///
@@ -47,3 +48,56 @@ impl<T: Clone + PartialEq + Send + Sync + 'static> Message for T {}
 /// a message was assigned (e.g. `Button::new(..)` without `.on(..)`).
 #[derive(Component, Clone, PartialEq, Debug)]
 pub struct OnClick<Msg: Message>(pub Option<Msg>);
+
+/// Handles a key event on this entity, returning whether it was consumed.
+///
+/// Same fn-pointer dispatch idiom as [`LayoutDispatch`](crate::layout::LayoutDispatch):
+/// a widget bakes `KeyDispatch::new(..)` into its `bundle()` and the core calls
+/// it without knowing the widget type. There is no registry.
+///
+/// Delivery walks the focus path **root to leaf** (see
+/// [`crate::keyboard::dispatch_key`]), so an ancestor is offered every event
+/// before its descendants and can swallow it by returning `true`.
+#[derive(Component, Clone, Copy)]
+pub struct KeyDispatch {
+    handle: fn(&mut EntityWorldMut, &KeyInput) -> bool,
+}
+
+impl KeyDispatch {
+    pub fn new(handle: fn(&mut EntityWorldMut, &KeyInput) -> bool) -> Self {
+        Self { handle }
+    }
+
+    pub(crate) fn call(&self, entity: &mut EntityWorldMut, input: &KeyInput) -> bool {
+        (self.handle)(entity, input)
+    }
+}
+
+/// Handles an IME composition event on this entity, returning whether it was
+/// consumed. Delivery and dispatch work exactly like [`KeyDispatch`].
+///
+/// Carrying this component is also what tells the core that the OS IME should
+/// be enabled while this entity holds focus (see `crate::keyboard::sync_ime_state`)
+/// — the core never inspects the text itself.
+#[derive(Component, Clone, Copy)]
+pub struct ImeDispatch {
+    handle: fn(&mut EntityWorldMut, &ImeEvent) -> bool,
+}
+
+impl ImeDispatch {
+    pub fn new(handle: fn(&mut EntityWorldMut, &ImeEvent) -> bool) -> Self {
+        Self { handle }
+    }
+
+    pub(crate) fn call(&self, entity: &mut EntityWorldMut, event: &ImeEvent) -> bool {
+        (self.handle)(entity, event)
+    }
+}
+
+/// Where the caret is, in **window space** (`[min_x, min_y, max_x, max_y]`), so
+/// the platform can place its IME candidate list beside the text.
+///
+/// Written by whichever widget is editing text, read by the core and pushed to
+/// the OS window. The core treats it as an opaque rectangle.
+#[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
+pub struct ImeCursorArea(pub [f32; 4]);

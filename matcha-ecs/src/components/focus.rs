@@ -5,7 +5,7 @@
 //! any one widget's business, so it lives in core (`ECS_IMPLEMENTATION_PLAN.md`
 //! §3.1's crate-direction test). Resolution lives in [`crate::focus`].
 
-use bevy_ecs::{component::Component, entity::Entity};
+use bevy_ecs::{component::Component, entity::Entity, world::EntityWorldMut};
 
 /// Declares an entity focusable, and how it behaves when focus resolution
 /// walks through it.
@@ -78,3 +78,29 @@ pub struct Focused;
 /// including ones that are not focusable themselves.
 #[derive(Component)]
 pub struct FocusWithin;
+
+/// Notified when this entity gains or loses focus (`true` = gained).
+///
+/// Same fn-pointer dispatch idiom as [`KeyDispatch`](crate::components::input::KeyDispatch)
+/// and [`LayoutDispatch`](crate::layout::LayoutDispatch). It lives here rather
+/// than in the input module because focus transitions are not text-specific —
+/// any widget may want to react to them.
+///
+/// Called from [`sync_focus_components`](crate::focus::sync_focus_components),
+/// which is the only place that knows the exact transition set in **both**
+/// directions. (`Changed<Focused>` cannot serve this purpose: it does not fire
+/// when a component is removed, so losing focus would go unnoticed.)
+#[derive(Component, Clone, Copy)]
+pub struct FocusDispatch {
+    handle: fn(&mut EntityWorldMut, bool),
+}
+
+impl FocusDispatch {
+    pub fn new(handle: fn(&mut EntityWorldMut, bool)) -> Self {
+        Self { handle }
+    }
+
+    pub(crate) fn call(&self, entity: &mut EntityWorldMut, gained: bool) {
+        (self.handle)(entity, gained);
+    }
+}

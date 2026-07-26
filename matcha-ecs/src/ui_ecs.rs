@@ -7,9 +7,10 @@
 //! and rendering runs synchronously on the main thread. From M2 on, the model
 //! lives in the world as a resource and [`ModelHandle::update`] calls queue
 //! mutations that are drained and re-viewed on `ui_command`. From M5 on,
-//! `device_event` resolves clicks against the [`crate::input::HitTestCache`]
-//! and applies the matched `Msg` to the model via a user-supplied `reducer`,
-//! reusing the same Phase B (re-view) + redraw path as the model queue.
+//! `device_event` resolves a pointer press through [`crate::pick`] and applies
+//! the matched `Msg` to the model via a user-supplied `reducer`, reusing the
+//! same Phase B (re-view) + redraw path as the model queue; keyboard and IME
+//! events go to the focus path instead (see [`crate::keyboard`]).
 
 use std::sync::{atomic::AtomicBool, mpsc, Arc, OnceLock};
 
@@ -43,6 +44,7 @@ use crate::{
     },
     focus::{run_validate_focus, sync_focus_components, Focus, FocusConfig},
     input::resolve_pointer_press,
+    keyboard::{dispatch_ime, dispatch_key, sync_ime_state},
     model::{ModelHandle, ModelResource},
     pick::{update_picker, PickQuery, Picker, PickerResource},
     render::{build_and_present, extract_items, RenderDriver, RenderSnapshot, ThreadDriver},
@@ -71,7 +73,7 @@ pub enum MatchaSet {
     /// Settle the extract contract now that layout is known: the components
     /// extract reads (`RenderOpacity`, …) and the validity of each entity's
     /// cached render node. Open to registered systems; the core registers the
-    /// invalidation and hit-test-cache plumbing here.
+    /// invalidation, picking and focus plumbing here.
     PreExtract,
     /// Core: collect the frame's drawable entities into a snapshot.
     Extract,
@@ -241,7 +243,7 @@ where
         // markers are synced: the focused entity may have been despawned or
         // rebuilt by this frame's reconcile pass.
         render_schedule.add_systems(
-            (run_validate_focus, sync_focus_components)
+            (run_validate_focus, sync_focus_components, sync_ime_state)
                 .chain()
                 .in_set(MatchaSet::PreExtract),
         );
@@ -685,6 +687,19 @@ where
         // move/release), so a hit is always a genuine new click.
         if event.on_click(|_count| ()).is_some() {
             self.on_pointer_press(event.mouse_viewport_position());
+        }
+
+        // Keyboard and IME have no spatial origin: they go to whatever holds
+        // focus. Both walk the focus path root->leaf; see `keyboard.rs`.
+        if let Some(key_input) = event.on_key_down(|input| input.clone()) {
+            if dispatch_key(&mut self.world, &key_input) {
+                self.request_redraw_all();
+            }
+        }
+        if let Some(ime_event) = event.on_ime(|ime| ime.clone()) {
+            if dispatch_ime(&mut self.world, &ime_event) {
+                self.request_redraw_all();
+            }
         }
     }
 

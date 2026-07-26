@@ -33,7 +33,7 @@ use bevy_ecs::{
 };
 
 use crate::{
-    components::focus::{FocusPolicy, FocusWithin, Focused, LastFocusedChild},
+    components::focus::{FocusDispatch, FocusPolicy, FocusWithin, Focused, LastFocusedChild},
     pick::ancestors,
 };
 
@@ -325,6 +325,7 @@ pub fn sync_focus_components(world: &mut World) {
     for entity in stale_focused {
         if let Ok(mut e) = world.get_entity_mut(entity) {
             e.remove::<Focused>();
+            notify_focus_dispatch(&mut e, false);
         }
         invalidate_render_item(world, entity);
     }
@@ -348,9 +349,22 @@ pub fn sync_focus_components(world: &mut World) {
         if let Ok(mut e) = world.get_entity_mut(top) {
             if !e.contains::<Focused>() {
                 e.insert(Focused);
+                notify_focus_dispatch(&mut e, true);
                 invalidate_render_item(world, top);
             }
         }
+    }
+}
+
+/// Tell an entity it just gained or lost the focus vertex, if it asked to know.
+///
+/// Only vertex transitions are reported, not `:focus-within` ones: this exists
+/// for widgets that own an input session (starting or ending an IME
+/// composition, say), which is a property of *being* focused, not of containing
+/// something focused.
+fn notify_focus_dispatch(entity: &mut bevy_ecs::world::EntityWorldMut, gained: bool) {
+    if let Some(dispatch) = entity.get::<FocusDispatch>().copied() {
+        dispatch.call(entity, gained);
     }
 }
 
