@@ -89,7 +89,7 @@ impl<Msg: Message> Widget for Link<Msg> {
     fn bundle(&self) -> impl Bundle {
         (
             self.text.bundle(),
-            OnClick(self.msg),
+            OnClick(self.msg.clone()),
             Pickable,
             FocusPolicy::Normal,
         )
@@ -102,7 +102,7 @@ impl<Msg: Message> Widget for Link<Msg> {
     fn patch(&self, entity: &mut EntityWorldMut) {
         Widget::patch(&self.text, entity);
         if let Some(mut on_click) = entity.get_mut::<OnClick<Msg>>() {
-            on_click.set_if_neq(OnClick(self.msg));
+            on_click.set_if_neq(OnClick(self.msg.clone()));
         }
     }
 }

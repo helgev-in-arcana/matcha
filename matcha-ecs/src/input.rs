@@ -67,7 +67,7 @@ pub fn resolve_pointer_press<Msg: Message>(world: &mut World, q: &PickQuery) -> 
 
     let click_msg = hit
         .and_then(|entity| bubble_to_click_target::<Msg>(world, entity))
-        .and_then(|target| world.get::<OnClick<Msg>>(target).and_then(|c| c.0));
+        .and_then(|target| world.get::<OnClick<Msg>>(target).and_then(|c| c.0.clone()));
 
     let focus_changed = focus_from_pick(world, hit);
 

@@ -33,12 +33,17 @@ pub struct Pickable;
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ZOrder(pub i32);
 
-/// Marker bound for Elm-style messages: a cheap, copyable, comparable value.
-pub trait Message: Copy + PartialEq + Send + Sync + 'static {}
-impl<T: Copy + PartialEq + Send + Sync + 'static> Message for T {}
+/// Marker bound for Elm-style messages: a cheap-to-clone, comparable value.
+///
+/// Deliberately `Clone` rather than `Copy`: a text widget's change notification
+/// has to carry the new text (`Msg::TextChanged(String)`), which a `Copy` bound
+/// makes unrepresentable. Nothing here ever needed `Copy` — dispatch clones the
+/// message out of the component exactly once per event.
+pub trait Message: Clone + PartialEq + Send + Sync + 'static {}
+impl<T: Clone + PartialEq + Send + Sync + 'static> Message for T {}
 
 /// The message a click emits, if any. Always present (as `Option<Msg>`) on a
 /// clickable widget's bundle so its archetype is stable regardless of whether
 /// a message was assigned (e.g. `Button::new(..)` without `.on(..)`).
-#[derive(Component, Clone, Copy, PartialEq, Debug)]
+#[derive(Component, Clone, PartialEq, Debug)]
 pub struct OnClick<Msg: Message>(pub Option<Msg>);

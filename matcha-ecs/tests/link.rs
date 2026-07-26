@@ -54,7 +54,7 @@ fn carries_hit_test_membership_and_the_assigned_message() {
     let child = first_child(&world, root);
 
     assert!(world.get::<Pickable>(child).is_some());
-    assert_eq!(world.get::<OnClick<Msg>>(child).copied(), Some(OnClick(Some(Msg::Navigate))));
+    assert_eq!(world.get::<OnClick<Msg>>(child).cloned(), Some(OnClick(Some(Msg::Navigate))));
 }
 
 #[test]
@@ -106,7 +106,7 @@ fn changed_message_updates_on_click_without_requiring_a_content_change() {
     });
 
     assert_eq!(
-        world.get::<OnClick<Msg>>(child).copied(),
+        world.get::<OnClick<Msg>>(child).cloned(),
         Some(OnClick(None)),
         "OnClick must be re-patched to None even though the text content didn't change"
     );

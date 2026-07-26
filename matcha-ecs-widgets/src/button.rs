@@ -228,7 +228,7 @@ impl<Msg: Message> Widget for Button<Msg> {
         (
             ButtonLabel(self.label.clone()),
             self.text_style(),
-            OnClick(self.msg),
+            OnClick(self.msg.clone()),
             self.geometry(),
             RectColor(self.color),
             LayoutDispatch::of::<RectGeometry>(),
@@ -251,7 +251,7 @@ impl<Msg: Message> Widget for Button<Msg> {
             changed |= style.set_if_neq(self.text_style());
         }
         if let Some(mut on_click) = entity.get_mut::<OnClick<Msg>>() {
-            on_click.set_if_neq(OnClick(self.msg));
+            on_click.set_if_neq(OnClick(self.msg.clone()));
         }
 
         let geometry = self.geometry();

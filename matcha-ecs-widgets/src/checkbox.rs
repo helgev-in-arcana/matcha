@@ -149,7 +149,7 @@ impl<Msg: Message> Widget for Checkbox<Msg> {
         (
             self.geometry(),
             self.state(),
-            OnClick(self.msg),
+            OnClick(self.msg.clone()),
             LayoutDispatch::of::<RectGeometry>(),
             Pickable,
             FocusPolicy::Normal,
@@ -166,7 +166,7 @@ impl<Msg: Message> Widget for Checkbox<Msg> {
             changed |= s.set_if_neq(self.state());
         }
         if let Some(mut on_click) = entity.get_mut::<OnClick<Msg>>() {
-            on_click.set_if_neq(OnClick(self.msg));
+            on_click.set_if_neq(OnClick(self.msg.clone()));
         }
 
         if changed {
