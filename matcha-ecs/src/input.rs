@@ -16,7 +16,8 @@ use bevy_ecs::{entity::Entity, world::World};
 
 use crate::{
     components::input::{Message, OnClick},
-    pick::{ancestors, PickQuery, Picker},
+    focus::focus_from_pick,
+    pick::{ancestors, PickQuery, PickerResource, Picker},
 };
 
 /// Walk up from `from` (inclusive) and return the first entity carrying
@@ -38,4 +39,40 @@ pub fn resolve_click_at<Msg: Message>(
 ) -> Option<Entity> {
     let hit = picker.pick(world, q)?;
     bubble_to_click_target::<Msg>(world, hit.entity)
+}
+
+/// What one pointer press resolved to.
+pub struct PointerPress<Msg: Message> {
+    /// The message to hand the reducer, if a click target with an assigned
+    /// message was found.
+    pub click_msg: Option<Msg>,
+    /// Whether the focus path moved. Focus lives in the ECS world rather than
+    /// in the app model, so a focus-only change needs a redraw but **not** a
+    /// re-run of the view.
+    pub focus_changed: bool,
+}
+
+/// Resolve one pointer press: pick once, then serve both click routing and
+/// focus from that single hit.
+///
+/// A press is the only moment where clicking and focusing must agree, so they
+/// share the pick rather than each running their own. Focus state is updated
+/// here; the click message is returned for the caller to apply, since only the
+/// caller owns the model and the reducer.
+pub fn resolve_pointer_press<Msg: Message>(world: &mut World, q: &PickQuery) -> PointerPress<Msg> {
+    let hit = {
+        let picker = world.resource::<PickerResource>();
+        picker.0.pick(world, q).map(|h| h.entity)
+    };
+
+    let click_msg = hit
+        .and_then(|entity| bubble_to_click_target::<Msg>(world, entity))
+        .and_then(|target| world.get::<OnClick<Msg>>(target).and_then(|c| c.0));
+
+    let focus_changed = focus_from_pick(world, hit);
+
+    PointerPress {
+        click_msg,
+        focus_changed,
+    }
 }

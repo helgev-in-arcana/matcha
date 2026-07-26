@@ -27,6 +27,7 @@ use nalgebra::{Matrix4, Vector3};
 
 use matcha_ecs::{
     components::{
+        focus::FocusPolicy,
         input::{Message, OnClick, Pickable},
         render::{RenderCtx, RenderItem},
         view::Key,
@@ -51,6 +52,7 @@ pub struct ButtonLabel(pub String);
 struct ButtonTextStyle {
     font_size: f32,
     label_color: [f32; 4],
+    focus_ring_color: [f32; 4],
 }
 
 /// A solid-colour rectangle with a centred text label that emits `Msg` on click.
@@ -63,6 +65,7 @@ pub struct Button<Msg: Message> {
     color: [f32; 4],
     font_size: f32,
     label_color: [f32; 4],
+    focus_ring_color: [f32; 4],
 }
 
 impl<Msg: Message> Button<Msg> {
@@ -76,6 +79,7 @@ impl<Msg: Message> Button<Msg> {
             color: [0.35, 0.35, 0.4, 1.0],
             font_size: 16.0,
             label_color: [1.0, 1.0, 1.0, 1.0],
+            focus_ring_color: [0.45, 0.7, 1.0, 1.0],
         }
     }
 
@@ -110,6 +114,13 @@ impl<Msg: Message> Button<Msg> {
         self
     }
 
+    /// Override the default ring colour drawn around the button while it holds
+    /// focus (components in `0.0..=1.0`).
+    pub fn focus_ring_color(mut self, color: [f32; 4]) -> Self {
+        self.focus_ring_color = color;
+        self
+    }
+
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = key.into();
         self
@@ -126,6 +137,7 @@ impl<Msg: Message> Button<Msg> {
         ButtonTextStyle {
             font_size: self.font_size,
             label_color: self.label_color,
+            focus_ring_color: self.focus_ring_color,
         }
     }
 
@@ -142,23 +154,52 @@ impl<Msg: Message> Button<Msg> {
             self.label.clone(),
             self.font_size,
             self.label_color,
+            self.focus_ring_color,
         )
     }
 }
 
+/// Width of the ring drawn around a focused button.
+const FOCUS_RING_WIDTH: f32 = 2.0;
+
 /// Build a `RenderItem` compositing a solid box with a single-line, centred,
 /// shaped text label on top (no word-wrap — a button label is one line).
 /// Drawn at the layout-allocated size (`ctx.size`), not the declared one.
+///
+/// When the button holds focus (`ctx.focused`) the box is drawn as a ring in
+/// `focus_ring_color` with the normal fill inset inside it. `focus.rs`'s
+/// `sync_focus_components` invalidates the cached node on every focus
+/// transition, so this is re-evaluated exactly when it changes.
 fn button_render_item(
     font_ctx: FontCtx,
     box_color: [f32; 4],
     label: String,
     font_size: f32,
     label_color: [f32; 4],
+    focus_ring_color: [f32; 4],
 ) -> RenderItem {
     RenderItem::new(move |ctx: &RenderCtx| {
         let [w, h] = ctx.size;
-        let mut node = solid_rect_node(ctx, w, h, box_color);
+
+        let mut node = if ctx.focused {
+            // Ring underneath, fill inset on top — the same two-quad technique
+            // `Panel` uses for its border.
+            let mut ring = solid_rect_node(ctx, w, h, focus_ring_color);
+            let inset = FOCUS_RING_WIDTH;
+            let fill = solid_rect_node(
+                ctx,
+                (w - inset * 2.0).max(0.0),
+                (h - inset * 2.0).max(0.0),
+                box_color,
+            );
+            ring.push_child(
+                fill,
+                Matrix4::new_translation(&Vector3::new(inset, inset, 0.0)),
+            );
+            ring
+        } else {
+            solid_rect_node(ctx, w, h, box_color)
+        };
 
         let layout = shape(&font_ctx, &label, font_size, f32::MAX);
         let Some(tint_region) = paint_tint_region(ctx, label_color) else {
@@ -192,6 +233,7 @@ impl<Msg: Message> Widget for Button<Msg> {
             RectColor(self.color),
             LayoutDispatch::of::<RectGeometry>(),
             Pickable,
+            FocusPolicy::Normal,
         )
     }
 

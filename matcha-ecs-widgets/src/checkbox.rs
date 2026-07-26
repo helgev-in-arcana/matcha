@@ -22,6 +22,7 @@ use nalgebra::{Matrix4, Vector3};
 
 use matcha_ecs::{
     components::{
+        focus::FocusPolicy,
         input::{Message, OnClick, Pickable},
         render::{RenderCtx, RenderItem},
         view::Key,
@@ -151,6 +152,7 @@ impl<Msg: Message> Widget for Checkbox<Msg> {
             OnClick(self.msg),
             LayoutDispatch::of::<RectGeometry>(),
             Pickable,
+            FocusPolicy::Normal,
             checkbox_render_item(self.state()),
         )
     }

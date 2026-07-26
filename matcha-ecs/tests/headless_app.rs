@@ -9,7 +9,7 @@
 //! extracted pure functions (`RectZPicker::build`/`resolve_click_at`):
 //! here a synthetic Moved→Pressed→Released sequence travels the production
 //! dispatch path `Adapter::device_event` → `DeviceEventState::process` →
-//! `UiEcs::device_event` → `dispatch_click` → reducer → re-view.
+//! `UiEcs::device_event` → `on_pointer_press` → reducer → re-view.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
@@ -248,4 +248,52 @@ fn surfaceless_render_skips_frames_safely() {
 
     h.click([10.0, 10.0]);
     assert_eq!(h.count.load(Ordering::Relaxed), 1);
+}
+
+/// Focus travels the same production path as the click, from the same single
+/// pick: `Adapter::device_event` → `UiEcs::on_pointer_press` →
+/// `resolve_pointer_press`. `Button` opts into `FocusPolicy::Normal`, so the
+/// press both fires the reducer and moves focus onto the button.
+#[test]
+fn click_on_button_also_focuses_it() {
+    let mut h = boot();
+    assert_eq!(h.adapter.app().focus().top(), None, "nothing focused at boot");
+
+    h.click([10.0, 10.0]);
+
+    let focus = h.adapter.app().focus();
+    let focused = focus.top().expect("the button took focus");
+    assert!(focus.is_focused(focused));
+    // The window root is the path's first element and is focus-within.
+    assert_eq!(
+        focus.path().last().copied(),
+        Some(focused),
+        "the vertex is the deepest entity on the path"
+    );
+    assert!(focus.path().len() >= 2, "the path includes the window root");
+    assert!(focus.is_focus_within(focus.path()[0]));
+}
+
+/// Pressing on empty background clears focus (the default `clear_on_miss`),
+/// and does so without running the reducer or re-running the view: focus is
+/// ECS state, not model state.
+#[test]
+fn click_on_background_clears_focus_without_touching_the_model() {
+    let mut h = boot();
+    h.click([10.0, 10.0]);
+    assert!(h.adapter.app().focus().top().is_some());
+
+    let count_before = h.count.load(Ordering::Relaxed);
+    let views_before = h.view_runs.load(Ordering::Relaxed);
+
+    // Well outside the 120x40 button.
+    h.click([600.0, 400.0]);
+
+    assert_eq!(h.adapter.app().focus().top(), None, "focus cleared");
+    assert_eq!(h.count.load(Ordering::Relaxed), count_before, "model untouched");
+    assert_eq!(
+        h.view_runs.load(Ordering::Relaxed),
+        views_before,
+        "a focus-only change must not re-run the view"
+    );
 }

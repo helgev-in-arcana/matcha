@@ -34,6 +34,18 @@ pub struct RenderCtx<'a> {
     /// drawing at any other size desynchronises paint from layout.
     /// `[0.0, 0.0]` if the entity has never been laid out.
     pub size: [f32; 2],
+    /// Whether this entity is the focus vertex (CSS `:focus`).
+    ///
+    /// Focus has to arrive through the context rather than being read from the
+    /// world, for the same reason `size` and `opacity` do: a builder is a
+    /// closure captured back at `bundle()`/`patch()` time and has no world
+    /// access when it runs (on the render thread, no less). The rebuild is
+    /// triggered by `focus::sync_focus_components`, which invalidates the
+    /// cached node of every entity whose focus state changed.
+    pub focused: bool,
+    /// Whether the focus vertex is this entity or one of its descendants
+    /// (CSS `:focus-within`). Always `true` when [`focused`](Self::focused) is.
+    pub focus_within: bool,
 }
 
 /// A widget's current opacity, `0.0` (invisible) to `1.0` (fully visible).

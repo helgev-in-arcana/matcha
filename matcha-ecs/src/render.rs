@@ -22,6 +22,7 @@ use parking_lot::{Condvar, Mutex};
 use renderer::{CoreRenderer, RenderNode};
 
 use crate::components::{
+    focus::{FocusWithin, Focused},
     layout::{GlobalTransform, LayoutOutput},
     render::{RenderCtx, RenderItem, RenderOpacity},
     view::ViewChildren,
@@ -30,13 +31,16 @@ use crate::components::{
 /// One drawable entity captured for a frame: the shared node cache, its deferred
 /// builder, its window-space transform (already composed by M3 layout), the size
 /// layout allocated to it (`LayoutOutput::size` — what the builder must draw at),
-/// and its current opacity (`1.0` if the entity has no `RenderOpacity`).
+/// its current opacity (`1.0` if the entity has no `RenderOpacity`), and its
+/// focus state.
 pub struct RenderItemSnapshot {
     pub cache: Arc<Mutex<Option<Arc<RenderNode>>>>,
     pub builder: Arc<dyn Fn(&RenderCtx) -> RenderNode + Send + Sync>,
     pub transform: Matrix4<f32>,
     pub size: [f32; 2],
     pub opacity: f32,
+    pub focused: bool,
+    pub focus_within: bool,
 }
 
 /// Everything a [`RenderDriver`] needs to draw one window's frame. Owns the
@@ -94,6 +98,8 @@ fn extract_recursive(world: &World, entity: Entity, out: &mut Vec<RenderItemSnap
                 transform: transform.affine,
                 size,
                 opacity,
+                focused: world.get::<Focused>(child).is_some(),
+                focus_within: world.get::<FocusWithin>(child).is_some(),
             });
         }
         extract_recursive(world, child, out);
@@ -128,6 +134,8 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
             stencil_atlas: &stencil_atlas,
             opacity: item.opacity,
             size: item.size,
+            focused: item.focused,
+            focus_within: item.focus_within,
         };
         let node = build_node(&item.cache, &item.builder, &ctx);
         nodes.push((node, item.transform));

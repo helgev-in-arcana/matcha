@@ -17,6 +17,13 @@
 //! panicking; do not expect the Button row to visibly redistribute.
 //! `align_items` does not have this limitation — the dedicated comparison
 //! row near the bottom shows all four variants with a visible difference.
+//!
+//! Also doubles as the focus-model demo: `Button`, `Checkbox` and `Link` all
+//! opt into `FocusPolicy::Normal`, and `Button` draws a ring while focused.
+//! Click a button to move focus onto it; click empty background to clear it
+//! (the default `FocusConfig::clear_on_miss`). Note the ring appears on a
+//! plain focus change with no model update at all — focus lives in the ECS
+//! world, so no view re-run is involved.
 
 use std::sync::{Arc, LazyLock};
 
@@ -87,7 +94,7 @@ fn view(model: &Model, s: &mut Scope) {
         });
 
         // --- Button: real shaped labels, custom font_size/label_color, RectColor patch fix ---
-        section_label(s, "Button — real label; justify_content(SpaceBetween) exercised but inert (see doc comment)");
+        section_label(s, "Button — real label; click one to see the focus ring; justify_content(SpaceBetween) exercised but inert (see doc comment)");
         s.node(Row::new().gap(10.0).justify_content(JustifyContent::SpaceBetween), |s| {
             s.leaf(Button::new("-").on(Msg::Dec).color([0.8, 0.3, 0.3, 1.0]));
             s.leaf(

@@ -37,11 +37,12 @@ use renderer::CoreRenderer;
 
 use crate::{
     components::{
-        input::{Message, OnClick},
+        input::Message,
         view::ViewChildren,
         window::{Window as WindowComp, WindowBelonging},
     },
-    input::resolve_click_at,
+    focus::{run_validate_focus, sync_focus_components, Focus, FocusConfig},
+    input::resolve_pointer_press,
     model::{ModelHandle, ModelResource},
     pick::{update_picker, PickQuery, Picker, PickerResource},
     render::{build_and_present, extract_items, RenderDriver, RenderSnapshot, ThreadDriver},
@@ -199,6 +200,8 @@ where
         world.insert_resource(CanCreateSurface { flag: false });
         world.insert_resource(ModelResource(model));
         world.insert_resource(PickerResource::default());
+        world.insert_resource(Focus::default());
+        world.insert_resource(FocusConfig::default());
         world.insert_resource(FrameTime(web_time::Instant::now()));
         world.insert_resource(RedrawRequest::default());
 
@@ -234,6 +237,14 @@ where
         render_schedule
             .add_systems(crate::systems::invalidate_on_opacity_change.in_set(MatchaSet::PreExtract));
         render_schedule.add_systems(update_picker.in_set(MatchaSet::PreExtract));
+        // Focus must be re-derived against the current tree before its derived
+        // markers are synced: the focused entity may have been despawned or
+        // rebuilt by this frame's reconcile pass.
+        render_schedule.add_systems(
+            (run_validate_focus, sync_focus_components)
+                .chain()
+                .in_set(MatchaSet::PreExtract),
+        );
 
         Self {
             world,
@@ -291,6 +302,12 @@ where
         self
     }
 
+    /// The current focus state. Focus lives in the ECS world rather than in
+    /// the app model, so this is how an embedder reads it from outside.
+    pub fn focus(&self) -> &Focus {
+        self.world.resource::<Focus>()
+    }
+
     /// Clone a handle for mutating the model from any thread. Safe to call
     /// before the event loop starts (`ModelHandle::update` queues correctly
     /// even before `init()` fills in the wake proxy).
@@ -330,39 +347,38 @@ where
                 run_view(world, root_entity, |s| view_fn(&model.0, s));
             });
 
+        self.request_redraw_all();
+    }
+
+    /// Handle a pointer press at `pos` (window space): one pick serves both
+    /// focus and click routing (see [`resolve_pointer_press`]).
+    ///
+    /// A click message goes through the reducer and needs the view re-run.
+    /// A focus-only change does not: focus lives in the ECS world, not in the
+    /// app model, so widgets read it straight from their entity — a redraw is
+    /// enough, and re-running the view would be wasted work.
+    fn on_pointer_press(&mut self, pos: [f32; 2]) {
+        let query = PickQuery { viewport_pos: pos };
+        let press = resolve_pointer_press::<Msg>(&mut self.world, &query);
+
+        if let Some(msg) = press.click_msg {
+            {
+                let mut model = self.world.resource_mut::<ModelResource<M>>();
+                (self.reducer)(&mut model.0, msg);
+            }
+            self.rerun_view_and_redraw();
+        } else if press.focus_changed {
+            self.request_redraw_all();
+        }
+    }
+
+    /// Ask every window for a redraw, without re-running the view.
+    fn request_redraw_all(&mut self) {
         let _ = self.world.run_system_cached(|q: Query<&WindowComp>| {
             for window in q.iter() {
                 window.window.request_redraw();
             }
         });
-    }
-
-    /// Resolve a click at `pos` (window space) by picking, then bubbling up to
-    /// the nearest click target; apply the matched `Msg` to the model via
-    /// `reducer`, and re-view + redraw. A no-op if nothing was under the
-    /// pointer, or if nothing from there to the root has an assigned message.
-    fn dispatch_click(&mut self, pos: [f32; 2]) {
-        let query = PickQuery { viewport_pos: pos };
-        let Some(entity) = ({
-            let picker = self.world.resource::<PickerResource>();
-            resolve_click_at::<Msg>(&self.world, picker.0.as_ref(), &query)
-        }) else {
-            return;
-        };
-        let Some(msg) = self
-            .world
-            .get::<OnClick<Msg>>(entity)
-            .and_then(|on_click| on_click.0)
-        else {
-            return;
-        };
-
-        {
-            let mut model = self.world.resource_mut::<ModelResource<M>>();
-            (self.reducer)(&mut model.0, msg);
-        }
-
-        self.rerun_view_and_redraw();
     }
 }
 
@@ -668,7 +684,7 @@ where
         // `on_click` only fires on the primary-button press edge (not every
         // move/release), so a hit is always a genuine new click.
         if event.on_click(|_count| ()).is_some() {
-            self.dispatch_click(event.mouse_viewport_position());
+            self.on_pointer_press(event.mouse_viewport_position());
         }
     }
 
