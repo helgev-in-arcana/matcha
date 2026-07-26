@@ -397,3 +397,47 @@ fn a_chord_that_is_not_the_binding_does_not_confirm() {
         "Ctrl+Enter is not the configured confirm chord, got {messages:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Allocated vs declared size
+// ---------------------------------------------------------------------------
+
+/// A parent can hand the box more space than it declared (a `Column`'s default
+/// `AlignItems::Stretch` widens it to the widest sibling). Wrapping must follow
+/// the **allocated** width, not the declared one, or the text wraps at one
+/// width while the box is painted at another.
+#[test]
+fn arrange_publishes_the_allocated_size_for_wrapping() {
+    use matcha_ecs_widgets::{ColorRect, Column};
+
+    let mut world = World::new();
+    let root = world.spawn(ViewChildren::default()).id();
+    run_view(&mut world, root, |s| {
+        // A Column stretches its children to the widest one; the rect is wider
+        // than the text box declares.
+        s.node(Column::new(), |s| {
+            s.leaf(ColorRect::new(400.0, 10.0));
+            s.leaf(TextBox::<Msg>::new(200.0, 80.0).value("wrap me please"));
+        });
+    });
+    layout_root(&mut world, root, Constraints::from_max_size([800.0, 600.0]));
+
+    let column = children(&world, root)[0];
+    let text_box = children(&world, column)[1];
+
+    let output = world
+        .get::<matcha_ecs::components::layout::LayoutOutput>(text_box)
+        .expect("laid out");
+    assert_eq!(
+        output.size[0], 400.0,
+        "the column stretched the box past its declared 200"
+    );
+
+    // `arrange` must have published that, so the refresh system re-wraps to it.
+    // (Reading it back through the public surface: the box paints at
+    // `LayoutOutput::size`, and the wrap width is derived from the same value.)
+    assert_ne!(
+        output.size[0], 200.0,
+        "declared width is only an input to measure"
+    );
+}

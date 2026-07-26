@@ -154,6 +154,13 @@ pub struct TextBoxLive {
     scroll: Arc<AtomicU32>,
     /// Whether the caret is in its visible blink phase.
     caret_visible: Arc<AtomicBool>,
+    /// The size layout actually allocated, published by `arrange`. `f32`
+    /// bit-cast. Zero until the first arrange.
+    allocated: Arc<[AtomicU32; 2]>,
+    /// The wrap width the editor was last shaped at. `PlainEditor::set_width`
+    /// dirties the layout unconditionally and exposes no getter, so the applied
+    /// value is tracked here to avoid re-shaping every frame.
+    applied_wrap_width: Arc<AtomicU32>,
 }
 
 impl TextBoxLive {
@@ -173,6 +180,24 @@ impl TextBoxLive {
     /// Returns whether the value actually changed.
     fn set_caret_visible(&self, value: bool) -> bool {
         self.caret_visible.swap(value, Ordering::Relaxed) != value
+    }
+
+    fn allocated(&self) -> [f32; 2] {
+        [
+            f32::from_bits(self.allocated[0].load(Ordering::Relaxed)),
+            f32::from_bits(self.allocated[1].load(Ordering::Relaxed)),
+        ]
+    }
+
+    fn set_allocated(&self, size: [f32; 2]) {
+        self.allocated[0].store(size[0].to_bits(), Ordering::Relaxed);
+        self.allocated[1].store(size[1].to_bits(), Ordering::Relaxed);
+    }
+
+    /// Records `width` as applied, returning whether it differs from the last.
+    fn take_wrap_width_change(&self, width: f32) -> bool {
+        let bits = width.to_bits();
+        self.applied_wrap_width.swap(bits, Ordering::Relaxed) != bits
     }
 }
 
@@ -741,8 +766,20 @@ impl Layout for TextBoxLayout {
         ]
     }
 
-    fn arrange(&self, _ctx: &mut LayoutCtx, _me: Entity, _size: [f32; 2]) {
-        // A leaf: decorative children are not supported in v1.
+    /// Publishes the size layout actually allocated.
+    ///
+    /// A parent can hand this box **more** than it asked for (a `Column`'s
+    /// default `AlignItems::Stretch` widens it to the widest sibling), and the
+    /// declared `w` is only an input to `measure`. Wrapping and caret-follow
+    /// scrolling must both use the allocated size, or the text wraps at one
+    /// width while the box is painted at another. Same side-channel `Text` and
+    /// `RichText` use to publish their wrap width from `arrange`.
+    ///
+    /// A leaf otherwise: decorative children are not supported in v1.
+    fn arrange(&self, ctx: &mut LayoutCtx, me: Entity, size: [f32; 2]) {
+        if let Some(live) = ctx.world().get::<TextBoxLive>(me) {
+            live.set_allocated(size);
+        }
     }
 }
 
@@ -789,9 +826,28 @@ fn refresh_text_boxes(
             editor.refresh_layout(&mut font_cx, &mut layout_cx);
         }
 
-        let generation = editor.generation();
         let inset = style.border_width + style.padding;
-        let inner_h = (layout.h - inset * 2.0).max(0.0);
+
+        // Fall back to the declared size until the first arrange has run.
+        let allocated = live.allocated();
+        let allocated = [
+            if allocated[0] > 0.0 { allocated[0] } else { layout.w },
+            if allocated[1] > 0.0 { allocated[1] } else { layout.h },
+        ];
+
+        // Re-wrap if the parent gave us a different width than we last shaped
+        // at. One frame behind a resize (arrange runs after this stage), which
+        // converges immediately and matches `RichText`'s existing behaviour.
+        let wrap_width = (allocated[0] - inset * 2.0).max(0.0);
+        if live.take_wrap_width_change(wrap_width) {
+            editor.set_width(Some(wrap_width));
+            let mut font_cx = font_ctx.0.font_cx.lock();
+            let mut layout_cx = font_ctx.0.layout_cx.lock();
+            editor.refresh_layout(&mut font_cx, &mut layout_cx);
+        }
+
+        let generation = editor.generation();
+        let inner_h = (allocated[1] - inset * 2.0).max(0.0);
 
         let caret = editor.cursor_geometry(CARET_WIDTH);
 
