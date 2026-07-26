@@ -22,8 +22,8 @@ use matcha_ecs::{
 };
 use matcha_ecs_widgets::{TextBox, TextEditor};
 use matcha_window::event::device_event::{
-    ElementState, ImeEvent, Key, KeyCode, KeyInput, KeyLocation, KeyboardState, NamedKey,
-    PhysicalKey,
+    ElementState, ImeEvent, Key, KeyCode, KeyInput, KeyLocation, KeyboardState, ModifiersState,
+    NamedKey, PhysicalKey,
 };
 
 #[derive(Clone, PartialEq, Debug)]
@@ -103,6 +103,12 @@ fn named(key: NamedKey) -> KeyInput {
         repeat: false,
         snapshot: KeyboardState::default(),
     }
+}
+
+/// A key press with Ctrl held, as the keyboard state machine would report it.
+fn with_ctrl(mut input: KeyInput) -> KeyInput {
+    input.snapshot.modifiers_changed(ModifiersState::CONTROL);
+    input
 }
 
 fn queued(world: &mut World) -> Vec<Msg> {
@@ -321,4 +327,73 @@ fn keyboard_delivery_requires_focus() {
     matcha_ecs::focus::clear_focus(&mut world);
     assert!(!dispatch_key(&mut world, &character("a")));
     assert_eq!(text_of(&world, text_box), "");
+}
+
+// ---------------------------------------------------------------------------
+// The confirm binding
+// ---------------------------------------------------------------------------
+
+/// Build a box with an explicit confirm binding.
+fn setup_with_confirm_key(predicate: fn(&KeyInput) -> bool) -> (World, Entity) {
+    let mut world = World::new();
+    let root = world.spawn(ViewChildren::default()).id();
+    run_view(&mut world, root, |s| {
+        s.leaf(
+            TextBox::<Msg>::new(200.0, 80.0)
+                .confirm_key(predicate)
+                .on_update(|text| Msg::Edited(text.to_string()))
+                .on_confirm(|text| Msg::Confirmed(text.to_string())),
+        );
+    });
+    layout_root(&mut world, root, Constraints::from_max_size([800.0, 600.0]));
+    world.insert_resource(Focus::default());
+
+    let text_box = children(&world, root)[0];
+    request_focus(&mut world, text_box);
+    (world, text_box)
+}
+
+/// The default binding is Ctrl+Enter, so plain Enter stays available for
+/// newlines in a multi-line box.
+#[test]
+fn ctrl_enter_confirms_under_the_default_binding() {
+    let (mut world, _root, text_box) = setup("hi");
+
+    assert!(dispatch_key(&mut world, &with_ctrl(named(NamedKey::Enter))));
+
+    assert_eq!(
+        text_of(&world, text_box),
+        "hi",
+        "a confirm chord is consumed, never inserted"
+    );
+    assert_eq!(queued(&mut world), vec![Msg::Confirmed("hi".into())]);
+}
+
+/// With `confirm_on_enter`, plain Enter submits instead of inserting — the
+/// binding a single-line-style field wants.
+#[test]
+fn confirm_on_enter_makes_plain_enter_submit_without_inserting() {
+    let (mut world, text_box) = setup_with_confirm_key(matcha_ecs_widgets::text_box::confirm_on_enter);
+    dispatch_key(&mut world, &character("x"));
+    let _ = queued(&mut world);
+
+    assert!(dispatch_key(&mut world, &named(NamedKey::Enter)));
+
+    assert_eq!(text_of(&world, text_box), "x", "no newline was inserted");
+    assert_eq!(queued(&mut world), vec![Msg::Confirmed("x".into())]);
+}
+
+/// The binding is exclusive: under `confirm_on_enter`, Ctrl+Enter is not a
+/// confirm, so it falls through to ordinary handling.
+#[test]
+fn a_chord_that_is_not_the_binding_does_not_confirm() {
+    let (mut world, _text_box) = setup_with_confirm_key(matcha_ecs_widgets::text_box::confirm_on_enter);
+
+    dispatch_key(&mut world, &with_ctrl(named(NamedKey::Enter)));
+
+    let messages = queued(&mut world);
+    assert!(
+        !messages.iter().any(|m| matches!(m, Msg::Confirmed(_))),
+        "Ctrl+Enter is not the configured confirm chord, got {messages:?}"
+    );
 }

@@ -14,7 +14,7 @@
 //! user is typing. In the other direction the widget emits messages built from
 //! the current text, and which of those an app listens to is its choice:
 //! [`on_update`](TextBox::on_update) for every keystroke, or
-//! [`on_confirm`](TextBox::on_confirm) for Ctrl+Enter and focus loss.
+//! [`on_confirm`](TextBox::on_confirm) for an explicit confirm and focus loss.
 //!
 //! # parley's blast radius
 //!
@@ -29,8 +29,9 @@
 //!
 //! - **Multi-line only.** The box wraps at its own width. A single-line field
 //!   needs horizontal scrolling, which needs real clipping, which this renderer
-//!   does not have yet. Enter therefore inserts a newline; **Ctrl+Enter**
-//!   confirms.
+//!   does not have yet. Enter therefore inserts a newline by default and
+//!   confirmation is bound to Ctrl+Enter — see
+//!   [`confirm_key`](TextBox::confirm_key) to change that.
 //! - **Overflow is culled per glyph**, not clipped: a glyph falling outside the
 //!   content box is dropped rather than cut, so one straddling the edge pops
 //!   instead of sliding.
@@ -102,7 +103,7 @@ const CARET_WIDTH: f32 = 1.5;
 /// The main thread must not hold this lock while the render thread might build
 /// a node — the same invariant `RenderItem::cache` already documents.
 #[derive(Component, Clone)]
-pub struct TextEditor(pub Arc<Mutex<PlainEditor<RichTextBrush>>>);
+pub struct TextEditor(Arc<Mutex<PlainEditor<RichTextBrush>>>);
 
 impl TextEditor {
     /// The committed text, excluding any in-progress IME preedit.
@@ -191,12 +192,42 @@ struct DrawnGeneration(Option<parley::Generation>);
 /// A fn pointer rather than a plain `Msg`: the app almost always wants the new
 /// text in the message, and only it knows how to phrase that
 /// (`|text| Msg::NoteEdited(text.to_string())`).
-#[derive(Component, Clone, Copy, PartialEq, Debug)]
+///
+/// No `PartialEq`: comparing function pointers is not meaningful (identical
+/// items are not guaranteed to compare equal after codegen), so this is
+/// assigned outright on `patch` rather than compared.
+#[derive(Component, Clone, Copy, Debug)]
 pub struct OnTextUpdate<Msg: Message>(pub Option<fn(&str) -> Msg>);
 
-/// Builds the message sent when the text is confirmed (Ctrl+Enter, focus loss).
-#[derive(Component, Clone, Copy, PartialEq, Debug)]
+/// Builds the message sent when the text is confirmed. See [`OnTextUpdate`]
+/// for why this does not derive `PartialEq`.
+#[derive(Component, Clone, Copy, Debug)]
 pub struct OnTextConfirm<Msg: Message>(pub Option<fn(&str) -> Msg>);
+
+/// Which key press means "confirm".
+///
+/// A predicate rather than a key enum, because the useful bindings differ by
+/// context (plain Enter in a one-line field, Ctrl+Enter or Shift+Enter where
+/// Enter must stay available for newlines) and a predicate covers all of them
+/// without inventing a chord type. See [`confirm_on_enter`] and
+/// [`confirm_on_ctrl_enter`] for the two common ones.
+///
+/// A press that confirms is consumed: it never also inserts a newline.
+#[derive(Component, Clone, Copy)]
+pub struct ConfirmKey(pub fn(&KeyInput) -> bool);
+
+/// Confirm on plain Enter. Enter no longer inserts a newline, which is what a
+/// single-line-style field wants.
+pub fn confirm_on_enter(input: &KeyInput) -> bool {
+    matches!(input.logical_key(), LogicalKey::Named(NamedKey::Enter))
+        && !input.snapshot.modifiers().control_key()
+}
+
+/// Confirm on Ctrl+Enter, leaving plain Enter to insert a newline. The default.
+pub fn confirm_on_ctrl_enter(input: &KeyInput) -> bool {
+    matches!(input.logical_key(), LogicalKey::Named(NamedKey::Enter))
+        && input.snapshot.modifiers().control_key()
+}
 
 // ---------------------------------------------------------------------------
 // Widget
@@ -223,6 +254,7 @@ pub struct TextBox<Msg: Message> {
     style: TextBoxStyle,
     on_update: Option<fn(&str) -> Msg>,
     on_confirm: Option<fn(&str) -> Msg>,
+    confirm_key: fn(&KeyInput) -> bool,
 }
 
 impl<Msg: Message> TextBox<Msg> {
@@ -245,6 +277,7 @@ impl<Msg: Message> TextBox<Msg> {
             },
             on_update: None,
             on_confirm: None,
+            confirm_key: confirm_on_ctrl_enter,
         }
     }
 
@@ -262,9 +295,22 @@ impl<Msg: Message> TextBox<Msg> {
         self
     }
 
-    /// Message to send when the user confirms: Ctrl+Enter, or focus moving away.
+    /// Message to send when the user confirms — by [`confirm_key`](Self::confirm_key)
+    /// or by focus moving away.
     pub fn on_confirm(mut self, build: fn(&str) -> Msg) -> Self {
         self.on_confirm = Some(build);
+        self
+    }
+
+    /// Which key press confirms. Defaults to [`confirm_on_ctrl_enter`], since
+    /// a multi-line box needs plain Enter for newlines; pass
+    /// [`confirm_on_enter`] for a field where Enter should submit instead.
+    ///
+    /// ```ignore
+    /// TextBox::new(240.0, 32.0).confirm_key(text_box::confirm_on_enter)
+    /// ```
+    pub fn confirm_key(mut self, predicate: fn(&KeyInput) -> bool) -> Self {
+        self.confirm_key = predicate;
         self
     }
 
@@ -364,6 +410,7 @@ impl<Msg: Message> Widget for TextBox<Msg> {
                 ImeCursorArea::default(),
                 OnTextUpdate(self.on_update),
                 OnTextConfirm(self.on_confirm),
+                ConfirmKey(self.confirm_key),
             ),
         )
     }
@@ -409,11 +456,16 @@ impl<Msg: Message> Widget for TextBox<Msg> {
             needs_rebuild = true;
         }
 
+        // Assigned rather than compared: see `OnTextUpdate`. Nothing observes
+        // `Changed` on these, so the redundant write costs nothing.
         if let Some(mut on_update) = entity.get_mut::<OnTextUpdate<Msg>>() {
-            on_update.set_if_neq(OnTextUpdate(self.on_update));
+            on_update.0 = self.on_update;
         }
         if let Some(mut on_confirm) = entity.get_mut::<OnTextConfirm<Msg>>() {
-            on_confirm.set_if_neq(OnTextConfirm(self.on_confirm));
+            on_confirm.0 = self.on_confirm;
+        }
+        if let Some(mut confirm_key) = entity.get_mut::<ConfirmKey>() {
+            confirm_key.0 = self.confirm_key;
         }
 
         if needs_rebuild {
@@ -468,7 +520,15 @@ fn on_key<Msg: Message>(entity: &mut EntityWorldMut, input: &KeyInput) -> bool {
         return true;
     }
 
-    let mut confirm = false;
+    // Checked before any editing, so a confirm chord never also inserts.
+    let confirms = entity
+        .get::<ConfirmKey>()
+        .is_some_and(|predicate| (predicate.0)(input));
+    if confirms {
+        emit::<Msg, OnTextConfirm<Msg>>(entity, |c| c.0);
+        return true;
+    }
+
     let handled = with_editor_driver(entity, |d| {
         match input.logical_key() {
             LogicalKey::Named(named) => match named {
@@ -524,15 +584,9 @@ fn on_key<Msg: Message>(entity: &mut EntityWorldMut, input: &KeyInput) -> bool {
                     (true, false) => d.select_to_line_end(),
                     (true, true) => d.select_to_text_end(),
                 },
-                // Multi-line: Enter is a newline, so confirmation needs its own
-                // chord. A future single-line variant maps Enter to confirm.
-                NamedKey::Enter => {
-                    if ctrl {
-                        confirm = true;
-                    } else {
-                        d.insert_or_replace_selection("\n");
-                    }
-                }
+                // Reached only when Enter is not the configured confirm chord
+                // (checked above, before any editing).
+                NamedKey::Enter => d.insert_or_replace_selection("\n"),
                 NamedKey::Space => d.insert_or_replace_selection(" "),
                 // Left alone so a future focus-traversal binding can have it.
                 NamedKey::Tab => return false,
@@ -556,11 +610,7 @@ fn on_key<Msg: Message>(entity: &mut EntityWorldMut, input: &KeyInput) -> bool {
     .unwrap_or(false);
 
     if handled {
-        if confirm {
-            emit::<Msg, OnTextConfirm<Msg>>(entity, |c| c.0);
-        } else {
-            emit::<Msg, OnTextUpdate<Msg>>(entity, |c| c.0);
-        }
+        emit::<Msg, OnTextUpdate<Msg>>(entity, |c| c.0);
     }
     handled
 }

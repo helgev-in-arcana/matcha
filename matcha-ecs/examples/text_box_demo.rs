@@ -13,13 +13,16 @@
 //!   **Ctrl+Enter confirms**.
 //! - **Live sync.** The first box declares `on_update`, so the echo line under
 //!   it follows every keystroke through the model. The second declares only
-//!   `on_confirm`, so its echo updates on Ctrl+Enter or when focus leaves.
+//!   `on_confirm`, so its echo updates when it is confirmed or focus leaves.
+//! - **Confirm binding.** The first box keeps the default Ctrl+Enter, so plain
+//!   Enter still makes newlines. The second passes `confirm_on_enter`, so plain
+//!   Enter submits and never inserts a newline.
 //! - **App-driven overwrite.** "Reset first box" writes a new value into the
 //!   model. The box takes it because the *declared* value changed; typing in it
 //!   afterwards is not clobbered by the same value being re-declared each frame.
 
 use matcha_ecs::{ui_ecs::UiEcs, view::Scope};
-use matcha_ecs_widgets::{text_box, AlignItems, Button, Column, Panel, Row, Text, TextBox};
+use matcha_ecs_widgets::{text_box, AlignItems, Button, Column, Panel, RichText, Row, TextBox};
 use matcha_window::adapter::Adapter;
 
 struct Model {
@@ -38,8 +41,19 @@ enum Msg {
     ResetNote,
 }
 
-fn label(s: &mut Scope, text: &str) {
-    s.leaf(Text::new(text).font_size(13.0).color([0.6, 0.6, 0.65, 1.0]));
+/// Uses `RichText`, not `Text`: `Text` is backed by fontdue with **no font
+/// fallback**, so a single non-Latin character in an echoed value renders as
+/// tofu. Anything displaying arbitrary runtime text wants `RichText`.
+fn label(s: &mut Scope, text: impl Into<String>) {
+    s.leaf(
+        RichText::new(text)
+            .font_size(13.0)
+            .color([0.6, 0.6, 0.65, 1.0]),
+    );
+}
+
+fn value_echo(s: &mut Scope, text: impl Into<String>, color: [f32; 4]) {
+    s.leaf(RichText::new(text).font_size(13.0).color(color));
 }
 
 fn view(model: &Model, s: &mut Scope) {
@@ -60,30 +74,34 @@ fn view(model: &Model, s: &mut Scope) {
                         .on_confirm(|text| Msg::NoteConfirmed(text.to_string())),
                 );
             });
-            s.leaf(
-                Text::new(format!("model.note = {:?}", model.note))
-                    .font_size(13.0)
-                    .color([0.55, 0.8, 0.6, 1.0]),
+            value_echo(
+                s,
+                format!("model.note = {:?}", model.note),
+                [0.55, 0.8, 0.6, 1.0],
             );
-            s.leaf(
-                Text::new(format!("last confirmed = {:?}", model.committed_note))
-                    .font_size(13.0)
-                    .color([0.5, 0.6, 0.8, 1.0]),
+            value_echo(
+                s,
+                format!("last confirmed = {:?}", model.committed_note),
+                [0.5, 0.6, 0.8, 1.0],
             );
         });
 
         // --- Box 2: only reports on confirm ---
         s.node(Column::new().gap(6.0), |s| {
-            label(s, "on_confirm only — updates on Ctrl+Enter or focus loss");
+            label(
+                s,
+                "on_confirm + confirm_key(Enter) — plain Enter submits, no newline",
+            );
             s.leaf(
                 TextBox::new(340.0, 44.0)
                     .font_size(18.0)
+                    .confirm_key(text_box::confirm_on_enter)
                     .on_confirm(|text| Msg::TitleConfirmed(text.to_string())),
             );
-            s.leaf(
-                Text::new(format!("model.title = {:?}", model.title))
-                    .font_size(13.0)
-                    .color([0.55, 0.8, 0.6, 1.0]),
+            value_echo(
+                s,
+                format!("model.title = {:?}", model.title),
+                [0.55, 0.8, 0.6, 1.0],
             );
         });
 
