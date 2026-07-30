@@ -1,3 +1,4 @@
+use bytemuck::Zeroable;
 use log::{debug, trace, warn};
 use std::sync::Arc;
 
@@ -40,8 +41,11 @@ const PIPELINE_CACHE_SIZE: u64 = 3;
 ///   them to normalized coordinates before writing InstanceData into GPU memory.
 /// - `in_atlas_size`: (width, height) size of the sub-image. Expected as NORMALIZED
 ///   values (0.0 .. 1.0). If atlas returns pixel sizes, normalize on the host side.
-/// - `stencil_index`: index+1 of the associated stencil in the stencil data array.
-///   0 indicates "no stencil". The shader uses `stencil_index - 1` to access the stencil.
+/// - `alpha`: draw-time opacity multiplied into the sampled colour.
+/// - `mask_offset` / `mask_count`: the half-open range `mask_indices[offset ..
+///   offset + count]`, each entry an index into the mask array. The instance's
+///   coverage is the **product** of every mask in that range, so `count == 0`
+///   means "unmasked". See [`MaskData`].
 ///
 /// NOTE: Keep Rust-side layout (#[repr(C)] + bytemuck) compatible with the WGSL
 /// `InstanceData` struct (field order, types, and padding). When changing fields,
@@ -50,61 +54,103 @@ struct InstanceData {
     /// transform vertex: {[0, 0], [0, 1], [1, 1], [1, 0]} to where the texture should be rendered
     viewport_position: nalgebra::Matrix4<f32>,
     atlas_page: u32,
+    /// draw-time opacity, multiplied into all four sampled channels.
+    alpha: f32,
+    /// [x, y] (normalized UVs expected)
+    in_atlas_offset: [f32; 2],
+    /// [width, height] (normalized size expected)
+    in_atlas_size: [f32; 2],
+    /// start of this instance's mask chain inside `mask_indices`.
+    mask_offset: u32,
+    /// number of masks in the chain. 0 means unmasked.
+    mask_count: u32,
+}
+
+/// A `mat3x3<f32>` in WGSL's storage layout: three columns, each padded to 16
+/// bytes. `nalgebra::Matrix3` is tightly packed (36 bytes) and therefore *not*
+/// layout-compatible; go through [`mat3_columns`].
+type Mat3Columns = [[f32; 4]; 3];
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+/// MaskData describes one element of an instance's mask chain: a quad whose
+/// coverage texture attenuates whatever the instance draws.
+///
+/// A mask is transformed exactly like a texture — same unit quad, same
+/// `viewport_position` — but it is applied in **screen space**: the fragment
+/// shader maps its own position back into the mask's local unit square and
+/// samples there. That is what makes a mask behave like a hole in a box, or a
+/// portal, rather than something baked into the instance's own surface, and it
+/// stays correct when the mask and the instance are not coplanar.
+///
+/// Semantics:
+/// - `viewport_position`: transform mapping the unit quad into UI space (before
+///   normalization). Used for culling, and as the source of `mask_from_screen`.
+/// - `mask_from_screen`: the inverse of that transform's **planar homography**,
+///   mapping a screen position back to the mask's local unit square. A mask's
+///   local coordinates are `(u, v, 0, 1)`, so only rows and columns `{0, 1, 3}`
+///   of the 4x4 ever contribute; restricting to that 3x3 and inverting is exact
+///   for any affine *or* projective transform, whereas inverting the full 4x4
+///   would presuppose that the fragment lies on the mask's plane.
+/// - `inverse_exists`: 0 if the transform is degenerate. Such a mask is skipped
+///   (treated as fully transparent to whatever it would mask), matching how
+///   culling treats it.
+/// - `kind`: reserved for analytic mask shapes (SDF rect / rounded rect /
+///   ellipse). Only 0 (sample the coverage texture) is implemented.
+/// - `atlas_page`: index of the mask atlas page (texture array layer).
+/// - `in_atlas_offset` / `in_atlas_size`: offset and size of the coverage image
+///   inside the atlas page. Expected to be NORMALIZED UVs (0.0 .. 1.0). If the
+///   atlas returns pixel coordinates, the host MUST normalize them before
+///   uploading to GPU.
+///
+/// NOTE: Maintain identical memory layout between this Rust struct and the WGSL
+/// `MaskData` declaration (including explicit padding fields). Update both
+/// definitions when changing sizes/types.
+struct MaskData {
+    /// transform vertex: {[0, 0], [0, 1], [1, 1], [1, 0]} to where the mask should be rendered
+    viewport_position: nalgebra::Matrix4<f32>,
+    /// screen -> mask-local homography; see the struct docs.
+    mask_from_screen: Mat3Columns,
+    /// 0 = sample the coverage texture. Other values are reserved.
+    kind: u32,
+    /// 0 if `viewport_position`'s planar homography is not invertible.
+    inverse_exists: u32,
+    atlas_page: u32,
     _padding1: u32,
     /// [x, y] (normalized UVs expected)
     in_atlas_offset: [f32; 2],
     /// [width, height] (normalized size expected)
     in_atlas_size: [f32; 2],
-    /// the index of the stencil in the stencil data array.
-    /// 0 if no stencil is used. Use `stencil_index - 1` in the shader.
-    stencil_index: u32,
-    _padding2: u32,
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-/// StencilData describes a stencil polygon used to mask instances.
-///
-/// Semantics:
-/// - `viewport_position`: transform mapping the unit quad into stencil space.
-///   Public renderer APIs accept coordinates with the origin at the top-left and Y
-///   increasing downward; the renderer converts these to the internal form required
-///   by the GPU pipeline.
-/// - `viewport_position_inverse_exists`: non-zero if `viewport_position` is invertible.
-/// - `viewport_position_inverse`: inverse matrix used by the vertex shader to compute
-///   stencil-space UV coordinates for masking.
-/// - `atlas_page`: index of the stencil atlas page (texture array layer).
-/// - `in_atlas_offset` / `in_atlas_size`: offset and size of the stencil image inside
-///   the atlas page. Expected to be NORMALIZED UVs (0.0 .. 1.0). If atlas returns
-///   pixel coordinates, the host MUST normalize them before uploading to GPU.
-///
-/// NOTE: Maintain identical memory layout between this Rust struct and the WGSL
-/// `StencilData` declaration (including explicit padding fields). Update both
-/// definitions when changing sizes/types.
-struct StencilData {
-    /// transform vertex: {[0, 0], [0, 1], [1, 1], [1, 0]} to where the stencil should be rendered
-    viewport_position: nalgebra::Matrix4<f32>,
-    /// if the inverse of the viewport position exists.
-    /// 0 if the inverse does not exist.
-    viewport_position_inverse_exists: u32,
-    _padding1: [u32; 3],
-    /// inverse of the viewport position matrix.
-    /// used to calculate stencil uv coordinates in the shader.
-    viewport_position_inverse: nalgebra::Matrix4<f32>,
-    atlas_page: u32,
-    _padding2: u32,
-    /// [x, y] (normalized UVs expected)
-    in_atlas_offset: [f32; 2],
-    /// [width, height] (normalized size expected)
-    in_atlas_size: [f32; 2],
-    _padding3: [u32; 2],
-}
+/// Mask kind: sample the coverage texture in the mask atlas.
+const MASK_KIND_COVERAGE: u32 = 0;
 
 const _: () = {
     assert!(std::mem::size_of::<InstanceData>() == 96);
-    assert!(std::mem::size_of::<StencilData>() == 176);
+    assert!(std::mem::size_of::<MaskData>() == 144);
     assert!(std::mem::size_of::<RenderPushConstants>() == 80);
 };
+
+/// The planar homography of a unit-quad transform: the restriction of `m` to
+/// rows and columns `{0, 1, 3}`. See [`MaskData::mask_from_screen`].
+#[rustfmt::skip]
+fn planar_homography(m: &nalgebra::Matrix4<f32>) -> nalgebra::Matrix3<f32> {
+    nalgebra::Matrix3::new(
+        m[(0, 0)], m[(0, 1)], m[(0, 3)],
+        m[(1, 0)], m[(1, 1)], m[(1, 3)],
+        m[(3, 0)], m[(3, 1)], m[(3, 3)],
+    )
+}
+
+/// Re-lay a `Matrix3` into WGSL's padded column layout.
+fn mat3_columns(m: &nalgebra::Matrix3<f32>) -> Mat3Columns {
+    [
+        [m[(0, 0)], m[(1, 0)], m[(2, 0)], 0.0],
+        [m[(0, 1)], m[(1, 1)], m[(2, 1)], 0.0],
+        [m[(0, 2)], m[(1, 2)], m[(2, 2)], 0.0],
+    ]
+}
 
 /// Half a texel, in normalized UV units, for each atlas. Used by the render
 /// shader to inset the UV clamp bounds so that sampling at the very edge of
@@ -224,7 +270,7 @@ pub struct CoreRendererInner {
 }
 
 /// Bind group layout for the data buffers shared by every compute stage and
-/// the render pass. Bindings 0-4 are also visible to the render shaders;
+/// the render pass. Bindings 0-4 and 7 are also visible to the render shaders;
 /// bindings 5-6 are compute-only intermediates of the order-preserving
 /// compaction (see `stages.rs`).
 fn create_data_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
@@ -242,7 +288,7 @@ fn create_data_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout
                 },
                 count: None,
             },
-            // All Stencils Buffer
+            // All Masks Buffer
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
                 visibility: wgpu::ShaderStages::COMPUTE
@@ -307,6 +353,20 @@ fn create_data_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // Mask chains: the flat backing store every instance's
+            // `mask_offset`/`mask_count` range points into.
+            wgpu::BindGroupLayoutEntry {
+                binding: 7,
+                visibility: wgpu::ShaderStages::COMPUTE
+                    | wgpu::ShaderStages::VERTEX
+                    | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
@@ -529,11 +589,7 @@ impl CoreRendererInner {
         // }
 
         // integrate objects into a instance array
-        let (instances, stencils) = create_instance_and_stencil_data(
-            render_node,
-            texture_atlas.format(),
-            stencil_atlas.format(),
-        )?;
+        let frame = create_frame(render_node, texture_atlas.format(), stencil_atlas.format())?;
 
         self.render_instances(
             device,
@@ -541,8 +597,7 @@ impl CoreRendererInner {
             surface_format,
             destination_view,
             destination_size,
-            &instances,
-            &stencils,
+            &frame,
             load_color,
             texture_atlas,
             stencil_atlas,
@@ -566,11 +621,8 @@ impl CoreRendererInner {
         texture_atlas: &wgpu::Texture,
         stencil_atlas: &wgpu::Texture,
     ) -> Result<(), TextureValidationError> {
-        let (instances, stencils) = create_instance_and_stencil_data_flat(
-            items,
-            texture_atlas.format(),
-            stencil_atlas.format(),
-        )?;
+        let frame =
+            create_flat_frame(items, texture_atlas.format(), stencil_atlas.format())?;
 
         self.render_instances(
             device,
@@ -578,17 +630,16 @@ impl CoreRendererInner {
             surface_format,
             destination_view,
             destination_size,
-            &instances,
-            &stencils,
+            &frame,
             load_color,
             texture_atlas,
             stencil_atlas,
         )
     }
 
-    /// Encode and submit a prepared instance/stencil set. Shared by
-    /// [`render`](Self::render) (single tree) and [`render_flat`](Self::render_flat)
-    /// (multiple pre-transformed roots).
+    /// Encode and submit a prepared frame. Shared by [`render`](Self::render)
+    /// (single tree) and [`render_flat`](Self::render_flat) (multiple
+    /// pre-transformed roots).
     #[allow(clippy::too_many_arguments)]
     fn render_instances(
         &self,
@@ -597,16 +648,22 @@ impl CoreRendererInner {
         surface_format: wgpu::TextureFormat,
         destination_view: &wgpu::TextureView,
         destination_size: [f32; 2],
-        instances: &[InstanceData],
-        stencils: &[StencilData],
+        frame: &FlatFrame,
         load_color: wgpu::Color,
         texture_atlas: &wgpu::Texture,
         stencil_atlas: &wgpu::Texture,
     ) -> Result<(), TextureValidationError> {
+        let FlatFrame {
+            instances,
+            masks,
+            mask_indices,
+        } = frame;
+
         trace!(
-            "CoreRenderer::render_instances: prepared {} instances and {} stencils",
+            "CoreRenderer::render_instances: prepared {} instances, {} masks, {} chain entries",
             instances.len(),
-            stencils.len()
+            masks.len(),
+            mask_indices.len()
         );
 
         // #[cfg(debug_assertions)]
@@ -638,9 +695,18 @@ impl CoreRendererInner {
             mapped_at_creation: false,
         });
 
-        let all_stencil_data_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ObjectRenderer Stencil Buffer"),
-            size: (std::mem::size_of::<StencilData>() * stencils.len().max(1)) as u64,
+        // `.max(1)`: a zero-sized storage binding is invalid, and a frame with
+        // no mask at all is the common case.
+        let all_mask_data_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ObjectRenderer Mask Buffer"),
+            size: (std::mem::size_of::<MaskData>() * masks.len().max(1)) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mask_indices_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ObjectRenderer Mask Chain Buffer"),
+            size: (std::mem::size_of::<u32>() * mask_indices.len().max(1)) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -708,7 +774,7 @@ impl CoreRendererInner {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: all_stencil_data_buffer.as_entire_binding(),
+                    resource: all_mask_data_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -730,6 +796,10 @@ impl CoreRendererInner {
                     binding: 6,
                     resource: scan_offsets_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: mask_indices_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -740,25 +810,19 @@ impl CoreRendererInner {
             bytemuck::cast_slice(instances),
         );
 
-        if !stencils.is_empty() {
-            queue.write_buffer(&all_stencil_data_buffer, 0, bytemuck::cast_slice(stencils));
+        // The `.max(1)`-sized buffers above are padded, never read: an instance
+        // with `mask_count == 0` dereferences neither. Zero-fill them anyway so
+        // a stale mapping can never be mistaken for a real mask.
+        if masks.is_empty() {
+            queue.write_buffer(&all_mask_data_buffer, 0, bytemuck::bytes_of(&MaskData::zeroed()));
         } else {
-            let default_stencil = StencilData {
-                viewport_position: nalgebra::Matrix4::identity(),
-                viewport_position_inverse_exists: 1,
-                _padding1: [0; 3],
-                viewport_position_inverse: nalgebra::Matrix4::identity(),
-                atlas_page: 0,
-                _padding2: 0,
-                in_atlas_offset: [0.0, 0.0],
-                in_atlas_size: [0.0, 0.0],
-                _padding3: [0; 2],
-            };
-            queue.write_buffer(
-                &all_stencil_data_buffer,
-                0,
-                bytemuck::bytes_of(&default_stencil),
-            );
+            queue.write_buffer(&all_mask_data_buffer, 0, bytemuck::cast_slice(masks));
+        }
+
+        if mask_indices.is_empty() {
+            queue.write_buffer(&mask_indices_buffer, 0, bytemuck::bytes_of(&0u32));
+        } else {
+            queue.write_buffer(&mask_indices_buffer, 0, bytemuck::cast_slice(mask_indices));
         }
 
         queue.write_buffer(&self.atomic_counter, 0, bytemuck::cast_slice(&[0u32]));
@@ -837,160 +901,164 @@ impl CoreRendererInner {
     }
 }
 
+/// The GPU-side arrays one frame flattens down to.
+///
+/// Everything here is a plain `Vec`, uploaded verbatim: the walk below is the
+/// only place that knows about the pointer-linked [`RenderNode`] shape, so a
+/// future array-of-structs `RenderNode` changes the input to [`Flattener::walk`]
+/// and nothing else.
+struct FlatFrame {
+    instances: Vec<InstanceData>,
+    masks: Vec<MaskData>,
+    /// Backing storage for every instance's mask chain. An instance references
+    /// `mask_indices[mask_offset .. mask_offset + mask_count]`.
+    mask_indices: Vec<u32>,
+}
+
+/// Walks render trees into a [`FlatFrame`], validating that every region really
+/// comes from the atlas the caller is about to bind.
+struct Flattener {
+    texture_format: wgpu::TextureFormat,
+    mask_format: wgpu::TextureFormat,
+    out: FlatFrame,
+    texture_atlas_id: Option<texture_atlas::TextureAtlasId>,
+    mask_atlas_id: Option<texture_atlas::TextureAtlasId>,
+}
+
+impl Flattener {
+    fn new(texture_format: wgpu::TextureFormat, mask_format: wgpu::TextureFormat) -> Self {
+        Self {
+            texture_format,
+            mask_format,
+            out: FlatFrame {
+                instances: Vec::new(),
+                masks: Vec::new(),
+                mask_indices: Vec::new(),
+            },
+            texture_atlas_id: None,
+            mask_atlas_id: None,
+        }
+    }
+
+    /// Record a mask quad and return its index.
+    fn push_mask(
+        &mut self,
+        region: &texture_atlas::AtlasRegion,
+        position: nalgebra::Matrix4<f32>,
+    ) -> Result<u32, TextureValidationError> {
+        if region.format() != self.mask_format {
+            warn!("CoreRenderer: mask format mismatch");
+            return Err(TextureValidationError::FormatMismatch);
+        }
+        let atlas_id = self.mask_atlas_id.get_or_insert_with(|| region.atlas_id());
+        if atlas_id != &region.atlas_id() {
+            warn!("CoreRenderer: mask atlas id mismatch");
+            return Err(TextureValidationError::AtlasIdMismatch);
+        }
+        let (page, position_in_atlas) = region.position_in_atlas()?;
+
+        // A degenerate transform has no usable inverse; the shaders treat such
+        // a mask as absent rather than as fully occluding, so a widget with a
+        // collapsed mask still draws instead of silently vanishing.
+        let inverse = planar_homography(&position).try_inverse();
+
+        self.out.masks.push(MaskData {
+            viewport_position: position,
+            mask_from_screen: mat3_columns(&inverse.unwrap_or_else(nalgebra::Matrix3::identity)),
+            kind: MASK_KIND_COVERAGE,
+            inverse_exists: u32::from(inverse.is_some()),
+            atlas_page: page,
+            _padding1: 0,
+            in_atlas_offset: [position_in_atlas.min.x, position_in_atlas.min.y],
+            in_atlas_size: [position_in_atlas.width(), position_in_atlas.height()],
+        });
+        Ok(self.out.masks.len() as u32 - 1)
+    }
+
+    /// Append a chain to `mask_indices` and return its `(offset, count)`.
+    fn push_chain(&mut self, chain: &[u32]) -> (u32, u32) {
+        let offset = self.out.mask_indices.len() as u32;
+        self.out.mask_indices.extend_from_slice(chain);
+        (offset, chain.len() as u32)
+    }
+
+    /// Walk one tree. `chain` is the mask chain inherited from enclosing scopes.
+    fn walk(
+        &mut self,
+        object: &RenderNode,
+        transform: nalgebra::Matrix4<f32>,
+        chain: &[u32],
+    ) -> Result<(), TextureValidationError> {
+        // Current semantics, preserved: a node's own mask replaces whatever it
+        // inherited and also applies to its subtree. Tightening this to
+        // "self only" is a later step; today the only caller is a childless
+        // glyph node, so the two are indistinguishable.
+        let mut own = None;
+        if let Some((mask, mask_position)) = &object.stencil() {
+            own = Some(self.push_mask(mask, transform * mask_position)?);
+        }
+        let chain: &[u32] = match &own {
+            Some(index) => std::slice::from_ref(index),
+            None => chain,
+        };
+
+        if let Some((texture, texture_position)) = &object.texture() {
+            if texture.format() != self.texture_format {
+                warn!("CoreRenderer: texture format mismatch");
+                return Err(TextureValidationError::FormatMismatch);
+            }
+            let atlas_id = self
+                .texture_atlas_id
+                .get_or_insert_with(|| texture.atlas_id());
+            if atlas_id != &texture.atlas_id() {
+                warn!("CoreRenderer: texture atlas id mismatch");
+                return Err(TextureValidationError::AtlasIdMismatch);
+            }
+            let (page, position_in_atlas) = texture.position_in_atlas()?;
+            let (mask_offset, mask_count) = self.push_chain(chain);
+
+            self.out.instances.push(InstanceData {
+                viewport_position: transform * texture_position,
+                atlas_page: page,
+                alpha: 1.0,
+                in_atlas_offset: [position_in_atlas.min.x, position_in_atlas.min.y],
+                in_atlas_size: [position_in_atlas.width(), position_in_atlas.height()],
+                mask_offset,
+                mask_count,
+            });
+        }
+
+        for (child, child_transform) in object.child_elements() {
+            self.walk(child, transform * child_transform, chain)?;
+        }
+
+        Ok(())
+    }
+}
+
 /// Flatten several `(render tree, window-space transform)` pairs into a single
-/// instance/stencil array. Each root is walked with its own transform; the
-/// shared atlas-id checks in the recursive walk still apply across all roots.
-fn create_instance_and_stencil_data_flat(
+/// frame. Each root is walked with its own transform; the shared atlas-id checks
+/// still apply across all roots.
+fn create_flat_frame(
     items: &[(Arc<RenderNode>, nalgebra::Matrix4<f32>)],
     texture_format: wgpu::TextureFormat,
-    stencil_format: wgpu::TextureFormat,
-) -> Result<(Vec<InstanceData>, Vec<StencilData>), TextureValidationError> {
-    let mut instances = Vec::new();
-    let mut stencils = Vec::new();
-
-    let mut texture_atlas_id = None;
-    let mut stencil_atlas_id = None;
-
+    mask_format: wgpu::TextureFormat,
+) -> Result<FlatFrame, TextureValidationError> {
+    let mut flattener = Flattener::new(texture_format, mask_format);
     for (node, transform) in items {
-        create_instance_and_stencil_data_recursive(
-            texture_format,
-            stencil_format,
-            node,
-            *transform,
-            &mut instances,
-            &mut stencils,
-            &mut texture_atlas_id,
-            &mut stencil_atlas_id,
-            0,
-        )?;
+        flattener.walk(node, *transform, &[])?;
     }
-
-    Ok((instances, stencils))
+    Ok(flattener.out)
 }
 
-fn create_instance_and_stencil_data(
+fn create_frame(
     objects: &RenderNode,
     texture_format: wgpu::TextureFormat,
-    stencil_format: wgpu::TextureFormat,
-) -> Result<(Vec<InstanceData>, Vec<StencilData>), TextureValidationError> {
-    trace!("CoreRenderer::create_instance_and_stencil_data: start");
-    let mut instances = Vec::new();
-    let mut stencils = Vec::new();
-
-    let mut texture_atlas_id = None;
-    let mut stencil_atlas_id = None;
-
-    create_instance_and_stencil_data_recursive(
-        texture_format,
-        stencil_format,
-        objects,
-        nalgebra::Matrix4::identity(),
-        &mut instances,
-        &mut stencils,
-        &mut texture_atlas_id,
-        &mut stencil_atlas_id,
-        0,
-    )?;
-
-    trace!(
-        "CoreRenderer::create_instance_and_stencil_data: completed with {} instances and {} stencils",
-        instances.len(),
-        stencils.len()
-    );
-    Ok((instances, stencils))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn create_instance_and_stencil_data_recursive(
-    texture_format: wgpu::TextureFormat,
-    stencil_format: wgpu::TextureFormat,
-    object: &RenderNode,
-    transform: nalgebra::Matrix4<f32>,
-    instances: &mut Vec<InstanceData>,
-    stencils: &mut Vec<StencilData>,
-    texture_atlas_id: &mut Option<texture_atlas::TextureAtlasId>,
-    stencil_atlas_id: &mut Option<texture_atlas::TextureAtlasId>,
-    // the index + 1 of the current stencil in the stencils vector.
-    // 0 if no stencil is used.
-    mut current_stencil: u32,
-) -> Result<(), TextureValidationError> {
-    if let Some((stencil, stencil_position)) = &object.stencil() {
-        if stencil.format() != stencil_format {
-            warn!("CoreRenderer: stencil format mismatch");
-            return Err(TextureValidationError::FormatMismatch);
-        }
-
-        let atlas_id = stencil_atlas_id.get_or_insert_with(|| stencil.atlas_id());
-
-        if atlas_id != &stencil.atlas_id() {
-            warn!("CoreRenderer: stencil atlas id mismatch");
-            return Err(TextureValidationError::AtlasIdMismatch);
-        }
-
-        let (page, position_in_atlas) = stencil.position_in_atlas()?;
-
-        let stencil_position = transform * stencil_position;
-        let (inverse_exists, stencil_position_inverse) = stencil_position
-            .try_inverse()
-            .map(|m| (true, m))
-            .unwrap_or_else(|| (false, nalgebra::Matrix4::identity()));
-
-        stencils.push(StencilData {
-            viewport_position: stencil_position,
-            viewport_position_inverse_exists: if inverse_exists { 1 } else { 0 },
-            viewport_position_inverse: stencil_position_inverse,
-            atlas_page: page,
-            in_atlas_offset: [position_in_atlas.min.x, position_in_atlas.min.y],
-            in_atlas_size: [position_in_atlas.width(), position_in_atlas.height()],
-            _padding1: [0; 3],
-            _padding2: 0,
-            _padding3: [0; 2],
-        });
-
-        current_stencil = stencils.len() as u32;
-    }
-
-    if let Some((texture, texture_position)) = &object.texture() {
-        if texture.format() != texture_format {
-            warn!("CoreRenderer: texture format mismatch");
-            return Err(TextureValidationError::FormatMismatch);
-        }
-
-        let atlas_id = texture_atlas_id.get_or_insert_with(|| texture.atlas_id());
-
-        if atlas_id != &texture.atlas_id() {
-            warn!("CoreRenderer: texture atlas id mismatch");
-            return Err(TextureValidationError::AtlasIdMismatch);
-        }
-
-        let (page, position_in_atlas) = texture.position_in_atlas()?;
-
-        instances.push(InstanceData {
-            viewport_position: transform * texture_position,
-            atlas_page: page,
-            in_atlas_offset: [position_in_atlas.min.x, position_in_atlas.min.y],
-            in_atlas_size: [position_in_atlas.width(), position_in_atlas.height()],
-            stencil_index: current_stencil,
-            _padding1: 0,
-            _padding2: 0,
-        });
-    }
-
-    for (child, child_transform) in object.child_elements() {
-        create_instance_and_stencil_data_recursive(
-            texture_format,
-            stencil_format,
-            child,
-            transform * child_transform,
-            instances,
-            stencils,
-            texture_atlas_id,
-            stencil_atlas_id,
-            current_stencil,
-        )?;
-    }
-
-    Ok(())
+    mask_format: wgpu::TextureFormat,
+) -> Result<FlatFrame, TextureValidationError> {
+    let mut flattener = Flattener::new(texture_format, mask_format);
+    flattener.walk(objects, nalgebra::Matrix4::identity(), &[])?;
+    Ok(flattener.out)
 }
 
 #[derive(Error, Debug)]

@@ -458,7 +458,10 @@ mod tests {
     //! to exercise them.
 
     use super::*;
-    use crate::core_renderer::{InstanceData, StencilData, make_normalize_matrix};
+    use crate::core_renderer::{
+        InstanceData, MaskData, MASK_KIND_COVERAGE, make_normalize_matrix, mat3_columns,
+        planar_homography,
+    };
 
     struct TestGpu {
         device: wgpu::Device,
@@ -514,8 +517,17 @@ mod tests {
         // Bindings the scan stages don't touch still need buffers to build the
         // shared bind group; small dummies suffice (dispatch-time validation
         // only covers bindings the pipeline actually uses).
-        let dummy_instances = make_storage("test instances", 96, wgpu::BufferUsages::empty());
-        let dummy_stencils = make_storage("test stencils", 176, wgpu::BufferUsages::empty());
+        let dummy_instances = make_storage(
+            "test instances",
+            std::mem::size_of::<InstanceData>() as u64,
+            wgpu::BufferUsages::empty(),
+        );
+        let dummy_masks = make_storage(
+            "test masks",
+            std::mem::size_of::<MaskData>() as u64,
+            wgpu::BufferUsages::empty(),
+        );
+        let dummy_mask_indices = make_storage("test mask_indices", 4, wgpu::BufferUsages::empty());
         let visible_instances = make_storage(
             "test visible_instances",
             flags_bytes,
@@ -548,7 +560,7 @@ mod tests {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: dummy_stencils.as_entire_binding(),
+                    resource: dummy_masks.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -569,6 +581,10 @@ mod tests {
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: offsets_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: dummy_mask_indices.as_entire_binding(),
                 },
             ],
         });
@@ -719,42 +735,48 @@ mod tests {
             * nalgebra::Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(w, h, 1.0))
     }
 
-    fn instance(viewport_position: nalgebra::Matrix4<f32>, stencil_index: u32) -> InstanceData {
-        InstanceData {
+    fn mask(viewport_position: nalgebra::Matrix4<f32>) -> MaskData {
+        let inverse = planar_homography(&viewport_position).try_inverse();
+        MaskData {
             viewport_position,
+            mask_from_screen: mat3_columns(&inverse.unwrap_or_else(nalgebra::Matrix3::identity)),
+            kind: MASK_KIND_COVERAGE,
+            inverse_exists: u32::from(inverse.is_some()),
             atlas_page: 0,
-            in_atlas_offset: [0.0, 0.0],
-            in_atlas_size: [1.0, 1.0],
-            stencil_index,
             _padding1: 0,
-            _padding2: 0,
-        }
-    }
-
-    fn stencil(viewport_position: nalgebra::Matrix4<f32>) -> StencilData {
-        let (exists, inverse) = viewport_position
-            .try_inverse()
-            .map(|m| (1, m))
-            .unwrap_or((0, nalgebra::Matrix4::identity()));
-        StencilData {
-            viewport_position,
-            viewport_position_inverse_exists: exists,
-            viewport_position_inverse: inverse,
-            atlas_page: 0,
             in_atlas_offset: [0.0, 0.0],
             in_atlas_size: [1.0, 1.0],
-            _padding1: [0; 3],
-            _padding2: 0,
-            _padding3: [0; 2],
         }
     }
 
-    /// Run the visibility stage over real instance/stencil data and read the
+    /// Assemble instances from `(quad, mask chain)` pairs, laying the chains out
+    /// back to back the way the real flattener does.
+    fn instances_with_chains(cases: &[(nalgebra::Matrix4<f32>, &[u32])]) -> (Vec<InstanceData>, Vec<u32>) {
+        let mut instances = Vec::new();
+        let mut mask_indices = Vec::new();
+        for (viewport_position, chain) in cases {
+            let mask_offset = mask_indices.len() as u32;
+            mask_indices.extend_from_slice(chain);
+            instances.push(InstanceData {
+                viewport_position: *viewport_position,
+                atlas_page: 0,
+                alpha: 1.0,
+                in_atlas_offset: [0.0, 0.0],
+                in_atlas_size: [1.0, 1.0],
+                mask_offset,
+                mask_count: chain.len() as u32,
+            });
+        }
+        (instances, mask_indices)
+    }
+
+    /// Run the visibility stage over real instance/mask data and read the
     /// visibility flags back.
     fn run_visibility(
         gpu: &TestGpu,
         instances: &[InstanceData],
-        stencils: &[StencilData],
+        masks: &[MaskData],
+        mask_indices: &[u32],
         viewport: [f32; 2],
     ) -> Vec<u32> {
         let device = &gpu.device;
@@ -775,9 +797,14 @@ mod tests {
             std::mem::size_of_val(instances) as u64,
             wgpu::BufferUsages::COPY_DST,
         );
-        let stencils_buffer = make_storage(
-            "vis test stencils",
-            (std::mem::size_of::<StencilData>() * stencils.len().max(1)) as u64,
+        let masks_buffer = make_storage(
+            "vis test masks",
+            (std::mem::size_of::<MaskData>() * masks.len().max(1)) as u64,
+            wgpu::BufferUsages::COPY_DST,
+        );
+        let mask_indices_buffer = make_storage(
+            "vis test mask_indices",
+            (std::mem::size_of::<u32>() * mask_indices.len().max(1)) as u64,
             wgpu::BufferUsages::COPY_DST,
         );
         let visible_instances = make_storage(
@@ -805,7 +832,7 @@ mod tests {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: stencils_buffer.as_entire_binding(),
+                    resource: masks_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -827,20 +854,22 @@ mod tests {
                     binding: 6,
                     resource: offsets_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: mask_indices_buffer.as_entire_binding(),
+                },
             ],
         });
 
         gpu.queue
             .write_buffer(&instances_buffer, 0, bytemuck::cast_slice(instances));
-        if !stencils.is_empty() {
+        if !masks.is_empty() {
             gpu.queue
-                .write_buffer(&stencils_buffer, 0, bytemuck::cast_slice(stencils));
-        } else {
-            gpu.queue.write_buffer(
-                &stencils_buffer,
-                0,
-                bytemuck::bytes_of(&stencil(nalgebra::Matrix4::identity())),
-            );
+                .write_buffer(&masks_buffer, 0, bytemuck::cast_slice(masks));
+        }
+        if !mask_indices.is_empty() {
+            gpu.queue
+                .write_buffer(&mask_indices_buffer, 0, bytemuck::cast_slice(mask_indices));
         }
         // Poison the flags so stale values can't fake a pass in either direction.
         gpu.queue
@@ -886,32 +915,34 @@ mod tests {
         };
         let viewport = [800.0, 600.0];
 
-        // Stencils (stencil_index on the instance is index + 1; 0 = none).
-        let stencils = vec![
-            stencil(rect(300.0, 300.0, 20.0, 20.0)), // 1: identical to the glyph quad below
-            stencil(rect(400.0, 400.0, 50.0, 50.0)), // 2: disjoint from its instance
-            stencil(rect(900.0, 100.0, 100.0, 50.0)), // 3: overlaps instance, but off-screen
-            stencil(rect(0.0, 0.0, 0.0, 0.0)),       // 4: zero scale -> non-invertible
+        let masks = vec![
+            mask(rect(300.0, 300.0, 20.0, 20.0)),  // 0: identical to the glyph quad below
+            mask(rect(400.0, 400.0, 50.0, 50.0)),  // 1: disjoint from its instance
+            mask(rect(900.0, 100.0, 100.0, 50.0)), // 2: overlaps instance, but off-screen
+            mask(rect(0.0, 0.0, 0.0, 0.0)),        // 3: zero scale -> non-invertible
         ];
         assert_eq!(
-            stencils[3].viewport_position_inverse_exists, 0,
-            "test setup: stencil 4 must be non-invertible"
+            masks[3].inverse_exists, 0,
+            "test setup: mask 3 must be non-invertible"
         );
 
-        let cases: Vec<(&str, InstanceData, u32)> = vec![
+        let cases: Vec<(&str, nalgebra::Matrix4<f32>, &[u32], u32)> = vec![
             (
                 "plain quad inside the viewport",
-                instance(rect(100.0, 100.0, 200.0, 150.0), 0),
+                rect(100.0, 100.0, 200.0, 150.0),
+                &[],
                 1,
             ),
             (
                 "fully off-screen to the right",
-                instance(rect(900.0, 100.0, 50.0, 50.0), 0),
+                rect(900.0, 100.0, 50.0, 50.0),
+                &[],
                 0,
             ),
             (
                 "fully off-screen below",
-                instance(rect(100.0, 700.0, 50.0, 50.0), 0),
+                rect(100.0, 700.0, 50.0, 50.0),
+                &[],
                 0,
             ),
             (
@@ -919,53 +950,62 @@ mod tests {
                 // corners lie outside the bar: only edges cross. The previous
                 // vertex-containment test culled this.
                 "bar wider than the viewport (cross-shaped overlap)",
-                instance(rect(-100.0, 250.0, 1000.0, 100.0), 0),
+                rect(-100.0, 250.0, 1000.0, 100.0),
+                &[],
                 1,
             ),
             (
                 // Every vertex sits exactly on the other quad's boundary.
                 "background exactly matching the viewport",
-                instance(rect(0.0, 0.0, 800.0, 600.0), 0),
+                rect(0.0, 0.0, 800.0, 600.0),
+                &[],
                 1,
             ),
             (
-                // The glyph pattern: stencil quad bit-identical to the
-                // texture quad. The previous test culled every such glyph.
-                "glyph with stencil identical to its texture quad",
-                instance(rect(300.0, 300.0, 20.0, 20.0), 1),
+                // The glyph pattern: mask quad bit-identical to the texture
+                // quad. The previous test culled every such glyph.
+                "glyph with mask identical to its texture quad",
+                rect(300.0, 300.0, 20.0, 20.0),
+                &[0],
                 1,
             ),
             (
-                "instance disjoint from its stencil",
-                instance(rect(100.0, 100.0, 50.0, 50.0), 2),
+                "instance disjoint from its mask",
+                rect(100.0, 100.0, 50.0, 50.0),
+                &[1],
                 0,
             ),
             (
                 // Instance spans the right viewport edge; the part of it the
-                // stencil lets through is entirely off-screen.
-                "stencil off-screen (masked pixels never visible)",
-                instance(rect(700.0, 100.0, 400.0, 50.0), 3),
+                // mask lets through is entirely off-screen.
+                "mask off-screen (masked pixels never visible)",
+                rect(700.0, 100.0, 400.0, 50.0),
+                &[2],
                 0,
             ),
             (
-                // Render draws unmasked when the stencil transform is not
+                // Render draws unmasked when the mask transform is not
                 // invertible; culling must mirror that and keep the instance.
-                "non-invertible stencil falls back to unmasked",
-                instance(rect(100.0, 100.0, 50.0, 50.0), 4),
+                "non-invertible mask falls back to unmasked",
+                rect(100.0, 100.0, 50.0, 50.0),
+                &[3],
                 1,
             ),
             (
                 // Shares only the x = 800 edge with the viewport:
                 // boundary-inclusive SAT keeps it (conservative).
                 "touching the viewport edge only",
-                instance(rect(800.0, 100.0, 50.0, 50.0), 0),
+                rect(800.0, 100.0, 50.0, 50.0),
+                &[],
                 1,
             ),
         ];
 
-        let instances: Vec<InstanceData> = cases.iter().map(|(_, i, _)| *i).collect();
-        let flags = run_visibility(&gpu, &instances, &stencils, viewport);
-        for (i, (label, _, expected)) in cases.iter().enumerate() {
+        let quads: Vec<(nalgebra::Matrix4<f32>, &[u32])> =
+            cases.iter().map(|(_, q, chain, _)| (*q, *chain)).collect();
+        let (instances, mask_indices) = instances_with_chains(&quads);
+        let flags = run_visibility(&gpu, &instances, &masks, &mask_indices, viewport);
+        for (i, (label, _, _, expected)) in cases.iter().enumerate() {
             assert_eq!(
                 flags[i], *expected,
                 "visibility mismatch for case {i}: {label}"

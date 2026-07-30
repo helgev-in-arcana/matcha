@@ -12,50 +12,45 @@
 ////   convert them to normalized coordinates before writing InstanceData into GPU memory.
 //// - `in_atlas_size`: (width, height) size of the sub-image. Expected as NORMALIZED
 ////   values (0.0 .. 1.0). If atlas returns pixel sizes, normalize on the host side.
-//// - `stencil_index`: index+1 of the associated stencil in the stencil data array.
-////   0 indicates "no stencil". The shader uses `stencil_index - 1` to access the stencil.
+//// - `alpha`: draw-time opacity multiplied into the sampled colour.
+//// - `mask_offset` / `mask_count`: the half-open range
+////   `mask_indices[offset .. offset + count]`. The instance's coverage is the
+////   PRODUCT of every mask in that range, so `count == 0` means "unmasked".
 ////
 //// NOTE: Keep WGSL-side layout (field order and explicit padding) compatible with the
 //// Rust `InstanceData` declaration. When changing fields, update both Rust and WGSL.
 struct InstanceData {
     viewport_position: mat4x4<f32>,
     atlas_page: u32,
+    alpha: f32,
+    in_atlas_offset: vec2<f32>,
+    in_atlas_size: vec2<f32>,
+    mask_offset: u32,
+    mask_count: u32,
+};
+
+//// MaskData describes one element of an instance's mask chain. See the Rust
+//// `MaskData` declaration for the full semantics; culling only needs
+//// `viewport_position` (the mask quad in UI space) and `inverse_exists`.
+////
+//// NOTE: Maintain identical memory layout between this WGSL struct and the Rust
+//// `MaskData` declaration (including explicit padding fields). Update both
+//// definitions when changing sizes/types.
+struct MaskData {
+    viewport_position: mat4x4<f32>,
+    mask_from_screen: mat3x3<f32>,
+    kind: u32,
+    inverse_exists: u32,
+    atlas_page: u32,
     _padding1: u32,
     in_atlas_offset: vec2<f32>,
     in_atlas_size: vec2<f32>,
-    stencil_index: u32,
-    _padding2: u32,
-};
-
-//// StencilData describes a stencil polygon used to mask instances.
-//// Semantics:
-//// - `viewport_position`: transform mapping the unit quad into stencil space.
-//// - `viewport_position_inverse_exists`: non-zero if `viewport_position` is invertible.
-//// - `viewport_position_inverse`: inverse matrix used by the vertex shader to compute
-////   stencil-space UV coordinates for masking.
-//// - `atlas_page`: index of the stencil atlas page (texture array layer).
-//// - `in_atlas_offset` / `in_atlas_size`: offset and size of the stencil image inside
-////   the atlas page. Expected to be NORMALIZED UVs (0.0 .. 1.0). If the atlas returns
-////   pixel coordinates, the host MUST normalize them before uploading to GPU.
-////
-//// NOTE: Maintain identical memory layout between this WGSL struct and the Rust
-//// `StencilData` declaration (including explicit padding fields). Update both
-//// definitions when changing sizes/types.
-struct StencilData {
-    viewport_position: mat4x4<f32>,
-    viewport_position_inverse_exists: u32,
-    _padding1: array<u32, 3>,
-    viewport_position_inverse: mat4x4<f32>,
-    atlas_page: u32,
-    _padding2: u32,
-    in_atlas_offset: vec2<f32>,
-    in_atlas_size: vec2<f32>,
-    _padding3: array<u32, 2>,
 };
 
 @group(0) @binding(0) var<storage, read> all_instances: array<InstanceData>;
-@group(0) @binding(1) var<storage, read> all_stencils: array<StencilData>;
+@group(0) @binding(1) var<storage, read> all_masks: array<MaskData>;
 @group(0) @binding(5) var<storage, read_write> visibility_flags: array<u32>;
+@group(0) @binding(7) var<storage, read> mask_indices: array<u32>;
 
 struct Pc {
     normalize_matrix: mat4x4<f32>,
@@ -91,10 +86,11 @@ fn culling_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     let instance = all_instances[instance_index];
 
-    let stencil_index_add_1 = instance.stencil_index;
-    let use_stencil = stencil_index_add_1 > 0u;
-    let stencil_index = max(stencil_index_add_1 - 1u, 0u);
-    let stencil = all_stencils[stencil_index];
+    // Only the first element of the chain is honoured here; evaluating the full
+    // chain lands in a later step. Chains are currently never longer than 1.
+    let use_stencil = instance.mask_count > 0u;
+    let stencil_index = select(0u, mask_indices[instance.mask_offset], use_stencil);
+    let stencil = all_masks[stencil_index];
 
     // Visible conditions (conservative: every pixel the render pass can shade
     // lies inside texture-quad ∩ viewport, and — when a stencil masks the
@@ -105,10 +101,11 @@ fn culling_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // 2. (no active stencil) or (stencil quad overlaps the viewport
     //    and instance quad overlaps stencil quad)
     //
-    // NOTE: positions are divided by w for form's sake, but the whole pipeline
-    // assumes affine transforms (w == 1); the render shader interpolates
-    // stencil UVs computed per-vertex, which would also break under a real
-    // projective transform.
+    // NOTE: positions are divided by w for form's sake, but this test still
+    // assumes affine transforms (w == 1): a quad crossing the w == 0 plane
+    // projects to something a convex-hull SAT test cannot describe. The render
+    // shader itself no longer has that restriction — masks are inverse-mapped
+    // per fragment via an exact planar homography.
 
     var texture_position: array<vec2<f32>, 4>;
     for (var i = 0u; i < 4u; i++) {
@@ -126,7 +123,7 @@ fn culling_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // transform draws the instance unmasked there, so it must not participate
     // in culling here either (its degenerate quad could otherwise cull an
     // instance the render pass would draw).
-    let stencil_active = use_stencil && (stencil.viewport_position_inverse_exists != 0u);
+    let stencil_active = use_stencil && (stencil.inverse_exists != 0u);
 
     let texture_is_in_viewport = is_overlapping(texture_position, CLIP_VERTICES);
     let stencil_is_in_viewport = is_overlapping(stencil_position, CLIP_VERTICES);
