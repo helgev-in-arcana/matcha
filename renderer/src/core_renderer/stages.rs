@@ -920,6 +920,9 @@ mod tests {
             mask(rect(400.0, 400.0, 50.0, 50.0)),  // 1: disjoint from its instance
             mask(rect(900.0, 100.0, 100.0, 50.0)), // 2: overlaps instance, but off-screen
             mask(rect(0.0, 0.0, 0.0, 0.0)),        // 3: zero scale -> non-invertible
+            mask(rect(100.0, 100.0, 200.0, 200.0)), // 4: outer clip
+            mask(rect(150.0, 150.0, 100.0, 100.0)), // 5: inner clip, inside 4
+            mask(rect(500.0, 100.0, 100.0, 100.0)), // 6: disjoint from 4
         ];
         assert_eq!(
             masks[3].inverse_exists, 0,
@@ -997,6 +1000,39 @@ mod tests {
                 "touching the viewport edge only",
                 rect(800.0, 100.0, 50.0, 50.0),
                 &[],
+                1,
+            ),
+            (
+                // Nested clips, all three overlapping: the whole chain has to
+                // pass, and it does.
+                "inside both clips of a two-mask chain",
+                rect(160.0, 160.0, 40.0, 40.0),
+                &[4, 5],
+                1,
+            ),
+            (
+                // Overlaps the outer clip but not the inner one. The first
+                // element of the chain alone would have kept this — only
+                // walking the whole chain culls it.
+                "inside the outer clip but outside the inner one",
+                rect(110.0, 110.0, 20.0, 20.0),
+                &[4, 5],
+                0,
+            ),
+            (
+                // Culled by the *second* element, proving the loop does not
+                // stop after the first.
+                "chain whose later mask is disjoint from the instance",
+                rect(160.0, 160.0, 40.0, 40.0),
+                &[4, 6],
+                0,
+            ),
+            (
+                // A degenerate mask is skipped rather than culling, even in the
+                // middle of an otherwise valid chain.
+                "degenerate mask in the middle of a chain is ignored",
+                rect(160.0, 160.0, 40.0, 40.0),
+                &[4, 3, 5],
                 1,
             ),
         ];

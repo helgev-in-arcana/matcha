@@ -86,20 +86,12 @@ fn culling_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     let instance = all_instances[instance_index];
 
-    // Only the first element of the chain is honoured here; evaluating the full
-    // chain lands in a later step. Chains are currently never longer than 1.
-    let use_stencil = instance.mask_count > 0u;
-    let stencil_index = select(0u, mask_indices[instance.mask_offset], use_stencil);
-    let stencil = all_masks[stencil_index];
-
     // Visible conditions (conservative: every pixel the render pass can shade
-    // lies inside texture-quad ∩ viewport, and — when a stencil masks the
-    // instance — inside texture ∩ stencil and stencil ∩ viewport as well, so
-    // the instance may be culled as soon as ANY of those pairwise
-    // intersections is provably empty):
-    // 1. instance quad overlaps the viewport
-    // 2. (no active stencil) or (stencil quad overlaps the viewport
-    //    and instance quad overlaps stencil quad)
+    // lies inside texture-quad ∩ viewport, and inside texture ∩ mask and
+    // mask ∩ viewport for EVERY mask in the chain, so the instance may be
+    // culled as soon as ANY of those pairwise intersections is provably
+    // empty). Pairwise rather than a true whole-chain intersection: cheaper,
+    // and erring towards keeping an instance is the safe direction.
     //
     // NOTE: positions are divided by w for form's sake, but this test still
     // assumes affine transforms (w == 1): a quad crossing the w == 0 plane
@@ -113,25 +105,28 @@ fn culling_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         texture_position[i] = p.xy / p.w;
     }
 
-    var stencil_position: array<vec2<f32>, 4>;
-    for (var i = 0u; i < 4u; i++) {
-        let p = pc.normalize_matrix * stencil.viewport_position * QUAD_VERTICES[i];
-        stencil_position[i] = p.xy / p.w;
+    var is_visible = is_overlapping(texture_position, CLIP_VERTICES);
+
+    for (var m = 0u; m < instance.mask_count && is_visible; m++) {
+        let mask = all_masks[mask_indices[instance.mask_offset + m]];
+
+        // Mirror the render shader's degenerate-mask fallback: such a mask is
+        // treated as absent there, so it must not participate in culling here
+        // either — its collapsed quad would otherwise cull an instance the
+        // render pass goes on to draw.
+        if (mask.inverse_exists == 0u) {
+            continue;
+        }
+
+        var mask_position: array<vec2<f32>, 4>;
+        for (var i = 0u; i < 4u; i++) {
+            let p = pc.normalize_matrix * mask.viewport_position * QUAD_VERTICES[i];
+            mask_position[i] = p.xy / p.w;
+        }
+
+        is_visible = is_overlapping(mask_position, CLIP_VERTICES)
+            && is_overlapping(texture_position, mask_position);
     }
-
-    // Mirror the render shader's stencil fallback: a non-invertible stencil
-    // transform draws the instance unmasked there, so it must not participate
-    // in culling here either (its degenerate quad could otherwise cull an
-    // instance the render pass would draw).
-    let stencil_active = use_stencil && (stencil.inverse_exists != 0u);
-
-    let texture_is_in_viewport = is_overlapping(texture_position, CLIP_VERTICES);
-    let stencil_is_in_viewport = is_overlapping(stencil_position, CLIP_VERTICES);
-    let texture_and_stencil_overlap = is_overlapping(texture_position, stencil_position);
-
-    let is_visible = texture_is_in_viewport && (
-        !stencil_active || (stencil_is_in_viewport && texture_and_stencil_overlap)
-    );
 
     // IMPORTANT: compaction must preserve submission order. Instances are
     // alpha-blended UI quads whose paint order IS their stacking order (a panel
