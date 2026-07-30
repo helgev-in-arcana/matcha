@@ -76,12 +76,12 @@ struct VertexOutput {
     @location(1) texture_atlas_page: u32,
     @location(2) texture_atlas_bounds_x: vec2<f32>,
     @location(3) texture_atlas_bounds_y: vec2<f32>,
-    // stencil
-    @location(4) use_stencil: u32,
-    @location(5) stencil_uv: vec2<f32>,
-    @location(6) stencil_atlas_page: u32,
-    @location(7) stencil_atlas_bounds_x: vec2<f32>,
-    @location(8) stencil_atlas_bounds_y: vec2<f32>,
+    // Masks carry no per-vertex data: each one is resolved from the fragment's
+    // own screen position, so all the fragment stage needs is where this
+    // instance's chain lives.
+    @location(4) @interpolate(flat) mask_offset: u32,
+    @location(5) @interpolate(flat) mask_count: u32,
+    @location(6) @interpolate(flat) alpha: f32,
 };
 
 @group(0) @binding(0) var texture_sampler: sampler;
@@ -133,28 +133,14 @@ fn vertex_main(
     // preparation
     let all_instance_index = visible_instances[instance_index];
     let instance = all_instances[all_instance_index];
-    // Only the first element of the chain is honoured here; evaluating the full
-    // chain requires per-fragment work and lands in the next step. Chains are
-    // currently never longer than 1.
-    let use_stencil = instance.mask_count > 0u;
-    let stencil_index = select(0u, mask_indices[instance.mask_offset], use_stencil);
-    let stencil = all_masks[stencil_index];
 
     // vertex position
     let pre = instance.viewport_position * VERTICES[vertex_index];
     let vertex_position = pc.normalize_matrix * pre;
+    // Per-vertex UV, interpolated by the GPU. That interpolation is
+    // perspective-correct for free, which is why textures stay on this path
+    // while masks do not.
     let texture_uv = instance.in_atlas_offset + instance.in_atlas_size * UVS[vertex_index];
-
-    // stencil uv
-    // space that stencil position becomes {(0, 0), (0, 1), (1, 1), (1, 0)}
-    let stencil_space = stencil.mask_from_screen * vec3<f32>(pre.xy / pre.w, 1.0);
-    let stencil_local_uv = (stencil_space.xy / stencil_space.z);
-    // Map the local [0,1] unit-square coordinate into the stencil's atlas
-    // sub-rectangle, exactly like `texture_uv` does above. Without this, the
-    // fragment shader's clamp to `stencil_atlas_bounds` pins almost every
-    // fragment to one corner of the atlas region instead of sweeping across
-    // it, producing a smeared blob instead of the actual stencil shape.
-    let stencil_uv = stencil.in_atlas_offset + stencil.in_atlas_size * stencil_local_uv;
 
     // output
     var output: VertexOutput;
@@ -163,69 +149,95 @@ fn vertex_main(
     output.texture_atlas_page = instance.atlas_page;
     output.texture_atlas_bounds_x = vec2<f32>(instance.in_atlas_offset.x, instance.in_atlas_offset.x + instance.in_atlas_size.x);
     output.texture_atlas_bounds_y = vec2<f32>(instance.in_atlas_offset.y, instance.in_atlas_offset.y + instance.in_atlas_size.y);
-    output.use_stencil = select(
-        /*false*/0u,
-        /*true*/ 1u,
-        use_stencil && (stencil.inverse_exists != 0u)
-    );
-    output.stencil_uv = stencil_uv;
-    output.stencil_atlas_page = stencil.atlas_page;
-    output.stencil_atlas_bounds_x = vec2<f32>(stencil.in_atlas_offset.x, stencil.in_atlas_offset.x + stencil.in_atlas_size.x);
-    output.stencil_atlas_bounds_y = vec2<f32>(stencil.in_atlas_offset.y, stencil.in_atlas_offset.y + stencil.in_atlas_size.y);
+    output.mask_offset = instance.mask_offset;
+    output.mask_count = instance.mask_count;
+    output.alpha = instance.alpha;
     return output;
 }
 
+// Coverage below this contributes less than one step of an 8-bit channel, so
+// the fragment can be dropped outright rather than blended.
+const COVERAGE_EPSILON: f32 = 1.0 / 512.0;
+
+// Coverage of one mask at `screen_pos`, in [0, 1].
+//
+// The mask is inverse-mapped from the screen rather than interpolated across
+// the instance's quad. That is what gives a mask its portal-like behaviour --
+// it masks by where it *appears* -- so it stays correct even when the mask and
+// the instance are not coplanar, and it is exact under projective transforms,
+// which a per-vertex UV would not be.
+fn mask_coverage(mask: MaskData, screen_pos: vec2<f32>) -> f32 {
+    // Degenerate transform: no usable inverse. Treated as absent (fully
+    // transparent to what it would mask) rather than as occluding, so a
+    // collapsed mask cannot make a widget silently vanish. Culling agrees.
+    if (mask.inverse_exists == 0u) {
+        return 1.0;
+    }
+
+    let h = mask.mask_from_screen * vec3<f32>(screen_pos, 1.0);
+    // Behind the eye: this fragment is on the far side of the mask's plane and
+    // sees no part of it.
+    if (h.z <= 0.0) {
+        return 0.0;
+    }
+    let local_uv = h.xy / h.z;
+
+    // Outside the mask quad is REJECTED, not clamped. Clamping would let a
+    // stretched mask report full coverage everywhere beyond its own edge,
+    // which is precisely the opposite of clipping. The tolerance is half a
+    // texel of the mask's own atlas region expressed in local units, so a
+    // fragment sitting exactly on the boundary is not dropped by rounding.
+    let tolerance = pc.stencil_atlas_half_texel / max(mask.in_atlas_size, vec2<f32>(1e-9));
+    if (any(local_uv < -tolerance) || any(local_uv > 1.0 + tolerance)) {
+        return 0.0;
+    }
+
+    // Map into the atlas sub-rectangle, then clamp to its bounds inset by half
+    // a texel -- see `fragment_main` for why the inset is needed.
+    let uv = mask.in_atlas_offset + mask.in_atlas_size * local_uv;
+    let lo = mask.in_atlas_offset + pc.stencil_atlas_half_texel;
+    let hi = mask.in_atlas_offset + mask.in_atlas_size - pc.stencil_atlas_half_texel;
+    let clamped_uv = clamp(uv, min(lo, hi), max(lo, hi));
+
+    // `textureSampleLevel`, not `textureSample`: this runs under non-uniform
+    // control flow (early returns above, and a data-dependent loop in the
+    // caller), where implicit-derivative sampling is not allowed. The atlases
+    // have a single mip level, so an explicit LOD of 0 is exactly equivalent.
+    return textureSampleLevel(stencil_atlas, texture_sampler, clamped_uv, mask.atlas_page, 0.0).r;
+}
+
 @fragment
-fn fragment_main(
-    @location(0) texture_uv: vec2<f32>,
-    @location(1) texture_atlas_page: u32,
-    @location(2) texture_atlas_bounds_x: vec2<f32>,
-    @location(3) texture_atlas_bounds_y: vec2<f32>,
-    @location(4) use_stencil_num: u32,
-    @location(5) stencil_uv: vec2<f32>,
-    @location(6) stencil_atlas_page: u32,
-    @location(7) stencil_atlas_bounds_x: vec2<f32>,
-    @location(8) stencil_atlas_bounds_y: vec2<f32>
-) -> @location(0) vec4<f32> {
-    let use_stencil = use_stencil_num != 0u;
-
-    // Clamp texture_uv/stencil_uv to the atlas bounds, inset by half a texel
-    // on each side. Clamping to the exact bounds edge would let bilinear
-    // filtering sample exactly halfway between the last real texel and the
-    // next (zero-initialised margin) texel, bleeding the margin's
-    // transparent black into every atlas region's border. Insetting to the
-    // last texel's centre instead guarantees a pure sample there.
+fn fragment_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Clamp texture_uv to the atlas bounds, inset by half a texel on each
+    // side. Clamping to the exact bounds edge would let bilinear filtering
+    // sample exactly halfway between the last real texel and the next
+    // (zero-initialised margin) texel, bleeding the margin's transparent
+    // black into every atlas region's border. Insetting to the last texel's
+    // centre instead guarantees a pure sample there.
     let clamped_texture_uv = vec2<f32>(
-        clamp(texture_uv.x, texture_atlas_bounds_x[0] + pc.texture_atlas_half_texel.x, texture_atlas_bounds_x[1] - pc.texture_atlas_half_texel.x),
-        clamp(texture_uv.y, texture_atlas_bounds_y[0] + pc.texture_atlas_half_texel.y, texture_atlas_bounds_y[1] - pc.texture_atlas_half_texel.y)
-    );
-
-    let clamped_stencil_uv = vec2<f32>(
-        clamp(stencil_uv.x, stencil_atlas_bounds_x[0] + pc.stencil_atlas_half_texel.x, stencil_atlas_bounds_x[1] - pc.stencil_atlas_half_texel.x),
-        clamp(stencil_uv.y, stencil_atlas_bounds_y[0] + pc.stencil_atlas_half_texel.y, stencil_atlas_bounds_y[1] - pc.stencil_atlas_half_texel.y)
+        clamp(in.texture_uv.x, in.texture_atlas_bounds_x[0] + pc.texture_atlas_half_texel.x, in.texture_atlas_bounds_x[1] - pc.texture_atlas_half_texel.x),
+        clamp(in.texture_uv.y, in.texture_atlas_bounds_y[0] + pc.texture_atlas_half_texel.y, in.texture_atlas_bounds_y[1] - pc.texture_atlas_half_texel.y)
     );
 
     let texture_color = textureSample(
         texture_atlas,
         texture_sampler,
         clamped_texture_uv,
-        texture_atlas_page,
+        in.texture_atlas_page,
     );
 
-    let stencil_color = textureSample(
-        stencil_atlas,
-        texture_sampler,
-        clamped_stencil_uv,
-        stencil_atlas_page,
-    );
+    // The instance's coverage is the product of its whole mask chain. Every
+    // element attenuates independently, so an element that fully rejects this
+    // fragment ends the loop early. Both an instance's own coverage mask (a
+    // glyph stencil) and the clips it inherited from enclosing scopes live in
+    // this one chain -- multiplication does not care which is which.
+    var coverage = 1.0;
+    for (var i = 0u; i < in.mask_count; i++) {
+        coverage *= mask_coverage(all_masks[mask_indices[in.mask_offset + i]], in.position.xy);
+        if (coverage < COVERAGE_EPSILON) {
+            discard;
+        }
+    }
 
-    let stencil = select(
-        /*false*/ 1.0,
-        /*true*/  stencil_color.r,
-        use_stencil
-    );
-
-    let final_color = texture_color * stencil;
-
-    return final_color;
+    return texture_color * coverage * in.alpha;
 }

@@ -288,12 +288,11 @@ fn create_data_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout
                 },
                 count: None,
             },
-            // All Masks Buffer
+            // All Masks Buffer. Masks are resolved per fragment, from the
+            // fragment's own screen position; the vertex stage never reads one.
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE
-                    | wgpu::ShaderStages::FRAGMENT
-                    | wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,
@@ -362,9 +361,7 @@ fn create_data_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout
             // `mask_offset`/`mask_count` range points into.
             wgpu::BindGroupLayoutEntry {
                 binding: 7,
-                visibility: wgpu::ShaderStages::COMPUTE
-                    | wgpu::ShaderStages::VERTEX
-                    | wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,
