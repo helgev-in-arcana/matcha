@@ -221,7 +221,7 @@ pub(crate) fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<Atla
         }
     };
 
-    let alpha = (color[3] * ctx.opacity).clamp(0.0, 1.0);
+    let alpha = color[3].clamp(0.0, 1.0);
     let bytes = [
         linear_to_srgb_u8(color[0]),
         linear_to_srgb_u8(color[1]),

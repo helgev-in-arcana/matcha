@@ -131,12 +131,6 @@ pub(crate) fn solid_rect_node(ctx: &RenderCtx, w: f32, h: f32, color: [f32; 4]) 
             label: Some("solid_rect_node Render Encoder"),
         });
 
-    // Colour is baked into the atlas texture at build time (no per-instance
-    // alpha uniform at draw time), so a live opacity animation (M7) must
-    // multiply it in here and rely on `RenderItem::invalidate()` to force
-    // a rebuild on every frame the opacity actually changes.
-    let color = [color[0], color[1], color[2], color[3] * ctx.opacity];
-
     let target_size = region.texture_size();
     let target_format = region.format();
     if let Ok(mut render_pass) = region.begin_render_pass(&mut encoder) {

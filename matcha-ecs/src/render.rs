@@ -125,20 +125,21 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
 
     let mut nodes: Vec<FlatItem> = Vec::with_capacity(items.len());
     for item in &items {
-        // Opacity varies per item (M7), so `RenderCtx` is built fresh per item
-        // rather than shared across the loop.
+        // Size and focus vary per item, so `RenderCtx` is built fresh per item
+        // rather than shared across the loop. Opacity is deliberately not in
+        // it: it is applied at draw time, so it never reaches a builder and
+        // never invalidates a cached node.
         let ctx = RenderCtx {
             device: &device,
             queue: &queue,
             texture_atlas: &texture_atlas,
             stencil_atlas: &stencil_atlas,
-            opacity: item.opacity,
             size: item.size,
             focused: item.focused,
             focus_within: item.focus_within,
         };
         let node = build_node(&item.cache, &item.builder, &ctx);
-        nodes.push(FlatItem::new(node, item.transform));
+        nodes.push(FlatItem::new(node, item.transform).with_alpha(item.opacity));
     }
 
     let view = surface_texture

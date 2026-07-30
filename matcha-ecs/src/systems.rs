@@ -2,10 +2,7 @@
 
 use bevy_ecs::{query::Changed, system::Query};
 
-use crate::components::{
-    layout::LayoutOutput,
-    render::{RenderItem, RenderOpacity},
-};
+use crate::components::{layout::LayoutOutput, render::RenderItem};
 
 /// Drop the cached render node of every entity whose [`LayoutOutput`] changed
 /// this frame (new placement/size), so the next extract rebuilds it.
@@ -17,16 +14,7 @@ pub fn invalidate_on_layout_change(mut query: Query<&mut RenderItem, Changed<Lay
     }
 }
 
-/// Drop the cached render node of every entity whose [`RenderOpacity`] changed
-/// this frame: colour is baked into the atlas at build time, so a fade must
-/// rebuild every frame it progresses. Registered in `MatchaSet::PreExtract`,
-/// same pattern as [`invalidate_on_layout_change`].
-///
-/// Core-side wiring for an extract-contract component — the *animating* of
-/// opacity lives outside the core (see `matcha-ecs-widgets`'s `animation`
-/// module); this system only reacts to the resulting writes.
-pub fn invalidate_on_opacity_change(mut query: Query<&mut RenderItem, Changed<RenderOpacity>>) {
-    for mut item in query.iter_mut() {
-        item.invalidate();
-    }
-}
+// A companion `invalidate_on_opacity_change` used to live here. It is gone:
+// opacity is now applied per instance at draw time, so a fade no longer
+// invalidates anything and an animating widget is not re-rasterised every
+// frame.

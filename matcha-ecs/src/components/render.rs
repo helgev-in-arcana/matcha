@@ -21,11 +21,6 @@ pub struct RenderCtx<'a> {
     pub queue: &'a wgpu::Queue,
     pub texture_atlas: &'a TextureAtlas,
     pub stencil_atlas: &'a TextureAtlas,
-    /// The entity's current [`RenderOpacity`], or `1.0` if it doesn't carry
-    /// one. Colours are baked into the atlas at build time (there is no
-    /// per-instance alpha uniform at draw time), so a builder that wants to
-    /// fade must multiply this into its vertex colours itself.
-    pub opacity: f32,
     /// The size layout allocated to this entity (`LayoutOutput::size`).
     /// Builders must draw at *this* size, not a constructor-declared one: a
     /// parent layout may allocate more than the widget asked for (e.g.
@@ -37,7 +32,7 @@ pub struct RenderCtx<'a> {
     /// Whether this entity is the focus vertex (CSS `:focus`).
     ///
     /// Focus has to arrive through the context rather than being read from the
-    /// world, for the same reason `size` and `opacity` do: a builder is a
+    /// world, for the same reason `size` does: a builder is a
     /// closure captured back at `bundle()`/`patch()` time and has no world
     /// access when it runs (on the render thread, no less). The rebuild is
     /// triggered by `focus::sync_focus_components`, which invalidates the
@@ -52,10 +47,11 @@ pub struct RenderCtx<'a> {
 ///
 /// One of the two components the extract stage reads off a drawable entity
 /// (the other being `GlobalTransform`). The core only ever *reads* it: whoever
-/// wants to animate opacity writes it from a registered PreLayout system, and
-/// [`crate::systems::invalidate_on_opacity_change`] takes care of rebuilding
-/// the entity's cached render node whenever it changes. An entity without this
-/// component renders at full opacity.
+/// wants to animate opacity writes it from a registered PreLayout system. An
+/// entity without this component renders at full opacity.
+///
+/// Applied at draw time, so changing it costs nothing beyond a redraw — a fade
+/// does not re-rasterise anything, and a builder never sees it.
 #[derive(Component, Clone, Copy, PartialEq, Debug)]
 pub struct RenderOpacity(pub f32);
 

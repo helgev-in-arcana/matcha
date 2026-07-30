@@ -4,9 +4,9 @@
 //! The core knows nothing about any of this. It offers four neutral hooks and
 //! this module builds a fade out of them:
 //!
-//! - [`RenderOpacity`] — the value extract actually reads. We write it; the
-//!   core's `invalidate_on_opacity_change` notices and rebuilds the entity's
-//!   cached render node.
+//! - [`RenderOpacity`] — the value extract actually reads. We write it; it is
+//!   applied per instance at draw time, so writing it every frame costs a
+//!   redraw and nothing else.
 //! - [`FrameTime`] — one timestamp per frame, so every tween agrees on "now".
 //! - [`RedrawRequest`] — "this frame isn't the last one", so an in-flight fade
 //!   keeps the event loop scheduling frames.

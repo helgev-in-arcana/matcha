@@ -237,8 +237,6 @@ where
         render_schedule.add_systems(crate::layout::run_layout.in_set(MatchaSet::Layout));
         render_schedule
             .add_systems(crate::systems::invalidate_on_layout_change.in_set(MatchaSet::PreExtract));
-        render_schedule
-            .add_systems(crate::systems::invalidate_on_opacity_change.in_set(MatchaSet::PreExtract));
         render_schedule.add_systems(update_picker.in_set(MatchaSet::PreExtract));
         // Focus must be re-derived against the current tree before its derived
         // markers are synced: the focused entity may have been despawned or

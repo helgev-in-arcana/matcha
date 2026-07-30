@@ -296,7 +296,7 @@ pub fn run_validate_focus(world: &mut World) {
 /// every entity whose focus state changed.
 ///
 /// Invalidation happens *here*, rather than in a separate `Changed<Focused>`
-/// system alongside [`crate::systems::invalidate_on_opacity_change`], for a
+/// system alongside [`crate::systems::invalidate_on_layout_change`], for a
 /// specific reason: `Changed<T>` does not fire when a component is **removed**,
 /// so an entity *losing* focus would never rebuild and would keep painting its
 /// focus ring forever. This system already knows the exact set of entities that
