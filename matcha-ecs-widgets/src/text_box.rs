@@ -693,6 +693,13 @@ fn on_pointer(entity: &mut EntityWorldMut, input: &PointerInput) -> bool {
         return false;
     };
 
+    // A wheel scroll is not a caret interaction: leave it unconsumed so it
+    // bubbles to whatever scroll container encloses this box. `TextBox`'s own
+    // scrolling follows the caret and is driven by editing, not by the wheel.
+    if matches!(input.phase, PointerPhase::Scroll { .. }) {
+        return false;
+    }
+
     // Into the editor's own coordinates: strip the border and padding, and undo
     // the scroll offset the text is drawn at.
     let inset = style.border_width + style.padding;
@@ -706,6 +713,8 @@ fn on_pointer(entity: &mut EntityWorldMut, input: &PointerInput) -> bool {
             _ => d.select_line_at_point(x, y),
         },
         PointerPhase::Drag => d.extend_selection_to_point(x, y),
+        // Rejected above; this arm only satisfies exhaustiveness.
+        PointerPhase::Scroll { .. } => {}
     });
 
     // A caret move is not a text change, so nothing invalidates on generation.

@@ -43,7 +43,9 @@ use crate::{
         window::{Window as WindowComp, WindowBelonging},
     },
     focus::{run_validate_focus, sync_focus_components, Focus, FocusConfig},
-    input::{dispatch_pointer_drag, resolve_pointer_press, MessageQueue},
+    input::{
+        dispatch_pointer_drag, dispatch_pointer_scroll, resolve_pointer_press, MessageQueue,
+    },
     keyboard::{dispatch_ime, dispatch_key, sync_ime_state},
     model::{ModelHandle, ModelResource},
     pick::{update_picker, PickQuery, Picker, PickerResource},
@@ -771,6 +773,20 @@ where
                 viewport_pos: event.mouse_viewport_position(),
             };
             if dispatch_pointer_drag(&mut self.world, &query) && !self.drain_message_queue() {
+                self.request_redraw_all();
+            }
+        }
+
+        // Scrolling is positioned like a drag but starts no interaction, so it
+        // likewise bypasses focus and click routing. An unconsumed scroll means
+        // nothing under the pointer could move; there is nothing to redraw.
+        if let Some(delta) = event.on_scroll(|delta| delta) {
+            let query = PickQuery {
+                viewport_pos: event.mouse_viewport_position(),
+            };
+            if dispatch_pointer_scroll(&mut self.world, &query, delta)
+                && !self.drain_message_queue()
+            {
                 self.request_redraw_all();
             }
         }

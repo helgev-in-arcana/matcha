@@ -140,6 +140,19 @@ pub fn dispatch_pointer_drag(world: &mut World, q: &PickQuery) -> bool {
     dispatch_pointer(world, hit, q.viewport_pos, PointerPhase::Drag)
 }
 
+/// Deliver a wheel/trackpad scroll to whatever is under `q`.
+///
+/// Focus is deliberately untouched — scrolling over a widget is not an
+/// interaction with it. Bubbling does the rest: a scroll container that is
+/// already pinned at its end returns `false`, so the delta continues to the
+/// next scrollable ancestor (CSS scroll chaining).
+pub fn dispatch_pointer_scroll(world: &mut World, q: &PickQuery, delta: [f32; 2]) -> bool {
+    let Some(hit) = pick_entity(world, q) else {
+        return false;
+    };
+    dispatch_pointer(world, hit, q.viewport_pos, PointerPhase::Scroll { delta })
+}
+
 /// Messages produced from inside the world, waiting to reach the reducer.
 ///
 /// Clicks can hand their message straight back to the caller

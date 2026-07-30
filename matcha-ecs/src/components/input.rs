@@ -103,12 +103,24 @@ impl ImeDispatch {
 pub struct ImeCursorArea(pub [f32; 4]);
 
 /// What a pointer is doing, for [`PointerDispatch`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PointerPhase {
     /// Button went down. `count` is 1 for a single click, 2 for a double, ...
     Press { count: u32 },
     /// Button held and moved since the press.
     Drag,
+    /// Wheel or trackpad scroll. `delta` is in **pixels** — `matcha-window`
+    /// has already normalised a line-based delta by its lines-to-pixels
+    /// factor, so the two are indistinguishable here.
+    ///
+    /// The sign is winit's: a positive `y` means scrolling *up*, i.e. the
+    /// content should move down, so a scroll container subtracts the delta
+    /// from its offset.
+    ///
+    /// A handler that cannot move any further should return `false` so the
+    /// event bubbles to the next scrollable ancestor — that is what produces
+    /// CSS-style scroll chaining.
+    Scroll { delta: [f32; 2] },
 }
 
 /// A pointer event in the receiving entity's own coordinate space.
