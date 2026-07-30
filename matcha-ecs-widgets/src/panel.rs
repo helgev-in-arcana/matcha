@@ -19,7 +19,7 @@ use nalgebra::{Matrix4, Vector3};
 
 use matcha_ecs::{
     components::{
-        layout::GlobalTransform,
+        layout::{Clip, GlobalTransform},
         render::{RenderCtx, RenderItem},
         view::Key,
     },
@@ -55,6 +55,7 @@ pub struct Panel {
     background_color: [f32; 4],
     border_color: [f32; 4],
     border_width: f32,
+    clip: bool,
 }
 
 impl Panel {
@@ -66,7 +67,20 @@ impl Panel {
             background_color: [0.0, 0.0, 0.0, 0.0],
             border_color: [0.5, 0.5, 0.55, 1.0],
             border_width: 0.0,
+            clip: false,
         }
+    }
+
+    /// Confine drawing (and clicking) to this panel's box — CSS
+    /// `overflow: hidden`. A child laid out larger than the panel, or offset
+    /// past its edge, is cut off instead of spilling over.
+    ///
+    /// Layout is unaffected: the child still measures and arranges exactly as
+    /// it would without this, it simply does not paint outside. Clipping is to
+    /// the panel's outer box, border included.
+    pub fn clip(mut self, clip: bool) -> Self {
+        self.clip = clip;
+        self
     }
 
     /// Override the default transparent background (components in `0.0..=1.0`).
@@ -106,6 +120,17 @@ impl Panel {
             border_color: self.border_color,
         }
     }
+
+    /// `Clip` is a marker with no data, so it can't live in `bundle()`'s fixed
+    /// return type conditionally — it is inserted and removed here instead, on
+    /// spawn and on every patch, so toggling `.clip(..)` takes effect.
+    fn sync_clip(&self, entity: &mut EntityWorldMut) {
+        if self.clip {
+            entity.insert(Clip);
+        } else {
+            entity.remove::<Clip>();
+        }
+    }
 }
 
 /// Build a `RenderItem` compositing the border box with an inset background
@@ -141,7 +166,12 @@ impl Widget for Panel {
         )
     }
 
+    fn after_spawn(&self, entity: &mut EntityWorldMut) {
+        self.sync_clip(entity);
+    }
+
     fn patch(&self, entity: &mut EntityWorldMut) {
+        self.sync_clip(entity);
         let mut changed = false;
         if let Some(mut l) = entity.get_mut::<PanelLayout>() {
             changed |= l.set_if_neq(self.layout());

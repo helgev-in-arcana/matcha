@@ -1,3 +1,4 @@
+pub mod clip;
 pub mod components;
 pub mod focus;
 pub mod input;

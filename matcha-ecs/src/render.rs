@@ -19,13 +19,16 @@ use gpu_utils::texture_atlas::TextureAtlas;
 use matcha_window::window::WindowId;
 use nalgebra::Matrix4;
 use parking_lot::{Condvar, Mutex};
-use renderer::{CoreRenderer, FlatItem, RenderNode};
+use renderer::{CoreRenderer, FlatItem, MaskNode, RenderNode};
 
-use crate::components::{
-    focus::{FocusWithin, Focused},
-    layout::{GlobalTransform, LayoutOutput},
-    render::{RenderCtx, RenderItem, RenderOpacity},
-    view::ViewChildren,
+use crate::{
+    clip::ClipArena,
+    components::{
+        focus::{FocusWithin, Focused},
+        layout::{Clip, GlobalTransform, LayoutOutput},
+        render::{RenderCtx, RenderItem, RenderOpacity},
+        view::ViewChildren,
+    },
 };
 
 /// One drawable entity captured for a frame: the shared node cache, its deferred
@@ -41,6 +44,18 @@ pub struct RenderItemSnapshot {
     pub opacity: f32,
     pub focused: bool,
     pub focus_within: bool,
+    /// Innermost enclosing clip, as an index into the frame's [`ClipArena`].
+    /// The clips it inherits are that one's ancestors.
+    pub clip: Option<u32>,
+}
+
+/// One window's drawable entities plus the clips they sit inside, in paint
+/// order. Both come out of the same walk: a clip is only meaningful relative to
+/// the items it encloses.
+#[derive(Default)]
+pub struct ExtractedFrame {
+    pub items: Vec<RenderItemSnapshot>,
+    pub clips: ClipArena,
 }
 
 /// Everything a [`RenderDriver`] needs to draw one window's frame. Owns the
@@ -53,6 +68,9 @@ pub struct RenderSnapshot {
     pub viewport_size: [f32; 2],
     pub load_color: wgpu::Color,
     pub items: Vec<RenderItemSnapshot>,
+    /// The frame's clips, already paired with their coverage image. Indices in
+    /// [`RenderItemSnapshot::clip`] point into this.
+    pub clips: Vec<MaskNode>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub core: Arc<CoreRenderer>,
@@ -60,49 +78,63 @@ pub struct RenderSnapshot {
     pub stencil_atlas: Arc<TextureAtlas>,
 }
 
-/// Depth-first (paint order) collection of a window root's drawable entities.
-/// Clones each entity's `RenderItem` (the `cache`/`builder` `Arc`s are shared,
-/// not deep-copied) and its `GlobalTransform`; the builder is not invoked here.
-pub fn extract_items(world: &World, root_entity: Entity) -> Vec<RenderItemSnapshot> {
-    let mut out = Vec::new();
-    extract_recursive(world, root_entity, &mut out);
+/// Depth-first (paint order) collection of a window root's drawable entities
+/// and the clips enclosing them. Clones each entity's `RenderItem` (the
+/// `cache`/`builder` `Arc`s are shared, not deep-copied) and its
+/// `GlobalTransform`; the builder is not invoked here.
+pub fn extract_items(world: &World, root_entity: Entity) -> ExtractedFrame {
+    let mut out = ExtractedFrame::default();
+    extract_recursive(world, root_entity, None, &mut out);
     out
 }
 
-fn extract_recursive(world: &World, entity: Entity, out: &mut Vec<RenderItemSnapshot>) {
+/// `clip` is the innermost clip enclosing `entity`'s children — including one
+/// `entity` itself may have declared.
+fn extract_recursive(
+    world: &World,
+    entity: Entity,
+    clip: Option<u32>,
+    out: &mut ExtractedFrame,
+) {
     let Some(view_children) = world.get::<ViewChildren>(entity) else {
         return;
     };
     let children: Vec<Entity> = view_children.slots.iter().map(|(_, e)| *e).collect();
 
     for child in children {
-        if let (Some(item), Some(transform)) = (
-            world.get::<RenderItem>(child),
-            world.get::<GlobalTransform>(child),
-        ) {
+        // `LayoutOutput` is written by the same `arrange_child` call that writes
+        // `GlobalTransform`, so both are present on every laid-out entity;
+        // `[0.0, 0.0]` only for one carrying a hand-inserted transform.
+        let transform = world.get::<GlobalTransform>(child).map(|t| t.affine);
+        let size = world
+            .get::<LayoutOutput>(child)
+            .map(|l| l.size)
+            .unwrap_or([0.0, 0.0]);
+
+        // A `Clip` covers the declaring entity too, not only its descendants,
+        // so it is opened before the entity's own item is pushed.
+        let child_clip = match (world.get::<Clip>(child).is_some(), transform) {
+            (true, Some(transform)) => Some(out.clips.push(clip, transform, size)),
+            _ => clip,
+        };
+
+        if let (Some(item), Some(transform)) = (world.get::<RenderItem>(child), transform) {
             let opacity = world
                 .get::<RenderOpacity>(child)
                 .map(|o| o.0)
                 .unwrap_or(1.0);
-            // `LayoutOutput` is written by the same `arrange_child` call that
-            // writes `GlobalTransform` (which gated this branch), so it is
-            // present on every laid-out entity; `[0.0, 0.0]` only for an
-            // entity that somehow carries a hand-inserted transform.
-            let size = world
-                .get::<LayoutOutput>(child)
-                .map(|l| l.size)
-                .unwrap_or([0.0, 0.0]);
-            out.push(RenderItemSnapshot {
+            out.items.push(RenderItemSnapshot {
                 cache: item.cache.clone(),
                 builder: item.builder.clone(),
-                transform: transform.affine,
+                transform,
                 size,
                 opacity,
                 focused: world.get::<Focused>(child).is_some(),
                 focus_within: world.get::<FocusWithin>(child).is_some(),
+                clip: child_clip,
             });
         }
-        extract_recursive(world, child, out);
+        extract_recursive(world, child, child_clip, out);
     }
 }
 
@@ -116,6 +148,7 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
         viewport_size,
         load_color,
         items,
+        clips,
         device,
         queue,
         core,
@@ -139,7 +172,11 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
             focus_within: item.focus_within,
         };
         let node = build_node(&item.cache, &item.builder, &ctx);
-        nodes.push(FlatItem::new(node, item.transform).with_alpha(item.opacity));
+        nodes.push(
+            FlatItem::new(node, item.transform)
+                .with_alpha(item.opacity)
+                .with_clip(item.clip),
+        );
     }
 
     let view = surface_texture
@@ -153,9 +190,7 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
         &view,
         viewport_size,
         &nodes,
-        // No clips yet: `Clip` and the arena that resolves it land in the next
-        // step. Every item is unclipped until then.
-        &[],
+        &clips,
         load_color,
         &texture_atlas.texture(),
         &stencil_atlas.texture(),

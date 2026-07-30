@@ -22,10 +22,13 @@
 use bevy_ecs::{entity::Entity, hierarchy::ChildOf, resource::Resource, world::World};
 use nalgebra::Point3;
 
-use crate::components::{
-    input::{Pickable, ZOrder},
-    layout::{GlobalTransform, LayoutOutput},
-    view::ViewChildren,
+use crate::{
+    clip::intersect,
+    components::{
+        input::{Pickable, ZOrder},
+        layout::{Clip, GlobalTransform, LayoutOutput},
+        view::ViewChildren,
+    },
 };
 
 /// One picking request. `viewport_pos` is the only input the OS actually gives
@@ -127,7 +130,7 @@ impl Picker for RectZPicker {
     fn update(&mut self, world: &World, root: Entity) {
         self.entries.clear();
         let mut next_order = 0;
-        collect(world, root, &mut self.entries, &mut next_order);
+        collect(world, root, None, &mut self.entries, &mut next_order);
         // Pre-sort so a query is a plain backward scan: no per-query
         // allocation and no per-query sort.
         self.entries
@@ -144,22 +147,54 @@ impl Picker for RectZPicker {
     }
 }
 
-fn collect(world: &World, entity: Entity, entries: &mut Vec<PickEntry>, next_order: &mut u32) {
-    if world.get::<Pickable>(entity).is_some() {
-        if let (Some(layout), Some(transform)) = (
-            world.get::<LayoutOutput>(entity),
-            world.get::<GlobalTransform>(entity),
-        ) {
-            let origin = transform.affine.transform_point(&Point3::origin());
+/// `clip` is the intersection of every [`Clip`] enclosing `entity`, in window
+/// space, or `None` when nothing encloses it.
+fn collect(
+    world: &World,
+    entity: Entity,
+    clip: Option<[f32; 4]>,
+    entries: &mut Vec<PickEntry>,
+    next_order: &mut u32,
+) {
+    let box_of = |entity: Entity| {
+        let layout = world.get::<LayoutOutput>(entity)?;
+        let transform = world.get::<GlobalTransform>(entity)?;
+        let origin = transform.affine.transform_point(&Point3::origin());
+        Some([
+            origin.x,
+            origin.y,
+            origin.x + layout.size[0],
+            origin.y + layout.size[1],
+        ])
+    };
+
+    // A `Clip` covers the declaring entity as well as its descendants, so it
+    // narrows this entity's own rectangle before it is recorded.
+    let clip = match (world.get::<Clip>(entity).is_some(), box_of(entity)) {
+        (true, Some(own)) => match clip {
+            Some(outer) => match intersect(outer, own) {
+                Some(narrowed) => Some(narrowed),
+                // Entirely clipped away: nothing here or below can be picked.
+                None => return,
+            },
+            None => Some(own),
+        },
+        _ => clip,
+    };
+
+    if world.get::<Pickable>(entity).is_some()
+        && let Some(rect) = box_of(entity)
+    {
+        // A widget only partly visible stays pickable over the visible part.
+        let visible = match clip {
+            Some(clip) => intersect(rect, clip),
+            None => Some(rect),
+        };
+        if let Some(rect) = visible {
             let z = world.get::<ZOrder>(entity).map(|z| z.0).unwrap_or(0);
             entries.push(PickEntry {
                 entity,
-                rect: [
-                    origin.x,
-                    origin.y,
-                    origin.x + layout.size[0],
-                    origin.y + layout.size[1],
-                ],
+                rect,
                 z,
                 order: *next_order,
             });
@@ -169,7 +204,7 @@ fn collect(world: &World, entity: Entity, entries: &mut Vec<PickEntry>, next_ord
 
     if let Some(children) = world.get::<ViewChildren>(entity) {
         for &(_, child) in &children.slots {
-            collect(world, child, entries, next_order);
+            collect(world, child, clip, entries, next_order);
         }
     }
 }

@@ -184,10 +184,21 @@ fn mask_coverage(mask: MaskData, screen_pos: vec2<f32>) -> f32 {
 
     // Outside the mask quad is REJECTED, not clamped. Clamping would let a
     // stretched mask report full coverage everywhere beyond its own edge,
-    // which is precisely the opposite of clipping. The tolerance is half a
-    // texel of the mask's own atlas region expressed in local units, so a
-    // fragment sitting exactly on the boundary is not dropped by rounding.
-    let tolerance = pc.stencil_atlas_half_texel / max(mask.in_atlas_size, vec2<f32>(1e-9));
+    // which is precisely the opposite of clipping.
+    //
+    // The tolerance guards against floating-point error only, so it is a tiny
+    // fraction of a pixel — NOT half a pixel, which would admit the whole
+    // neighbouring pixel and widen every clip by one pixel on each side. A
+    // fragment centre sits half a pixel inside the boundary at the closest, so
+    // there is no rounding to absorb beyond that.
+    //
+    // It is expressed relative to a SCREEN pixel rather than to a texel of the
+    // coverage image, which matters because a rectangular clip is drawn with a
+    // single texel stretched over its whole box — one texel there is the whole
+    // quad. The columns of `mask_from_screen` are its derivatives with respect
+    // to screen x and y; summing their magnitudes covers the diagonal case.
+    let per_pixel = (abs(mask.mask_from_screen[0].xy) + abs(mask.mask_from_screen[1].xy)) / h.z;
+    let tolerance = 1e-3 * per_pixel;
     if (any(local_uv < -tolerance) || any(local_uv > 1.0 + tolerance)) {
         return 0.0;
     }

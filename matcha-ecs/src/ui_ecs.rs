@@ -34,7 +34,7 @@ use matcha_window::{
     },
     window::{Window as OsWindow, WindowConfig, WindowId},
 };
-use renderer::CoreRenderer;
+use renderer::{CoreRenderer, MaskNode};
 
 use crate::{
     components::{
@@ -48,7 +48,9 @@ use crate::{
     model::{ModelHandle, ModelResource},
     pick::{update_picker, PickQuery, Picker, PickerResource},
     render::{build_and_present, extract_items, RenderDriver, RenderSnapshot, ThreadDriver},
-    resources::{FrameTime, GpuResource, RedrawRequest, RenderWindowRoot, RendererResource},
+    resources::{
+        ClipMask, FrameTime, GpuResource, RedrawRequest, RenderWindowRoot, RendererResource,
+    },
     view::{run_view, Scope},
 };
 
@@ -450,7 +452,8 @@ where
             }
         };
 
-        let items = extract_items(&self.world, root_entity);
+        let frame = extract_items(&self.world, root_entity);
+        let clips = self.resolve_clips(&frame.clips, &device, &queue, &stencil_atlas);
 
         Some(RenderSnapshot {
             window_id,
@@ -463,13 +466,60 @@ where
                 b: 0.1,
                 a: 1.0,
             },
-            items,
+            items: frame.items,
+            clips,
             device,
             queue,
             core,
             texture_atlas,
             stencil_atlas,
         })
+    }
+
+    /// Pair each extracted clip rectangle with the shared coverage texel,
+    /// allocating that texel on first use.
+    ///
+    /// Extraction is deliberately GPU-free (which is what makes clipping
+    /// headlessly testable), so attaching the image happens here — this is the
+    /// only place holding the device, queue and atlas. Same lazy-insert pattern
+    /// the text and image widgets use for their own caches.
+    fn resolve_clips(
+        &mut self,
+        clips: &crate::clip::ClipArena,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stencil_atlas: &TextureAtlas,
+    ) -> Vec<MaskNode> {
+        if clips.is_empty() {
+            return Vec::new();
+        }
+
+        if self.world.get_resource::<ClipMask>().is_none() {
+            match stencil_atlas.allocate(device, queue, [1, 1]) {
+                Ok(region) => {
+                    if let Err(e) = region.write_data(queue, &[0xff]) {
+                        log::error!("failed to write the shared clip coverage texel: {e}");
+                        return Vec::new();
+                    }
+                    self.world.insert_resource(ClipMask { region });
+                }
+                Err(e) => {
+                    log::error!("failed to allocate the shared clip coverage texel: {e}");
+                    return Vec::new();
+                }
+            }
+        }
+
+        let region = self.world.resource::<ClipMask>().region.clone();
+        clips
+            .as_slice()
+            .iter()
+            .map(|rect| MaskNode {
+                parent: rect.parent,
+                transform: rect.transform,
+                region: region.clone(),
+            })
+            .collect()
     }
 
     /// Advance animation/layout and build this frame's snapshot for

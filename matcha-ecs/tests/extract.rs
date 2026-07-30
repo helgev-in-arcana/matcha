@@ -44,7 +44,7 @@ fn extract_collects_leaves_in_paint_order_with_window_space_transforms() {
     let [rect_a, row]: [Entity; 2] = children(&world, column).try_into().unwrap();
     let [rect_b, rect_c]: [Entity; 2] = children(&world, row).try_into().unwrap();
 
-    let items = extract_items(&world, root);
+    let items = extract_items(&world, root).items;
 
     // (a) paint order: containers contribute nothing, three leaves in DFS order.
     assert_eq!(items.len(), 3, "only the three ColorRect leaves are drawable");

@@ -55,7 +55,7 @@ fn stretch_row_snapshot_sizes_match_the_allocated_not_declared_sizes() {
     });
     layout_root(&mut world, root, Constraints::from_max_size([800.0, 600.0]));
 
-    let items = extract_items(&world, root);
+    let items = extract_items(&world, root).items;
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].size, [36.0, 70.0]);
     assert_eq!(
@@ -99,7 +99,7 @@ fn every_snapshot_size_equals_the_entitys_layout_output_size() {
     let mut layout_sizes = Vec::new();
     collect_sizes(&world, root, &mut layout_sizes);
 
-    let items = extract_items(&world, root);
+    let items = extract_items(&world, root).items;
     assert_eq!(items.len(), layout_sizes.len());
     for (item, expected) in items.iter().zip(&layout_sizes) {
         assert_eq!(&item.size, expected, "snapshot size must equal LayoutOutput::size");
@@ -128,7 +128,7 @@ fn stretched_panel_draws_at_its_allocated_size_and_contains_its_centred_child() 
     layout_root(&mut world, root, Constraints::from_max_size([800.0, 600.0]));
 
     // DFS order: wide panel, its child, tall panel, its child.
-    let items = extract_items(&world, root);
+    let items = extract_items(&world, root).items;
     assert_eq!(items.len(), 4);
     let (wide_panel, wide_child, tall_panel, tall_child) =
         (&items[0], &items[1], &items[2], &items[3]);
