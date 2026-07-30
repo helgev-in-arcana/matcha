@@ -99,9 +99,13 @@ fn create_compute_pipeline(
 // ---------------------------------------------------------------------------
 
 /// Per-instance visibility test (`renderer_cull.wgsl`): writes a 0/1 flag per
-/// instance into `visibility_flags`. Currently every instance is flagged
-/// visible (the geometric test has a known bug and is bypassed in the shader;
-/// see the TODO there).
+/// instance into `visibility_flags`.
+///
+/// The test is a separating-axis check of the instance's quad against the
+/// viewport and against every mask in its chain. It is conservative — a quad
+/// is kept whenever emptiness cannot be proven, and a degenerate mask is
+/// skipped so it cannot cull something the render pass would still draw.
+/// Covered on a real GPU by `visibility_stage_culls_correctly`.
 pub(crate) struct VisibilityStage {
     pipeline: wgpu::ComputePipeline,
 }
