@@ -32,7 +32,7 @@
 //!   does not have yet. Enter therefore inserts a newline by default and
 //!   confirmation is bound to Ctrl+Enter — see
 //!   [`confirm_key`](TextBox::confirm_key) to change that.
-//! - **Overflow is culled per glyph**, not clipped: a glyph falling outside the
+//! - **Overflow is clipped** by the `Clip` marker on the widget's own entity: the
 //!   content box is dropped rather than cut, so one straddling the edge pops
 //!   instead of sliding.
 //! - No clipboard (a separate delivery path — what is pasted is not necessarily
@@ -59,7 +59,7 @@ use matcha_ecs::{
             ImeCursorArea, ImeDispatch, KeyDispatch, Message, Pickable, PointerDispatch,
             PointerInput, PointerPhase,
         },
-        layout::GlobalTransform,
+        layout::{Clip, GlobalTransform},
         render::{RenderCtx, RenderItem},
         view::Key,
     },
@@ -422,6 +422,9 @@ impl<Msg: Message> Widget for TextBox<Msg> {
             CaretPhase::default(),
             DrawnGeneration::default(),
             (
+                // A text box paints its own glyphs, so it has to clip itself,
+                // not merely its children.
+                Clip,
                 Pickable,
                 // A text box owns its subtree for focus purposes: decorative
                 // children must never take the vertex away from it.
@@ -959,7 +962,6 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
         );
 
         let inset = style.border_width + style.padding;
-        let inner_h = (h - inset * 2.0).max(0.0);
         let scroll = live.scroll();
 
         let editor = editor.lock();
@@ -967,19 +969,13 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
             return node;
         };
 
-        // v1 has no clipping, so anything outside the content box is dropped
-        // rather than cut off.
-        let visible = |y0: f32, y1: f32| y1 - scroll > 0.0 && y0 - scroll < inner_h;
         let place = |x: f32, y: f32| {
             Matrix4::new_translation(&Vector3::new(inset + x, inset + y - scroll, 0.0))
         };
 
         // Selection sits under the glyphs.
         for (rect, _line) in editor.selection_geometry() {
-            let (y0, y1) = (rect.y0 as f32, rect.y1 as f32);
-            if !visible(y0, y1) {
-                continue;
-            }
+            let y0 = rect.y0 as f32;
             let Some(tint) = paint_tint_region(ctx, style.selection_color) else {
                 continue;
             };
@@ -997,18 +993,15 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
         );
 
         if ctx.focused && live.caret_visible() {
-            if let Some(caret) = editor.cursor_geometry(CARET_WIDTH) {
-                let (y0, y1) = (caret.y0 as f32, caret.y1 as f32);
-                if visible(y0, y1) {
-                    if let Some(tint) = paint_tint_region(ctx, style.caret_color) {
-                        let caret_node = RenderNode::new().with_texture(
-                            tint,
-                            [caret.width() as f32, caret.height() as f32],
-                            Matrix4::identity(),
-                        );
-                        node.push_child(caret_node, place(caret.x0 as f32, y0));
-                    }
-                }
+            if let Some(caret) = editor.cursor_geometry(CARET_WIDTH)
+                && let Some(tint) = paint_tint_region(ctx, style.caret_color)
+            {
+                let caret_node = RenderNode::new().with_texture(
+                    tint,
+                    [caret.width() as f32, caret.height() as f32],
+                    Matrix4::identity(),
+                );
+                node.push_child(caret_node, place(caret.x0 as f32, caret.y0 as f32));
             }
         }
 
