@@ -50,6 +50,22 @@ impl std::fmt::Debug for Constraints {
 }
 
 impl Constraints {
+    /// A max that stands in for "no upper bound on this axis".
+    ///
+    /// `Constraints` stores quantized `u32`, so a true infinity is not
+    /// representable — and `f32::INFINITY`/`f32::MAX` would saturate the
+    /// quantizer rather than round-trip. `2^20` px is a sixteenth of what the
+    /// quantizer can hold (`u32::MAX / SUB_PIXEL_QUANTIZE`, ~16.7M px) and is
+    /// exact through it, while being far larger than any content a layout will
+    /// legitimately produce.
+    ///
+    /// Used by a scrolling container to measure its content at its natural
+    /// size on the axis it scrolls. Note that a widget which *wraps* to the
+    /// incoming max (`Text`/`RichText` take their wrap width from
+    /// `max_width()`) will not wrap at all on an axis measured this way — pass
+    /// it only on the axis that genuinely scrolls.
+    pub const UNBOUNDED: f32 = (1u32 << 20) as f32;
+
     /// `[min, max]` for each axis.
     pub fn new(width: [f32; 2], height: [f32; 2]) -> Self {
         if width[0] < 0.0 || width[0] > width[1] || height[0] < 0.0 || height[0] > height[1] {
