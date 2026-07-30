@@ -168,6 +168,64 @@ struct RenderPushConstants {
     stencil_atlas_half_texel: [f32; 2],
 }
 
+/// A clip declared by the UI tree: a mask that applies to an entity *and
+/// everything nested inside it*.
+///
+/// Clips form their own small tree, kept as an arena rather than by nesting
+/// [`RenderNode`]s, because a frame is handed to the renderer as a flat list of
+/// per-entity trees — the ancestor relationship between two entities is simply
+/// not expressible in that shape. A `MaskNode` is transformed and sampled
+/// exactly like a texture; nothing distinguishes it from an object's own
+/// coverage mask once both reach the GPU.
+#[derive(Clone, Debug)]
+pub struct MaskNode {
+    /// Enclosing clip, if any. Always a **smaller index** than this node's own,
+    /// so the chain from any node up to its root can be collected by following
+    /// parents without a cycle check.
+    pub parent: Option<u32>,
+    /// Unit quad -> UI space, in the same convention and units as a texture's
+    /// position.
+    pub transform: nalgebra::Matrix4<f32>,
+    /// Coverage image. Single-channel; only the red channel is read.
+    pub region: texture_atlas::AtlasRegion,
+}
+
+/// One entry of a frame: a render tree, where to put it, and the state that
+/// applies to everything it draws.
+#[derive(Clone)]
+pub struct FlatItem {
+    pub node: Arc<RenderNode>,
+    /// Node-local space -> UI space.
+    pub transform: nalgebra::Matrix4<f32>,
+    /// The innermost clip this item sits inside, as an index into the `masks`
+    /// slice passed alongside. The clips it inherits are that node's ancestors.
+    pub clip: Option<u32>,
+    /// Draw-time opacity applied to everything the tree draws.
+    pub alpha: f32,
+}
+
+impl FlatItem {
+    /// An unclipped, fully opaque item — the common case.
+    pub fn new(node: Arc<RenderNode>, transform: nalgebra::Matrix4<f32>) -> Self {
+        Self {
+            node,
+            transform,
+            clip: None,
+            alpha: 1.0,
+        }
+    }
+
+    pub fn with_clip(mut self, clip: Option<u32>) -> Self {
+        self.clip = clip;
+        self
+    }
+
+    pub fn with_alpha(mut self, alpha: f32) -> Self {
+        self.alpha = alpha;
+        self
+    }
+}
+
 pub struct CoreRenderer {
     inner: parking_lot::RwLock<CoreRendererInner>,
 }
@@ -224,7 +282,8 @@ impl CoreRenderer {
         surface_format: wgpu::TextureFormat,
         destination_view: &wgpu::TextureView,
         destination_size: [f32; 2],
-        items: &[(Arc<RenderNode>, nalgebra::Matrix4<f32>)],
+        items: &[FlatItem],
+        clips: &[MaskNode],
         load_color: wgpu::Color,
         texture_atlas: &wgpu::Texture,
         stencil_atlas: &wgpu::Texture,
@@ -237,6 +296,7 @@ impl CoreRenderer {
             destination_view,
             destination_size,
             items,
+            clips,
             load_color,
             texture_atlas,
             stencil_atlas,
@@ -603,8 +663,11 @@ impl CoreRendererInner {
 
     /// Flat variant of [`render`](Self::render): renders several already
     /// window-space-transformed render trees (paint order) in a single frame.
-    /// Used by the M4 render-thread path, which extracts one `(RenderNode,
-    /// transform)` per widget entity instead of building a pseudo root.
+    /// Used by the M4 render-thread path, which extracts one [`FlatItem`] per
+    /// widget entity instead of building a pseudo root.
+    ///
+    /// `clips` is the frame's clip arena; an item names the innermost clip it
+    /// sits inside and inherits that clip's ancestors. See [`MaskNode`].
     #[allow(clippy::too_many_arguments)]
     pub fn render_flat(
         &self,
@@ -613,13 +676,18 @@ impl CoreRendererInner {
         surface_format: wgpu::TextureFormat,
         destination_view: &wgpu::TextureView,
         destination_size: [f32; 2],
-        items: &[(Arc<RenderNode>, nalgebra::Matrix4<f32>)],
+        items: &[FlatItem],
+        clips: &[MaskNode],
         load_color: wgpu::Color,
         texture_atlas: &wgpu::Texture,
         stencil_atlas: &wgpu::Texture,
     ) -> Result<(), TextureValidationError> {
-        let frame =
-            create_flat_frame(items, texture_atlas.format(), stencil_atlas.format())?;
+        let frame = create_flat_frame(
+            items,
+            clips,
+            texture_atlas.format(),
+            stencil_atlas.format(),
+        )?;
 
         self.render_instances(
             device,
@@ -920,6 +988,14 @@ struct Flattener {
     out: FlatFrame,
     texture_atlas_id: Option<texture_atlas::TextureAtlasId>,
     mask_atlas_id: Option<texture_atlas::TextureAtlasId>,
+    /// The chain most recently appended to `mask_indices`. Siblings under one
+    /// clip are painted consecutively and share a chain, so this one-entry
+    /// cache collapses the common run without hashing anything.
+    last_chain: Option<(u32, u32)>,
+    /// Longest chain emitted this frame, for the debug log.
+    max_chain_len: usize,
+    /// Opacity of the item currently being walked; constant for its whole tree.
+    alpha: f32,
 }
 
 impl Flattener {
@@ -934,7 +1010,39 @@ impl Flattener {
             },
             texture_atlas_id: None,
             mask_atlas_id: None,
+            last_chain: None,
+            max_chain_len: 0,
+            alpha: 1.0,
         }
+    }
+
+    /// Register the frame's clips, returning the resolved root-to-leaf mask
+    /// chain for each one.
+    ///
+    /// Relies on a parent always preceding its child, which [`MaskNode::parent`]
+    /// guarantees, so one forward pass suffices and no cycle can form.
+    fn register_clips(
+        &mut self,
+        clips: &[MaskNode],
+    ) -> Result<Vec<Vec<u32>>, TextureValidationError> {
+        let mut chains: Vec<Vec<u32>> = Vec::with_capacity(clips.len());
+        for (i, clip) in clips.iter().enumerate() {
+            let index = self.push_mask(&clip.region, clip.transform)?;
+            let mut chain = match clip.parent {
+                Some(parent) if (parent as usize) < i => chains[parent as usize].clone(),
+                Some(parent) => {
+                    warn!(
+                        "CoreRenderer: clip {i} references parent {parent}, which is not \
+                         an earlier clip; treating it as a root"
+                    );
+                    Vec::new()
+                }
+                None => Vec::new(),
+            };
+            chain.push(index);
+            chains.push(chain);
+        }
+        Ok(chains)
     }
 
     /// Record a mask quad and return its index.
@@ -974,29 +1082,43 @@ impl Flattener {
 
     /// Append a chain to `mask_indices` and return its `(offset, count)`.
     fn push_chain(&mut self, chain: &[u32]) -> (u32, u32) {
+        self.max_chain_len = self.max_chain_len.max(chain.len());
+        if chain.is_empty() {
+            return (0, 0);
+        }
+        if let Some((offset, count)) = self.last_chain
+            && count as usize == chain.len()
+            && self.out.mask_indices[offset as usize..][..chain.len()] == *chain
+        {
+            return (offset, count);
+        }
         let offset = self.out.mask_indices.len() as u32;
         self.out.mask_indices.extend_from_slice(chain);
-        (offset, chain.len() as u32)
+        let entry = (offset, chain.len() as u32);
+        self.last_chain = Some(entry);
+        entry
     }
 
-    /// Walk one tree. `chain` is the mask chain inherited from enclosing scopes.
+    /// Walk one tree. `inherited` is the chain of clips enclosing it.
     fn walk(
         &mut self,
         object: &RenderNode,
         transform: nalgebra::Matrix4<f32>,
-        chain: &[u32],
+        inherited: &[u32],
     ) -> Result<(), TextureValidationError> {
-        // Current semantics, preserved: a node's own mask replaces whatever it
-        // inherited and also applies to its subtree. Tightening this to
-        // "self only" is a later step; today the only caller is a childless
-        // glyph node, so the two are indistinguishable.
-        let mut own = None;
-        if let Some((mask, mask_position)) = &object.stencil() {
-            own = Some(self.push_mask(mask, transform * mask_position)?);
-        }
-        let chain: &[u32] = match &own {
-            Some(index) => std::slice::from_ref(index),
-            None => chain,
+        // A node's own mask covers that node alone (see `RenderNode::with_stencil`);
+        // only the enclosing clips carry down to children. Appending it here
+        // rather than in the child recursion is what expresses that.
+        let mut own_chain;
+        let chain: &[u32] = match object.stencil() {
+            Some((mask, mask_position)) => {
+                let index = self.push_mask(mask, transform * mask_position)?;
+                own_chain = Vec::with_capacity(inherited.len() + 1);
+                own_chain.extend_from_slice(inherited);
+                own_chain.push(index);
+                &own_chain
+            }
+            None => inherited,
         };
 
         if let Some((texture, texture_position)) = &object.texture() {
@@ -1017,7 +1139,7 @@ impl Flattener {
             self.out.instances.push(InstanceData {
                 viewport_position: transform * texture_position,
                 atlas_page: page,
-                alpha: 1.0,
+                alpha: self.alpha,
                 in_atlas_offset: [position_in_atlas.min.x, position_in_atlas.min.y],
                 in_atlas_size: [position_in_atlas.width(), position_in_atlas.height()],
                 mask_offset,
@@ -1033,18 +1155,41 @@ impl Flattener {
     }
 }
 
-/// Flatten several `(render tree, window-space transform)` pairs into a single
-/// frame. Each root is walked with its own transform; the shared atlas-id checks
-/// still apply across all roots.
+/// Flatten a frame's items and clips into the GPU-side arrays. Each item is
+/// walked with its own transform; the shared atlas-id checks apply across all
+/// of them.
 fn create_flat_frame(
-    items: &[(Arc<RenderNode>, nalgebra::Matrix4<f32>)],
+    items: &[FlatItem],
+    clips: &[MaskNode],
     texture_format: wgpu::TextureFormat,
     mask_format: wgpu::TextureFormat,
 ) -> Result<FlatFrame, TextureValidationError> {
     let mut flattener = Flattener::new(texture_format, mask_format);
-    for (node, transform) in items {
-        flattener.walk(node, *transform, &[])?;
+    let clip_chains = flattener.register_clips(clips)?;
+
+    const NO_CLIP: &[u32] = &[];
+    for item in items {
+        let inherited = match item.clip {
+            Some(clip) => clip_chains.get(clip as usize).map_or_else(
+                || {
+                    warn!("CoreRenderer: item references clip {clip}, which does not exist");
+                    NO_CLIP
+                },
+                Vec::as_slice,
+            ),
+            None => NO_CLIP,
+        };
+        flattener.alpha = item.alpha;
+        flattener.walk(&item.node, item.transform, inherited)?;
     }
+
+    debug!(
+        "CoreRenderer: flattened {} instances, {} masks, {} chain entries, deepest chain {}",
+        flattener.out.instances.len(),
+        flattener.out.masks.len(),
+        flattener.out.mask_indices.len(),
+        flattener.max_chain_len,
+    );
     Ok(flattener.out)
 }
 

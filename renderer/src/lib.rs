@@ -1,5 +1,5 @@
 pub mod core_renderer;
-pub use core_renderer::CoreRenderer;
+pub use core_renderer::{CoreRenderer, FlatItem, MaskNode};
 pub mod pipeline_cache;
 pub mod render_node;
 pub use render_node::RenderNode;

@@ -19,7 +19,7 @@ use gpu_utils::texture_atlas::TextureAtlas;
 use matcha_window::window::WindowId;
 use nalgebra::Matrix4;
 use parking_lot::{Condvar, Mutex};
-use renderer::{CoreRenderer, RenderNode};
+use renderer::{CoreRenderer, FlatItem, RenderNode};
 
 use crate::components::{
     focus::{FocusWithin, Focused},
@@ -123,7 +123,7 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
         stencil_atlas,
     } = snapshot;
 
-    let mut nodes: Vec<(Arc<RenderNode>, Matrix4<f32>)> = Vec::with_capacity(items.len());
+    let mut nodes: Vec<FlatItem> = Vec::with_capacity(items.len());
     for item in &items {
         // Opacity varies per item (M7), so `RenderCtx` is built fresh per item
         // rather than shared across the loop.
@@ -138,7 +138,7 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
             focus_within: item.focus_within,
         };
         let node = build_node(&item.cache, &item.builder, &ctx);
-        nodes.push((node, item.transform));
+        nodes.push(FlatItem::new(node, item.transform));
     }
 
     let view = surface_texture
@@ -152,6 +152,9 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
         &view,
         viewport_size,
         &nodes,
+        // No clips yet: `Clip` and the arena that resolves it land in the next
+        // step. Every item is unclipped until then.
+        &[],
         load_color,
         &texture_atlas.texture(),
         &stencil_atlas.texture(),
