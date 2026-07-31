@@ -348,14 +348,11 @@ pub fn scroll_view(s: &mut Scope, view: ScrollView, content: impl FnOnce(&mut Sc
 /// Pointer handling for the viewport itself: the wheel, and continuing a thumb
 /// drag.
 ///
-/// Dragging is handled here rather than on the thumb because the viewport stays
-/// under the pointer when the cursor wanders off a thumb only a few pixels
-/// wide. The thumb records where it was grabbed; the rest happens here.
-///
-/// Known limitation: a drag that leaves the viewport entirely stops being
-/// delivered, because there is no pointer capture — dispatch always starts from
-/// whatever is under the cursor. Capture is a core facility this widget cannot
-/// add on its own.
+/// Dragging is handled here rather than on the thumb so that one implementation
+/// serves both; the thumb only records where it was grabbed. The press captures
+/// the pointer (`matcha_ecs::input::PointerCapture`), so the drag keeps
+/// arriving here for as long as the button is held, wherever in the window the
+/// cursor goes.
 fn on_pointer(entity: &mut EntityWorldMut, input: &PointerInput) -> bool {
     let Some(state) = entity.get::<ScrollState>().cloned() else {
         return false;

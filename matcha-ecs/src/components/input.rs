@@ -143,6 +143,12 @@ pub struct PointerInput {
 /// [`bubble_to_click_target`](crate::input::bubble_to_click_target): the event
 /// has a position, so the innermost entity containing it is the natural first
 /// responder.
+///
+/// Consuming a [`PointerPhase::Press`] also captures the pointer: every
+/// [`PointerPhase::Drag`] until the button is released is delivered from this
+/// entity, not from whatever the cursor is over by then (see
+/// [`PointerCapture`](crate::input::PointerCapture)). A handler therefore never
+/// has to check whether a drag it is offered actually belongs to it.
 #[derive(Component, Clone, Copy)]
 pub struct PointerDispatch {
     handle: fn(&mut EntityWorldMut, &PointerInput) -> bool,

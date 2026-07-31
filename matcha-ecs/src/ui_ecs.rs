@@ -44,7 +44,8 @@ use crate::{
     },
     focus::{run_validate_focus, sync_focus_components, Focus, FocusConfig},
     input::{
-        dispatch_pointer_drag, dispatch_pointer_scroll, resolve_pointer_press, MessageQueue,
+        dispatch_pointer_drag, dispatch_pointer_scroll, resolve_pointer_press,
+        set_pointer_capture, MessageQueue,
     },
     keyboard::{dispatch_ime, dispatch_key, sync_ime_state},
     model::{ModelHandle, ModelResource},
@@ -763,6 +764,12 @@ where
         // move/release), so a hit is always a genuine new click.
         if let Some(count) = event.on_click(|count| count) {
             self.on_pointer_press(event.mouse_viewport_position(), count);
+        }
+
+        // Releasing the button ends the drag the press had captured, so the
+        // next one starts from whatever the next press lands on.
+        if event.on_click_released(|_count| ()).is_some() {
+            set_pointer_capture(&mut self.world, None);
         }
 
         // A drag continues an interaction a press already started (dragging out

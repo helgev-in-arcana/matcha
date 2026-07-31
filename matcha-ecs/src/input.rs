@@ -76,9 +76,12 @@ pub fn resolve_pointer_press<Msg: Message>(
     let focus_changed = focus_from_pick(world, hit);
 
     // After focus, so a widget's pointer handler can assume it already has it.
-    if let Some(hit) = hit {
-        dispatch_pointer(world, hit, q.viewport_pos, PointerPhase::Press { count });
-    }
+    // Whoever consumes the press owns the drag that may follow; if nobody does,
+    // the capture is cleared so no drag is delivered at all.
+    let consumed_by = hit.and_then(|hit| {
+        dispatch_pointer_from(world, hit, q.viewport_pos, PointerPhase::Press { count })
+    });
+    set_pointer_capture(world, consumed_by);
 
     PointerPress {
         click_msg,
@@ -97,12 +100,57 @@ pub fn pick_entity(world: &World, q: &PickQuery) -> Option<Entity> {
 ///
 /// Each candidate receives the position in **its own** coordinate space, so a
 /// handler never has to know where its entity sits on screen.
+/// Who owns the in-progress drag.
+///
+/// A drag has to keep going to whoever the *press* landed on, not to whatever
+/// happens to be under the cursor a moment later. Without this, dragging a
+/// scrollbar thumb stops the moment the cursor leaves the scroll box, and a
+/// drag that began on empty space starts selecting text as soon as it crosses a
+/// text box — both because delivery re-picked on every event.
+///
+/// This is the implicit capture a press establishes. It is set when a press is
+/// consumed, cleared when the button is released, and is deliberately *not*
+/// consulted for scrolling: a wheel event has no press behind it and belongs to
+/// whatever is under the pointer.
+#[derive(bevy_ecs::resource::Resource, Default, Debug, Clone, Copy)]
+pub struct PointerCapture(Option<Entity>);
+
+impl PointerCapture {
+    pub fn target(&self) -> Option<Entity> {
+        self.0
+    }
+}
+
+/// Record (or clear) the entity a drag should stay with.
+pub fn set_pointer_capture(world: &mut World, target: Option<Entity>) {
+    world
+        .get_resource_or_insert_with(PointerCapture::default)
+        .0 = target;
+}
+
+/// The entity currently owning a drag, if it is still alive.
+pub fn pointer_capture(world: &World) -> Option<Entity> {
+    let target = world.get_resource::<PointerCapture>()?.0?;
+    world.entities().contains(target).then_some(target)
+}
+
 pub fn dispatch_pointer(
     world: &mut World,
     from: Entity,
     window_pos: [f32; 2],
     phase: PointerPhase,
 ) -> bool {
+    dispatch_pointer_from(world, from, window_pos, phase).is_some()
+}
+
+/// As [`dispatch_pointer`], but reporting *which* entity consumed the event so
+/// a press can hand ownership of the drag that follows to it.
+pub fn dispatch_pointer_from(
+    world: &mut World,
+    from: Entity,
+    window_pos: [f32; 2],
+    phase: PointerPhase,
+) -> Option<Entity> {
     let candidates: Vec<Entity> = ancestors(world, from).collect();
 
     for entity in candidates {
@@ -124,20 +172,24 @@ pub fn dispatch_pointer(
             continue;
         };
         if dispatch.call(&mut entity_mut, &input) {
-            return true;
+            return Some(entity);
         }
     }
-    false
+    None
 }
 
-/// Deliver a drag to whatever is under `q`, if anything handles positioned
-/// pointer input. Focus and click routing are untouched: a drag continues an
-/// interaction that a press already started.
+/// Continue the drag the current press started.
+///
+/// Delivery goes to the captured entity rather than to whatever is under the
+/// cursor, so a drag stays with the widget it began on for as long as the
+/// button is held — anywhere in the window. A drag whose press was consumed by
+/// nobody has no owner and is simply dropped, which is what stops a drag begun
+/// on empty space from acting on every widget it happens to cross.
 pub fn dispatch_pointer_drag(world: &mut World, q: &PickQuery) -> bool {
-    let Some(hit) = pick_entity(world, q) else {
+    let Some(target) = pointer_capture(world) else {
         return false;
     };
-    dispatch_pointer(world, hit, q.viewport_pos, PointerPhase::Drag)
+    dispatch_pointer(world, target, q.viewport_pos, PointerPhase::Drag)
 }
 
 /// Deliver a wheel/trackpad scroll to whatever is under `q`.

@@ -16,9 +16,13 @@ use matcha_ecs::{
         layout::{GlobalTransform, LayoutOutput},
         view::ViewChildren,
     },
-    input::dispatch_pointer,
+    input::{
+        dispatch_pointer, dispatch_pointer_drag, pointer_capture, resolve_pointer_press,
+        set_pointer_capture,
+    },
     layout::{layout_root, Constraints},
-    pick::{PickQuery, Picker, RectZPicker},
+    pick::{PickQuery, Picker, PickerResource, RectZPicker},
+    focus::{Focus, FocusConfig},
     render::extract_items,
     view::{run_view, Scope},
 };
@@ -390,6 +394,76 @@ fn dragging_the_thumb_scrolls_in_proportion_to_how_far_it_moved() {
     dispatch_pointer(&mut world, view, [20.0, 20.0], PointerPhase::Press { count: 1 });
     assert!(!dispatch_pointer(&mut world, view, [20.0, 60.0], PointerPhase::Drag));
     assert_eq!(state.offset(), [0.0, 300.0]);
+}
+
+/// Pressing the thumb captures the pointer, so the drag keeps reaching the
+/// scroll view even once the cursor has left it — a thumb only 8px wide is
+/// otherwise trivially lost, and re-picking per event would hand the drag to
+/// whatever the cursor wandered onto instead.
+#[test]
+fn a_thumb_drag_survives_the_cursor_leaving_the_scroll_view() {
+    let mut world = World::new();
+    let root = world.spawn(ViewChildren::default()).id();
+    tall_content(&mut world, root);
+
+    let view = children(&world, root)[0];
+    let thumb = children(&world, children(&world, view)[1])[0];
+    let state = state_of(&world, view);
+
+    let grab = [194.0, 10.0];
+    let query = PickQuery { viewport_pos: grab };
+    world.insert_resource(PickerResource(Box::new(RectZPicker::build(&world, root))));
+    world.insert_resource(Focus::default());
+    world.insert_resource(FocusConfig::default());
+    resolve_pointer_press::<()>(&mut world, &query, 1);
+    assert_eq!(
+        pointer_capture(&world),
+        Some(thumb),
+        "the press must capture the thumb"
+    );
+
+    // Far outside the 200x100 viewport, where a fresh pick would find nothing
+    // at all — but the drag still belongs to the thumb.
+    let away = PickQuery {
+        viewport_pos: [600.0, 40.0],
+    };
+    assert!(dispatch_pointer_drag(&mut world, &away));
+    assert_eq!(state.offset(), [0.0, 125.0]);
+
+    // Releasing hands the pointer back; a later drag has no owner.
+    set_pointer_capture(&mut world, None);
+    assert!(!dispatch_pointer_drag(&mut world, &away));
+}
+
+/// A drag whose press landed on nothing must not act on widgets it merely
+/// crosses. Without capture this is how dragging from empty space started
+/// selecting text the moment the cursor entered a text box.
+#[test]
+fn a_drag_that_began_on_nothing_is_not_delivered_to_what_it_crosses() {
+    let mut world = World::new();
+    let root = world.spawn(ViewChildren::default()).id();
+    tall_content(&mut world, root);
+    let view = children(&world, root)[0];
+    let state = state_of(&world, view);
+
+    world.insert_resource(PickerResource(Box::new(RectZPicker::build(&world, root))));
+    world.insert_resource(Focus::default());
+    world.insert_resource(FocusConfig::default());
+
+    // Press well outside the scroll view: nothing is there to consume it.
+    let empty = PickQuery {
+        viewport_pos: [600.0, 400.0],
+    };
+    resolve_pointer_press::<()>(&mut world, &empty, 1);
+    assert_eq!(pointer_capture(&world), None);
+
+    // Dragging across the thumb now does nothing, where a fresh pick per event
+    // would have handed the drag straight to it.
+    let over_thumb = PickQuery {
+        viewport_pos: [194.0, 40.0],
+    };
+    assert!(!dispatch_pointer_drag(&mut world, &over_thumb));
+    assert_eq!(state.offset(), [0.0, 0.0]);
 }
 
 #[test]
