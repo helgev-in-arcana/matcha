@@ -91,22 +91,78 @@ struct ImageContent(ImageSource);
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum ImageCacheKey {
-    Path { path: PathBuf, target: [u32; 2] },
-    Bytes { ptr: usize, len: usize, target: [u32; 2] },
+    Path {
+        path: PathBuf,
+        target: [u32; 2],
+        fit: ObjectFit,
+    },
+    Bytes {
+        ptr: usize,
+        len: usize,
+        target: [u32; 2],
+        fit: ObjectFit,
+    },
 }
 
 impl ImageCacheKey {
-    fn new(source: &ImageSource, target: [u32; 2]) -> Self {
+    fn new(source: &ImageSource, target: [u32; 2], fit: ObjectFit) -> Self {
         match source {
             ImageSource::Path(path) => ImageCacheKey::Path {
                 path: path.clone(),
                 target,
+                fit,
             },
             ImageSource::Bytes(bytes) => ImageCacheKey::Bytes {
                 ptr: bytes.as_ptr() as usize,
                 len: bytes.len(),
                 target,
+                fit,
             },
+        }
+    }
+}
+
+/// How the image fills the box it was given (CSS `object-fit`).
+///
+/// Each variant is one call into the `image` crate's resize family, so the
+/// semantics are exactly that crate's documented behaviour rather than fit
+/// arithmetic maintained here.
+///
+/// CSS's `none` (natural size, overflowing) is deliberately absent: the atlas
+/// pages are a fixed 4096x4096 and `allocate` hard-fails above that, so a
+/// natural-resolution photo would not merely overflow, it would fail to draw
+/// at all. [`ScaleDown`](Self::ScaleDown) is the usable half of that intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ObjectFit {
+    /// Fit inside the box, preserving aspect ratio; the leftover is letterboxed.
+    #[default]
+    Contain,
+    /// Stretch to the box exactly, ignoring aspect ratio.
+    Fill,
+    /// Cover the box, preserving aspect ratio; the overflow is cropped.
+    Cover,
+    /// Natural size, shrunk to fit only if it is larger than the box.
+    ScaleDown,
+}
+
+impl ObjectFit {
+    /// Produce the pixels to upload for a `target`-sized box.
+    fn apply(self, decoded: &image::DynamicImage, target: [u32; 2]) -> image::DynamicImage {
+        const FILTER: image::imageops::FilterType = image::imageops::FilterType::Triangle;
+        match self {
+            ObjectFit::Contain => decoded.resize(target[0], target[1], FILTER),
+            ObjectFit::Fill => decoded.resize_exact(target[0], target[1], FILTER),
+            // Crops to the box, so the result is exactly `target` and the
+            // centring below is a no-op — as it should be for `cover`.
+            ObjectFit::Cover => decoded.resize_to_fill(target[0], target[1], FILTER),
+            ObjectFit::ScaleDown => {
+                let (w, h) = (decoded.width(), decoded.height());
+                if w <= target[0] && h <= target[1] {
+                    decoded.clone()
+                } else {
+                    decoded.resize(target[0], target[1], FILTER)
+                }
+            }
         }
     }
 }
@@ -148,7 +204,7 @@ fn decode(source: &ImageSource) -> Option<image::DynamicImage> {
 /// (`ctx.size` — which a parent layout may have stretched beyond the declared
 /// `w`×`h`; CSS `object-fit: contain`), decoding/resizing/uploading at most
 /// once per distinct `(source, box size)` pair via `image_ctx`.
-fn image_render_item(image_ctx: ImageCtx, source: ImageSource) -> RenderItem {
+fn image_render_item(image_ctx: ImageCtx, source: ImageSource, fit: ObjectFit) -> RenderItem {
     RenderItem::new(move |ctx: &RenderCtx| {
         let [box_w, box_h] = ctx.size;
         let mut node = RenderNode::new();
@@ -156,7 +212,7 @@ fn image_render_item(image_ctx: ImageCtx, source: ImageSource) -> RenderItem {
             return node;
         }
         let target = [box_w.ceil() as u32, box_h.ceil() as u32];
-        let key = ImageCacheKey::new(&source, target);
+        let key = ImageCacheKey::new(&source, target, fit);
 
         if let Some(cached) = image_ctx.0.lock().get(&key) {
             return compose(node, cached, box_w, box_h);
@@ -165,7 +221,7 @@ fn image_render_item(image_ctx: ImageCtx, source: ImageSource) -> RenderItem {
         let Some(decoded) = decode(&source) else {
             return node;
         };
-        let fitted = decoded.resize(target[0], target[1], image::imageops::FilterType::Triangle);
+        let fitted = fit.apply(&decoded, target);
         let rgba = fitted.to_rgba8();
         let (w, h) = rgba.dimensions();
         if w == 0 || h == 0 {
@@ -195,9 +251,11 @@ fn image_render_item(image_ctx: ImageCtx, source: ImageSource) -> RenderItem {
     })
 }
 
-/// Centre `(region, fitted_size)` within a `box_w`×`box_h` box (the
-/// letterbox/pillarbox effect of `object-fit: contain` when the fitted
-/// image's aspect ratio doesn't match the box's).
+/// Centre `(region, fitted_size)` within its box.
+///
+/// This is what produces `contain`'s letterbox/pillarbox bars. For `fill` and
+/// `cover` the fitted size already equals the box, so the offset is zero and
+/// this costs nothing; for `scale-down` of a small image it centres it.
 fn compose(mut node: RenderNode, (region, fitted_size): &(AtlasRegion, [f32; 2]), box_w: f32, box_h: f32) -> RenderNode {
     let offset = Matrix4::new_translation(&Vector3::new(
         ((box_w - fitted_size[0]) / 2.0).max(0.0),
@@ -209,6 +267,10 @@ fn compose(mut node: RenderNode, (region, fitted_size): &(AtlasRegion, [f32; 2])
     node
 }
 
+/// The declared [`ObjectFit`], carried so `patch` can detect a change to it.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ImageFit(pub ObjectFit);
+
 /// A fixed-size image, decoded from a file path or in-memory bytes.
 pub struct Image {
     key: Key,
@@ -216,6 +278,7 @@ pub struct Image {
     source: ImageSource,
     w: f32,
     h: f32,
+    fit: ObjectFit,
 }
 
 impl Image {
@@ -227,6 +290,7 @@ impl Image {
             source: ImageSource::Path(path.into()),
             w,
             h,
+            fit: ObjectFit::default(),
         }
     }
 
@@ -251,7 +315,15 @@ impl Image {
             source: ImageSource::Bytes(bytes),
             w,
             h,
+            fit: ObjectFit::default(),
         }
+    }
+
+    /// How the image fills its box (CSS `object-fit`). Default
+    /// [`Contain`](ObjectFit::Contain).
+    pub fn fit(mut self, fit: ObjectFit) -> Self {
+        self.fit = fit;
+        self
     }
 
     crate::sizing_builders!();
@@ -270,7 +342,7 @@ impl Image {
 
     fn rebuild_render_item(&self, entity: &mut EntityWorldMut) -> RenderItem {
         let image_ctx = entity.world_scope(|world| world.get_resource_or_insert_with(ImageCtx::new).clone());
-        image_render_item(image_ctx, self.source.clone())
+        image_render_item(image_ctx, self.source.clone(), self.fit)
     }
 }
 
@@ -285,6 +357,7 @@ impl Widget for Image {
         // `after_spawn` instead, mirroring `Text`/`Button`.
         (
             ImageContent(self.source.clone()),
+            ImageFit(self.fit),
             self.geometry(),
             self.sizing,
             LayoutDispatch::of::<RectGeometry>(),
@@ -304,6 +377,9 @@ impl Widget for Image {
         }
         if let Some(mut g) = entity.get_mut::<RectGeometry>() {
             changed |= g.set_if_neq(self.geometry());
+        }
+        if let Some(mut f) = entity.get_mut::<ImageFit>() {
+            changed |= f.set_if_neq(ImageFit(self.fit));
         }
         if changed {
             let item = self.rebuild_render_item(entity);

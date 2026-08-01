@@ -10,6 +10,7 @@ pub mod pointer;
 pub mod render;
 pub mod resources;
 pub mod systems;
+pub mod tab_order;
 pub mod task;
 pub mod traversal;
 pub mod ui_ecs;

@@ -828,7 +828,12 @@ where
         // Keyboard and IME have no spatial origin: they go to whatever holds
         // focus. Both walk the focus path root->leaf; see `keyboard.rs`.
         if let Some(key_input) = event.on_key_down(|input| input.clone()) {
-            if dispatch_key(&mut self.world, &key_input) && !self.drain_message_queue() {
+            // Tab moves focus before the focused widget is offered the key: no
+            // widget in this workspace wants a literal tab character, and a
+            // `Tab` that fell through would be typed instead of navigating.
+            if crate::tab_order::handle_tab_key(&mut self.world, &key_input) {
+                self.request_redraw_all();
+            } else if dispatch_key(&mut self.world, &key_input) && !self.drain_message_queue() {
                 // Consumed but produced no message: ECS-side state changed
                 // (a caret moved, say), so redraw without re-running the view.
                 self.request_redraw_all();

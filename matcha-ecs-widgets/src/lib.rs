@@ -39,7 +39,7 @@ pub use box_style::{box_node, BoxShadow, BoxStyle, Corners, Sides};
 pub use button::{Button, ButtonLabel};
 pub use checkbox::Checkbox;
 pub use color_rect::{ColorRect, RectColor};
-pub use image::{Image, ImageSource};
+pub use image::{Image, ImageSource, ObjectFit};
 pub use interaction::{ColorCell, InteractionColors};
 pub use layout::{AlignItems, Column, Container, Gap, JustifyContent, LayoutKind, Row, Wrap};
 pub use link::Link;
