@@ -463,6 +463,13 @@ impl Widget for ScrollView {
 
 impl Layout for ScrollViewLayout {
     fn measure(&self, _ctx: &mut LayoutCtx, _me: Entity, c: Constraints) -> Measured {
+        // The one widget here that does not route through `Sizing`. Its
+        // viewport size is load-bearing for the axes it measures unbounded,
+        // for the clip rect and for the scrollbar geometry, so letting a
+        // second sizing mechanism override it would give three consumers two
+        // sources of truth. `ScrollView` is still an ordinary child to a
+        // container -- it just cannot grow or take a percentage yet.
+        //
         // `clamp`, not `min`: a parent `Column`/`Row` with the default
         // `AlignItems::Stretch` passes `min == max`, and ignoring the minimum
         // would leave `LayoutOutput` disagreeing with the space actually

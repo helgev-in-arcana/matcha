@@ -75,6 +75,7 @@ use parley::{PlainEditor, StyleProperty};
 use renderer::RenderNode;
 
 use crate::{
+    sizing::Sizing,
     color_rect::solid_rect_node,
     rich_text::{draw_parley_layout, paint_tint_region, ParleyFontCtx, RichTextBrush},
 };
@@ -273,6 +274,7 @@ pub fn confirm_on_ctrl_enter(input: &KeyInput) -> bool {
 /// caret never blinks — the same footgun `animation::default_systems` has.
 pub struct TextBox<Msg: Message> {
     key: Key,
+    sizing: Sizing,
     value: String,
     w: f32,
     h: f32,
@@ -286,6 +288,7 @@ impl<Msg: Message> TextBox<Msg> {
     pub fn new(w: f32, h: f32) -> Self {
         Self {
             key: Key::Auto,
+            sizing: Sizing::default(),
             value: String::new(),
             w,
             h,
@@ -374,6 +377,8 @@ impl<Msg: Message> TextBox<Msg> {
         self
     }
 
+    crate::sizing_builders!();
+
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = key.into();
         self
@@ -417,6 +422,7 @@ impl<Msg: Message> Widget for TextBox<Msg> {
             DeclaredValue(self.value.clone()),
             self.layout(),
             self.style,
+            self.sizing,
             LayoutDispatch::of::<TextBoxLayout>(),
             TextBoxLive::default(),
             CaretPhase::default(),
@@ -449,6 +455,7 @@ impl<Msg: Message> Widget for TextBox<Msg> {
     }
 
     fn patch(&self, entity: &mut EntityWorldMut) {
+        self.sync_sizing(entity);
         let mut needs_rebuild = false;
 
         // Only an app-driven *change* of the declared value overwrites the
@@ -768,14 +775,17 @@ fn emit<Msg: Message, C: Component + Clone>(
 // ---------------------------------------------------------------------------
 
 impl Layout for TextBoxLayout {
-    fn measure(&self, _ctx: &mut LayoutCtx, _me: Entity, c: Constraints) -> Measured {
+    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, c: Constraints) -> Measured {
         // Fixed size: the box does not grow with its content. This is what
         // keeps the wrap width knowable before layout runs, instead of the
         // circular "wrap width needs measure, measure needs wrap width".
-        Measured::exact([
-            self.w.clamp(c.min_width(), c.max_width()),
-            self.h.clamp(c.min_height(), c.max_height()),
-        ])
+        let sizing = Sizing::of(ctx, me);
+        let inner = sizing.content_constraints(c);
+        let content = [
+            self.w.clamp(inner.min_width(), inner.max_width()),
+            self.h.clamp(inner.min_height(), inner.max_height()),
+        ];
+        sizing.measured(c, Measured::exact(content))
     }
 
     /// Publishes the size layout actually allocated.

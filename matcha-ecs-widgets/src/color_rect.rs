@@ -28,6 +28,7 @@ use matcha_ecs::{
     view::Widget,
 };
 
+use crate::sizing::Sizing;
 use crate::animation::{Easing, ExitFade, OpacityTween};
 
 /// A [`ColorRect`]'s requested (unconstrained) size.
@@ -44,6 +45,7 @@ pub struct RectColor(pub [f32; 4]);
 /// A solid-colour rectangle of fixed size.
 pub struct ColorRect {
     key: Key,
+    sizing: Sizing,
     w: f32,
     h: f32,
     color: [f32; 4],
@@ -63,6 +65,7 @@ impl ColorRect {
     pub fn new(w: f32, h: f32) -> Self {
         Self {
             key: Key::Auto,
+            sizing: Sizing::default(),
             w,
             h,
             color: [1.0, 1.0, 1.0, 1.0],
@@ -91,6 +94,8 @@ impl ColorRect {
     }
 
     /// Override the reconciliation key.
+    crate::sizing_builders!();
+
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = key.into();
         self
@@ -191,6 +196,7 @@ impl Widget for ColorRect {
         (
             self.geometry(),
             RectColor(self.color),
+            self.sizing,
             LayoutDispatch::of::<RectGeometry>(),
             solid_rect_render_item(self.color),
             RenderOpacity(initial_opacity),
@@ -220,6 +226,7 @@ impl Widget for ColorRect {
     }
 
     fn patch(&self, entity: &mut EntityWorldMut) {
+        self.sync_sizing(entity);
         let geometry = self.geometry();
         let mut changed = false;
         if let Some(mut g) = entity.get_mut::<RectGeometry>() {
@@ -257,11 +264,17 @@ impl Widget for ColorRect {
 }
 
 impl Layout for RectGeometry {
-    fn measure(&self, _ctx: &mut LayoutCtx, _me: Entity, c: Constraints) -> Measured {
-        Measured::exact([
-            self.w.clamp(c.min_width(), c.max_width()),
-            self.h.clamp(c.min_height(), c.max_height()),
-        ])
+    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, c: Constraints) -> Measured {
+        // Shared by every widget that is a plain box: `ColorRect`, `Button`,
+        // `Checkbox`, `Image`. The declared `w`/`h` are the content size; a
+        // `Sizing` on the entity overrides or bounds it.
+        let sizing = Sizing::of(ctx, me);
+        let inner = sizing.content_constraints(c);
+        let content = [
+            self.w.clamp(inner.min_width(), inner.max_width()),
+            self.h.clamp(inner.min_height(), inner.max_height()),
+        ];
+        sizing.measured(c, Measured::exact(content))
     }
 
     fn arrange(&self, _ctx: &mut LayoutCtx, _me: Entity, _size: [f32; 2]) {

@@ -37,6 +37,7 @@ use matcha_ecs::{
 };
 
 use crate::{
+    sizing::Sizing,
     color_rect::{solid_rect_node, RectColor, RectGeometry},
     text::{glyph_run_nodes, paint_tint_region, shape, FontCtx},
 };
@@ -58,6 +59,7 @@ struct ButtonTextStyle {
 /// A solid-colour rectangle with a centred text label that emits `Msg` on click.
 pub struct Button<Msg: Message> {
     key: Key,
+    sizing: Sizing,
     label: String,
     msg: Option<Msg>,
     w: f32,
@@ -72,6 +74,7 @@ impl<Msg: Message> Button<Msg> {
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             key: Key::Auto,
+            sizing: Sizing::default(),
             label: label.into(),
             msg: None,
             w: 120.0,
@@ -120,6 +123,8 @@ impl<Msg: Message> Button<Msg> {
         self.focus_ring_color = color;
         self
     }
+
+    crate::sizing_builders!();
 
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = key.into();
@@ -231,6 +236,7 @@ impl<Msg: Message> Widget for Button<Msg> {
             OnClick(self.msg.clone()),
             self.geometry(),
             RectColor(self.color),
+            self.sizing,
             LayoutDispatch::of::<RectGeometry>(),
             Pickable,
             FocusPolicy::Normal,
@@ -243,6 +249,7 @@ impl<Msg: Message> Widget for Button<Msg> {
     }
 
     fn patch(&self, entity: &mut EntityWorldMut) {
+        self.sync_sizing(entity);
         let mut changed = false;
         if let Some(mut label) = entity.get_mut::<ButtonLabel>() {
             changed |= label.set_if_neq(ButtonLabel(self.label.clone()));

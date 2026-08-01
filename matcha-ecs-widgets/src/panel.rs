@@ -27,6 +27,7 @@ use matcha_ecs::{
     view::Widget,
 };
 
+use crate::sizing::Sizing;
 use crate::color_rect::solid_rect_node;
 
 /// A [`Panel`]'s fixed size and border inset — doubles as both data and the
@@ -50,6 +51,7 @@ struct PanelColors {
 /// background fill.
 pub struct Panel {
     key: Key,
+    sizing: Sizing,
     w: f32,
     h: f32,
     background_color: [f32; 4],
@@ -62,6 +64,7 @@ impl Panel {
     pub fn new(w: f32, h: f32) -> Self {
         Self {
             key: Key::Auto,
+            sizing: Sizing::default(),
             w,
             h,
             background_color: [0.0, 0.0, 0.0, 0.0],
@@ -100,6 +103,8 @@ impl Panel {
         self.border_width = width;
         self
     }
+
+    crate::sizing_builders!();
 
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = key.into();
@@ -161,6 +166,7 @@ impl Widget for Panel {
         (
             self.layout(),
             self.colors(),
+            self.sizing,
             LayoutDispatch::of::<PanelLayout>(),
             panel_render_item(self.border_width, self.colors()),
         )
@@ -171,6 +177,7 @@ impl Widget for Panel {
     }
 
     fn patch(&self, entity: &mut EntityWorldMut) {
+        self.sync_sizing(entity);
         self.sync_clip(entity);
         let mut changed = false;
         if let Some(mut l) = entity.get_mut::<PanelLayout>() {
@@ -189,11 +196,17 @@ impl Widget for Panel {
 }
 
 impl Layout for PanelLayout {
-    fn measure(&self, _ctx: &mut LayoutCtx, _me: Entity, c: Constraints) -> Measured {
-        Measured::exact([
-            self.w.clamp(c.min_width(), c.max_width()),
-            self.h.clamp(c.min_height(), c.max_height()),
-        ])
+    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, c: Constraints) -> Measured {
+        // Fixed size: the child is not consulted (unlike `Padding`, which
+        // sizes itself to its child). `Sizing` overrides or bounds the
+        // declared `w`/`h`.
+        let sizing = Sizing::of(ctx, me);
+        let inner = sizing.content_constraints(c);
+        let content = [
+            self.w.clamp(inner.min_width(), inner.max_width()),
+            self.h.clamp(inner.min_height(), inner.max_height()),
+        ];
+        sizing.measured(c, Measured::exact(content))
     }
 
     fn arrange(&self, ctx: &mut LayoutCtx, me: Entity, size: [f32; 2]) {

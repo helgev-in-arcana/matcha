@@ -31,6 +31,7 @@ use matcha_ecs::{
     view::Widget,
 };
 
+use crate::sizing::Sizing;
 use crate::color_rect::{solid_rect_node, RectGeometry};
 
 /// Draw-relevant checkbox state, tracked so `patch` can detect changes and
@@ -47,6 +48,7 @@ struct CheckboxState {
 /// (inset by `border_width`) when `checked`.
 pub struct Checkbox<Msg: Message> {
     key: Key,
+    sizing: Sizing,
     checked: bool,
     size: f32,
     border_color: [f32; 4],
@@ -59,6 +61,7 @@ impl<Msg: Message> Checkbox<Msg> {
     pub fn new(checked: bool) -> Self {
         Self {
             key: Key::Auto,
+            sizing: Sizing::default(),
             checked,
             size: 20.0,
             border_color: [0.6, 0.6, 0.65, 1.0],
@@ -97,6 +100,8 @@ impl<Msg: Message> Checkbox<Msg> {
         self.border_width = width;
         self
     }
+
+    crate::sizing_builders!();
 
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = key.into();
@@ -150,6 +155,7 @@ impl<Msg: Message> Widget for Checkbox<Msg> {
             self.geometry(),
             self.state(),
             OnClick(self.msg.clone()),
+            self.sizing,
             LayoutDispatch::of::<RectGeometry>(),
             Pickable,
             FocusPolicy::Normal,
@@ -158,6 +164,7 @@ impl<Msg: Message> Widget for Checkbox<Msg> {
     }
 
     fn patch(&self, entity: &mut EntityWorldMut) {
+        self.sync_sizing(entity);
         let mut changed = false;
         if let Some(mut g) = entity.get_mut::<RectGeometry>() {
             changed |= g.set_if_neq(self.geometry());

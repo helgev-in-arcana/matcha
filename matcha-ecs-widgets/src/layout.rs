@@ -290,11 +290,6 @@ fn align_offset(align: AlignItems, container_cross: f32, child_cross: f32) -> f3
     }
 }
 
-/// A child's own box properties, defaulted for widgets that carry none.
-fn child_sizing(ctx: &LayoutCtx, child: Entity) -> Sizing {
-    ctx.world().get::<Sizing>(child).copied().unwrap_or_default()
-}
-
 /// What a container needs to know about one child to place it.
 struct ChildInfo {
     item: distribute::Item,
@@ -321,7 +316,7 @@ fn collect_children(
         .iter()
         .map(|&child| {
             let measured = ctx.measure_child(child, child_c);
-            let sizing = child_sizing(ctx, child);
+            let sizing = Sizing::of(ctx, child);
             ChildInfo {
                 item: distribute::Item {
                     base: measured.preferred[main],
@@ -354,10 +349,6 @@ impl LayoutKind {
         ctx.world().get::<Align>(me).map(|a| a.0).unwrap_or_default()
     }
 
-    fn sizing(&self, ctx: &LayoutCtx, me: Entity) -> Sizing {
-        ctx.world().get::<Sizing>(me).copied().unwrap_or_default()
-    }
-
     fn reverse(&self, ctx: &LayoutCtx, me: Entity) -> bool {
         ctx.world().get::<Reverse>(me).map(|r| r.0).unwrap_or(false)
     }
@@ -372,7 +363,7 @@ impl LayoutKind {
         let mut indexed: Vec<(i32, usize, Entity)> = children
             .iter()
             .enumerate()
-            .map(|(i, &e)| (child_sizing(ctx, e).order, i, e))
+            .map(|(i, &e)| (Sizing::of(ctx, e).order, i, e))
             .collect();
         indexed.sort_by_key(|(order, i, _)| (*order, *i));
 
@@ -402,7 +393,7 @@ impl LayoutKind {
 
 impl Layout for LayoutKind {
     fn measure(&self, ctx: &mut LayoutCtx, me: Entity, c: Constraints) -> Measured {
-        let sizing = self.sizing(ctx, me);
+        let sizing = Sizing::of(ctx, me);
         // The content sees the box's own size where it has one, so a `Fill`
         // column wraps its text to the space it took rather than to the
         // window.
@@ -442,7 +433,7 @@ impl Layout for LayoutKind {
             if let Some(&child) = children.first() {
                 // A container has no main axis, so a child's `align_self`
                 // applies to both: it is placed within the container's box.
-                let align = child_sizing(ctx, child).align_self.unwrap_or(AlignItems::Start);
+                let align = Sizing::of(ctx, child).align_self.unwrap_or(AlignItems::Start);
                 let child_size = if align == AlignItems::Stretch {
                     ctx.measure_child_size(child, Constraints::new([size[0], size[0]], [size[1], size[1]]))
                 } else {

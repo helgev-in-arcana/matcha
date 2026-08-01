@@ -63,6 +63,7 @@ use matcha_ecs::{
     view::Widget,
 };
 
+use crate::sizing::Sizing;
 use crate::color_rect::RectGeometry;
 
 /// Where an `Image`'s bytes come from. Identity (not content) is what
@@ -211,6 +212,7 @@ fn compose(mut node: RenderNode, (region, fitted_size): &(AtlasRegion, [f32; 2])
 /// A fixed-size image, decoded from a file path or in-memory bytes.
 pub struct Image {
     key: Key,
+    sizing: Sizing,
     source: ImageSource,
     w: f32,
     h: f32,
@@ -221,6 +223,7 @@ impl Image {
     pub fn from_path(path: impl Into<PathBuf>, w: f32, h: f32) -> Self {
         Self {
             key: Key::Auto,
+            sizing: Sizing::default(),
             source: ImageSource::Path(path.into()),
             w,
             h,
@@ -244,11 +247,14 @@ impl Image {
     pub fn from_bytes(bytes: Arc<[u8]>, w: f32, h: f32) -> Self {
         Self {
             key: Key::Auto,
+            sizing: Sizing::default(),
             source: ImageSource::Bytes(bytes),
             w,
             h,
         }
     }
+
+    crate::sizing_builders!();
 
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = key.into();
@@ -280,6 +286,7 @@ impl Widget for Image {
         (
             ImageContent(self.source.clone()),
             self.geometry(),
+            self.sizing,
             LayoutDispatch::of::<RectGeometry>(),
         )
     }
@@ -290,6 +297,7 @@ impl Widget for Image {
     }
 
     fn patch(&self, entity: &mut EntityWorldMut) {
+        self.sync_sizing(entity);
         let mut changed = false;
         if let Some(mut c) = entity.get_mut::<ImageContent>() {
             changed |= c.set_if_neq(ImageContent(self.source.clone()));

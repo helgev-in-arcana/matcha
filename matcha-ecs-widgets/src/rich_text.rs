@@ -74,6 +74,7 @@ use matcha_ecs::{
     view::Widget,
 };
 
+use crate::sizing::Sizing;
 use crate::animation::{Easing, ExitFade, OpacityTween};
 
 /// The displayed content: a fully assembled string (base text + every span's
@@ -908,6 +909,9 @@ fn rich_text_render_item(
 
 impl Layout for RichTextStyle {
     fn measure(&self, ctx: &mut LayoutCtx, me: Entity, constraints: Constraints) -> Measured {
+        let sizing = Sizing::of(ctx, me);
+        let inner = sizing.content_constraints(constraints);
+
         let Some(font_ctx) = ctx.world().get_resource::<ParleyFontCtx>() else {
             return Measured::exact([0.0, 0.0]);
         };
@@ -917,28 +921,25 @@ impl Layout for RichTextStyle {
         if content.text.is_empty() {
             return Measured::exact([0.0, 0.0]);
         }
-        let layout = shape(font_ctx, content, self, constraints.max_width());
-        let width = layout
-            .width()
-            .clamp(constraints.min_width(), constraints.max_width());
-        let height = layout
-            .height()
-            .clamp(constraints.min_height(), constraints.max_height());
+        let layout = shape(font_ctx, content, self, inner.max_width());
 
         // CSS min-content / max-content, straight from the layout already
         // built: every soft break taken, and none taken. Deliberately *not*
-        // clamped to `constraints` — a contribution is what this text would
-        // want, which is the whole point of reporting it separately from the
-        // size it settled for.
+        // clamped — a contribution is what this text would want, which is the
+        // whole point of reporting it apart from the size it settled for.
         //
         // The height is reported as a single value rather than a range: it
         // depends on the width finally chosen, and neither content width is
         // that width (see `Measured`'s docs).
-        let content_widths = layout.calculate_content_widths();
-        Measured::new(
-            [content_widths.min.min(width), height],
-            [width, height],
-            [content_widths.max.max(width), height],
+        let widths = layout.calculate_content_widths();
+        let shaped = [layout.width(), layout.height()];
+        sizing.measured(
+            constraints,
+            Measured::new(
+                [widths.min.min(shaped[0]), shaped[1]],
+                shaped,
+                [widths.max.max(shaped[0]), shaped[1]],
+            ),
         )
     }
 
@@ -953,6 +954,7 @@ impl Layout for RichTextStyle {
 /// shaped content. See module docs for how this relates to [`crate::Text`].
 pub struct RichText {
     key: Key,
+    sizing: Sizing,
     content: String,
     font_size: f32,
     color: [f32; 4],
@@ -983,6 +985,7 @@ impl RichText {
     pub fn new(content: impl Into<String>) -> Self {
         Self {
             key: Key::Auto,
+            sizing: Sizing::default(),
             content: content.into(),
             font_size: 16.0,
             color: [0.0, 0.0, 0.0, 1.0],
@@ -1023,6 +1026,8 @@ impl RichText {
         });
         self
     }
+
+    crate::sizing_builders!();
 
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = key.into();
@@ -1255,6 +1260,7 @@ impl Widget for RichText {
             self.resolved_content(),
             self.style(),
             RichTextWrapWidth::new(),
+            self.sizing,
             LayoutDispatch::of::<RichTextStyle>(),
             RenderOpacity(initial_opacity),
         )
@@ -1279,6 +1285,7 @@ impl Widget for RichText {
     }
 
     fn patch(&self, entity: &mut EntityWorldMut) {
+        self.sync_sizing(entity);
         let mut changed = false;
         if let Some(mut c) = entity.get_mut::<RichTextContent>() {
             changed |= c.set_if_neq(self.resolved_content());

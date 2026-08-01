@@ -1,9 +1,9 @@
 //! Space distribution (`grow`/`shrink`), plus the other per-child box
 //! properties a container reads: `align_self`, `order`, and `reverse`.
 //!
-//! `Container` is used as the child throughout because it is one of the
-//! widgets carrying `Sizing` today; the container reads these off whatever
-//! child it has, so nothing here is specific to that choice.
+//! A `Container` wrapping a rect is the child in most of these, purely to
+//! make the declared width obvious at the call site; every widget carries
+//! `Sizing`, which the last few tests exercise directly on a leaf.
 //!
 //! Headless, GPU-free: only `LayoutOutput` is inspected.
 
@@ -231,4 +231,62 @@ fn a_grown_child_leaves_no_leftover_for_justify_content_to_distribute() {
 
     assert_eq!(output(&world, kids[0]).origin[0], 0.0);
     assert_eq!(output(&world, kids[0]).size[0], WINDOW[0]);
+}
+
+#[test]
+fn a_leaf_widget_carries_the_same_box_properties_as_a_container() {
+    // The point of putting `Sizing` on every widget: a plain rect grows,
+    // stops at its maximum and takes an explicit width, with no wrapper.
+    let (world, kids) = run(|s| {
+        s.node(Row::new().width(Length::Fill), |s| {
+            s.leaf(ColorRect::new(50.0, 20.0).key(1u64));
+            s.leaf(ColorRect::new(50.0, 20.0).key(2u64).grow(1.0));
+        });
+    });
+
+    assert_eq!(output(&world, kids[0]).size[0], 50.0);
+    assert_eq!(output(&world, kids[1]).size[0], WINDOW[0] - 50.0);
+}
+
+#[test]
+fn an_explicit_width_on_a_leaf_overrides_its_constructor_size() {
+    let (world, kids) = run(|s| {
+        s.node(Column::new().align_items(AlignItems::Start), |s| {
+            s.leaf(ColorRect::new(50.0, 20.0).width(Length::Px(300.0)));
+        });
+    });
+
+    assert_eq!(output(&world, kids[0]).size, [300.0, 20.0]);
+}
+
+#[test]
+fn shrinking_a_text_leaf_stops_at_its_widest_word() {
+    // `RichText` reports a real min-content width, and `min-width: auto`
+    // resolves to it — so a row too narrow for the text squeezes it down to
+    // its widest word and then overflows, rather than crushing it to nothing.
+    // This is the whole reason a leaf reports a range at all.
+    use matcha_ecs_widgets::RichText;
+
+    let (mut world, kids) = run(|s| {
+        s.node(Row::new().width(Length::Px(120.0)), |s| {
+            s.leaf(ColorRect::new(100.0, 20.0).key(1u64).shrink(0.0));
+            s.leaf(RichText::new("wrappable words here").key(2u64).font_size(16.0));
+        });
+    });
+
+    assert_eq!(output(&world, kids[0]).size[0], 100.0);
+    let text = output(&world, kids[1]).size[0];
+
+    let min_content = matcha_ecs::layout::measure_entity(
+        &mut world,
+        kids[1],
+        Constraints::from_max_size(WINDOW),
+    )
+    .min[0];
+
+    assert!(min_content > 20.0, "test premise: the widest word is wider than the 20px left over");
+    assert!(
+        (text - min_content).abs() < 0.5,
+        "expected the text to stop at its min-content width {min_content}, got {text}"
+    );
 }

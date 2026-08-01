@@ -12,9 +12,9 @@
 //! it is unit-testable directly and would survive a backend change. The only
 //! ECS-facing part is `Sizing` being a `Component`.
 
-use bevy_ecs::component::Component;
+use bevy_ecs::{component::Component, entity::Entity};
 
-use matcha_ecs::layout::{Constraints, Measured};
+use matcha_ecs::layout::{Constraints, LayoutCtx, Measured};
 
 use crate::layout::AlignItems;
 
@@ -128,6 +128,15 @@ impl Default for Sizing {
 }
 
 impl Sizing {
+    /// The `Sizing` on `entity`, defaulted for one carrying none.
+    ///
+    /// Every `Layout::measure` starts here, and every container reads its
+    /// children through it — a widget without the component behaves exactly as
+    /// it did before sizing existed.
+    pub fn of(ctx: &LayoutCtx, entity: Entity) -> Self {
+        ctx.world().get::<Self>(entity).copied().unwrap_or_default()
+    }
+
     /// The definite size of each axis, `None` where it is content-driven.
     fn definite(&self, c: Constraints) -> [Option<f32>; 2] {
         let mut w = self.width.definite(c.max_width());
@@ -256,6 +265,23 @@ impl Sizing {
     }
 }
 
+/// Insert or update `entity`'s box properties.
+///
+/// Called from `patch` via the method [`sizing_builders!`](crate::sizing_builders)
+/// emits; also handles the case of an entity spawned before its widget carried
+/// a `Sizing`.
+pub fn sync_sizing(entity: &mut bevy_ecs::world::EntityWorldMut, sizing: Sizing) {
+    use bevy_ecs::change_detection::DetectChangesMut;
+    match entity.get_mut::<Sizing>() {
+        Some(mut existing) => {
+            existing.set_if_neq(sizing);
+        }
+        None => {
+            entity.insert(sizing);
+        }
+    }
+}
+
 /// Emits the CSS sizing builders for a widget with a `sizing: Sizing` field.
 ///
 /// Every sized widget spells these the same way, and there are seven of them,
@@ -333,6 +359,12 @@ macro_rules! sizing_builders {
         pub fn order(mut self, order: i32) -> Self {
             self.sizing.order = order;
             self
+        }
+
+        /// Write this widget's box properties onto its entity. Call from
+        /// `Widget::patch` so a re-declared `.width(..)` takes effect.
+        fn sync_sizing(&self, entity: &mut ::bevy_ecs::world::EntityWorldMut) {
+            $crate::sizing::sync_sizing(entity, self.sizing);
         }
     };
 }

@@ -54,6 +54,7 @@ use matcha_ecs::{
     view::Widget,
 };
 
+use crate::sizing::Sizing;
 use crate::animation::{Easing, ExitFade, OpacityTween};
 
 /// The displayed string.
@@ -296,24 +297,26 @@ fn text_render_item(
 
 impl Layout for TextStyle {
     fn measure(&self, ctx: &mut LayoutCtx, me: Entity, constraints: Constraints) -> Measured {
+        let sizing = Sizing::of(ctx, me);
+        let inner = sizing.content_constraints(constraints);
+
         let Some(font_ctx) = ctx.world().get_resource::<FontCtx>() else {
             return Measured::exact([0.0, 0.0]);
         };
         let Some(content) = ctx.world().get::<TextContent>(me) else {
             return Measured::exact([0.0, 0.0]);
         };
-        let layout = shape(font_ctx, &content.0, self.font_size, constraints.max_width());
-        // Reports no range, unlike `RichText`. parley hands that widget its
-        // min/max-content widths off the layout it already built, whereas
+        let layout = shape(font_ctx, &content.0, self.font_size, inner.max_width());
+
+        // Reports no width range, unlike `RichText`. parley hands that widget
+        // its min/max-content widths off the layout it already built, whereas
         // suzuri/fontdue has no such API: deriving the pair here would mean
         // two extra full shaping passes per measure, on the widget that has
         // no shape cache at all and is kept as the reference/fallback
-        // implementation. A `Text` in a future flex row therefore will not
-        // shrink below the width it wrapped to; `RichText` will.
-        Measured::exact([
-            layout.total_width.clamp(constraints.min_width(), constraints.max_width()),
-            layout.total_height.clamp(constraints.min_height(), constraints.max_height()),
-        ])
+        // implementation. A `Text` in a shrinking row therefore will not go
+        // below the width it wrapped to; `RichText` will.
+        let shaped = [layout.total_width, layout.total_height];
+        sizing.measured(constraints, Measured::exact(shaped))
     }
 
     fn arrange(&self, ctx: &mut LayoutCtx, me: Entity, size: [f32; 2]) {
@@ -328,6 +331,7 @@ impl Layout for TextStyle {
 /// A word-wrapped text block of fixed style, sized to its shaped content.
 pub struct Text {
     key: Key,
+    sizing: Sizing,
     content: String,
     font_size: f32,
     color: [f32; 4],
@@ -340,6 +344,7 @@ impl Text {
     pub fn new(content: impl Into<String>) -> Self {
         Self {
             key: Key::Auto,
+            sizing: Sizing::default(),
             content: content.into(),
             font_size: 16.0,
             color: [0.0, 0.0, 0.0, 1.0],
@@ -347,6 +352,8 @@ impl Text {
             exit_fade: None,
         }
     }
+
+    crate::sizing_builders!();
 
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = key.into();
@@ -410,6 +417,7 @@ impl Widget for Text {
             TextContent(self.content.clone()),
             self.style(),
             TextWrapWidth::new(),
+            self.sizing,
             LayoutDispatch::of::<TextStyle>(),
             RenderOpacity(initial_opacity),
         )
@@ -434,6 +442,7 @@ impl Widget for Text {
     }
 
     fn patch(&self, entity: &mut EntityWorldMut) {
+        self.sync_sizing(entity);
         let mut changed = false;
         if let Some(mut c) = entity.get_mut::<TextContent>() {
             changed |= c.set_if_neq(TextContent(self.content.clone()));
