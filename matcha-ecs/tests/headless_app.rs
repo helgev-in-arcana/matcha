@@ -6,7 +6,7 @@
 //! interface would.
 //!
 //! This is one level stronger than `tests/input.rs`, which exercises the
-//! extracted pure functions (`RectZPicker::build`/`resolve_click_at`):
+//! extracted pure functions (`RectPicker::build`/`resolve_click_at`):
 //! here a synthetic Moved→Pressed→Released sequence travels the production
 //! dispatch path `Adapter::device_event` → `DeviceEventState::process` →
 //! `UiEcs::device_event` → `on_pointer_press` → reducer → re-view.

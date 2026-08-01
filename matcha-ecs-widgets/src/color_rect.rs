@@ -93,9 +93,9 @@ impl ColorRect {
         self
     }
 
-    /// Override the reconciliation key.
     crate::sizing_builders!();
 
+    /// Override the reconciliation key.
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = key.into();
         self

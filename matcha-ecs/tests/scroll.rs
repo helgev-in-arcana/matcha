@@ -21,7 +21,7 @@ use matcha_ecs::{
         set_pointer_capture,
     },
     layout::{layout_root, Constraints},
-    pick::{PickQuery, Picker, PickerResource, RectZPicker},
+    pick::{PickQuery, Picker, PickerResource, RectPicker},
     focus::{Focus, FocusConfig},
     render::extract_items,
     view::{run_view, Scope},
@@ -249,8 +249,8 @@ fn content_scrolled_out_of_the_viewport_is_no_longer_pickable() {
     layout_root(&mut world, root, Constraints::from_max_size(WINDOW));
 
     let view = children(&world, root)[0];
-    let picker = RectZPicker::build(&world, root);
-    let at = |picker: &RectZPicker, world: &World, pos: [f32; 2]| {
+    let picker = RectPicker::build(&world, root);
+    let at = |picker: &RectPicker, world: &World, pos: [f32; 2]| {
         picker
             .pick(world, &PickQuery { viewport_pos: pos })
             .map(|h| h.entity)
@@ -263,7 +263,7 @@ fn content_scrolled_out_of_the_viewport_is_no_longer_pickable() {
     // Scroll the button off the top of the viewport.
     state_of(&world, view).set_offset([0.0, 200.0]);
     layout_root(&mut world, root, Constraints::from_max_size(WINDOW));
-    let picker = RectZPicker::build(&world, root);
+    let picker = RectPicker::build(&world, root);
 
     let hit = at(&picker, &world, [20.0, 20.0]);
     assert_ne!(
@@ -298,7 +298,7 @@ fn a_scroll_the_inner_view_cannot_act_on_chains_to_the_outer_one() {
     let query = PickQuery {
         viewport_pos: [20.0, 20.0],
     };
-    let hit = RectZPicker::build(&world, root)
+    let hit = RectPicker::build(&world, root)
         .pick(&world, &query)
         .map(|h| h.entity)
         .expect("something under the cursor");
@@ -363,7 +363,7 @@ fn dragging_the_thumb_scrolls_in_proportion_to_how_far_it_moved() {
 
     // Grab the thumb 8px down from its top.
     let grab = [194.0, 10.0];
-    let picked = RectZPicker::build(&world, root)
+    let picked = RectPicker::build(&world, root)
         .pick(&world, &PickQuery { viewport_pos: grab })
         .map(|h| h.entity);
     assert_eq!(picked, Some(thumb), "the press must land on the thumb");
@@ -412,7 +412,7 @@ fn a_thumb_drag_survives_the_cursor_leaving_the_scroll_view() {
 
     let grab = [194.0, 10.0];
     let query = PickQuery { viewport_pos: grab };
-    world.insert_resource(PickerResource(Box::new(RectZPicker::build(&world, root))));
+    world.insert_resource(PickerResource(Box::new(RectPicker::build(&world, root))));
     world.insert_resource(Focus::default());
     world.insert_resource(FocusConfig::default());
     resolve_pointer_press::<()>(&mut world, &query, 1);
@@ -446,7 +446,7 @@ fn a_drag_that_began_on_nothing_is_not_delivered_to_what_it_crosses() {
     let view = children(&world, root)[0];
     let state = state_of(&world, view);
 
-    world.insert_resource(PickerResource(Box::new(RectZPicker::build(&world, root))));
+    world.insert_resource(PickerResource(Box::new(RectPicker::build(&world, root))));
     world.insert_resource(Focus::default());
     world.insert_resource(FocusConfig::default());
 
@@ -517,7 +517,7 @@ fn a_wheel_scroll_does_not_move_an_axis_that_is_not_scrollable() {
     let query = PickQuery {
         viewport_pos: [20.0, 20.0],
     };
-    let hit = RectZPicker::build(&world, root)
+    let hit = RectPicker::build(&world, root)
         .pick(&world, &query)
         .map(|h| h.entity)
         .expect("something under the cursor");

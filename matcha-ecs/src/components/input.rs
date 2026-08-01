@@ -1,4 +1,4 @@
-//! Input protocol: picking membership/order, the Elm-style click message
+//! Input protocol: picking membership, the Elm-style click message
 //! widgets carry, and the keyboard/IME dispatch hooks.
 //!
 //! `Message`/`OnClick<Msg>` originated in `matcha-ecs-widgets::button`; moved
@@ -20,19 +20,11 @@ use matcha_window::event::device_event::{ImeEvent, KeyInput};
 /// is underneath simply omits this component — already the default for every
 /// container.
 ///
-/// The meaning carries across every picking backend: for [`crate::pick::RectZPicker`]
+/// The meaning carries across every picking backend: for [`crate::pick::RectPicker`]
 /// it means "put my rect in the array", and for a future GPU ID-buffer backend
 /// it would mean "write my id into the buffer".
 #[derive(Component, Clone, Copy)]
 pub struct Pickable;
-
-/// Stacking order for picking: higher wins on overlap. Ties fall back to paint
-/// order (later-painted wins). Entities without this component default to `0`.
-///
-/// **Backend-specific**: this is a hint for [`crate::pick::RectZPicker`] only.
-/// A BVH or ID-buffer backend derives order from actual depth and ignores it.
-#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ZOrder(pub i32);
 
 /// Marker bound for Elm-style messages: a cheap-to-clone, comparable value.
 ///

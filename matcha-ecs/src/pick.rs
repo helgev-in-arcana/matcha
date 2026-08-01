@@ -3,7 +3,8 @@
 //!
 //! # Why this is a trait
 //!
-//! The original implementation was a flat, z-sorted array of rectangles — fine
+//! The original implementation was a flat array of rectangles sorted by a
+//! picking-only z order — fine
 //! for a 2D UI, but this framework does not intend to give up 3D rendering.
 //! Two other backends are plausible later: a BVH/AABB raycast, and a GPU ID
 //! buffer. The decisive constraint is that **an ID buffer cannot return an
@@ -25,10 +26,10 @@ use nalgebra::Point3;
 use crate::{
     clip::intersect,
     components::{
-        input::{Pickable, ZOrder},
-        layout::{Clip, GlobalTransform, Hidden, LayoutOutput},
-        view::ViewChildren,
+        input::Pickable,
+        layout::{Clip, GlobalTransform, LayoutOutput},
     },
+    traversal,
 };
 
 /// One picking request. `viewport_pos` is the only input the OS actually gives
@@ -67,7 +68,7 @@ pub trait Picker: Send + Sync + 'static {
 
     /// Resolve a query against the last [`update`](Self::update). `world` is
     /// available for backends that need it (a GPU backend reads its resources
-    /// from there); [`RectZPicker`] does not use it.
+    /// from there); [`RectPicker`] does not use it.
     fn pick(&self, world: &World, q: &PickQuery) -> Option<PickHit>;
 }
 
@@ -77,7 +78,7 @@ pub struct PickerResource(pub Box<dyn Picker>);
 
 impl Default for PickerResource {
     fn default() -> Self {
-        Self(Box::new(RectZPicker::default()))
+        Self(Box::new(RectPicker::default()))
     }
 }
 
@@ -93,29 +94,30 @@ pub fn update_picker(world: &mut World) {
     });
 }
 
-/// One pickable entity's window-space bounds and stacking position.
+/// One pickable entity's window-space bounds.
 struct PickEntry {
     entity: Entity,
     /// `[min_x, min_y, max_x, max_y]` in window space.
     rect: [f32; 4],
-    z: i32,
-    /// DFS/paint visitation order among pickable entities. Only used to break
-    /// a `z` tie (later-painted wins).
-    order: u32,
 }
 
-/// The 2D backend: a flat array of axis-aligned rectangles kept sorted by
-/// `(z, paint order)` ascending, so the **last** element is frontmost.
+/// The 2D backend: a flat array of axis-aligned rectangles in paint order, so
+/// the **last** element is frontmost and a query is a backward scan.
+///
+/// It keeps no ordering of its own. Paint order comes from
+/// [`crate::traversal::walk`] — the same walk `extract_items` uses — and under
+/// the painter's algorithm reversing it *is* front-to-back. That is what makes
+/// clicking and seeing structurally unable to disagree.
 ///
 /// Assumes `GlobalTransform` is translation-only, matching every current
 /// `Layout` impl (rotation/scale are not accounted for in the rect).
 #[derive(Default)]
-pub struct RectZPicker {
-    /// Sorted by `(z, order)` ascending — bottom to top.
+pub struct RectPicker {
+    /// Back to front.
     entries: Vec<PickEntry>,
 }
 
-impl RectZPicker {
+impl RectPicker {
     /// Testable core: build a picker for `root`'s view tree directly, with no
     /// window, GPU or schedule involved. Same core/wrapper split as
     /// `layout_root`/`run_layout`.
@@ -126,15 +128,13 @@ impl RectZPicker {
     }
 }
 
-impl Picker for RectZPicker {
+impl Picker for RectPicker {
     fn update(&mut self, world: &World, root: Entity) {
-        self.entries.clear();
-        let mut next_order = 0;
-        collect(world, root, None, &mut self.entries, &mut next_order);
-        // Pre-sort so a query is a plain backward scan: no per-query
-        // allocation and no per-query sort.
-        self.entries
-            .sort_by(|a, b| a.z.cmp(&b.z).then(a.order.cmp(&b.order)));
+        let mut entries = Vec::new();
+        traversal::walk(world, root, None, &mut |world, entity, clip| {
+            collect_one(world, entity, *clip, &mut entries)
+        });
+        self.entries = entries;
     }
 
     fn pick(&self, _world: &World, q: &PickQuery) -> Option<PickHit> {
@@ -147,21 +147,16 @@ impl Picker for RectZPicker {
     }
 }
 
-/// `clip` is the intersection of every [`Clip`] enclosing `entity`, in window
-/// space, or `None` when nothing encloses it.
-fn collect(
+/// Record `entity` if it is pickable, and return the clip its children sit
+/// inside — the intersection of every [`Clip`] enclosing them, in window
+/// space, or `None` when nothing does. `None` as the *return* prunes the
+/// subtree, which is what an entity clipped entirely away does.
+fn collect_one(
     world: &World,
     entity: Entity,
     clip: Option<[f32; 4]>,
     entries: &mut Vec<PickEntry>,
-    next_order: &mut u32,
-) {
-    // `display: none`: absent from layout, so its rectangle is stale. Nothing
-    // here or below can be picked.
-    if world.get::<Hidden>(entity).is_some() {
-        return;
-    }
-
+) -> Option<Option<[f32; 4]>> {
     let box_of = |entity: Entity| {
         let layout = world.get::<LayoutOutput>(entity)?;
         let transform = world.get::<GlobalTransform>(entity)?;
@@ -181,7 +176,7 @@ fn collect(
             Some(outer) => match intersect(outer, own) {
                 Some(narrowed) => Some(narrowed),
                 // Entirely clipped away: nothing here or below can be picked.
-                None => return,
+                None => return None,
             },
             None => Some(own),
         },
@@ -197,22 +192,11 @@ fn collect(
             None => Some(rect),
         };
         if let Some(rect) = visible {
-            let z = world.get::<ZOrder>(entity).map(|z| z.0).unwrap_or(0);
-            entries.push(PickEntry {
-                entity,
-                rect,
-                z,
-                order: *next_order,
-            });
-            *next_order += 1;
+            entries.push(PickEntry { entity, rect });
         }
     }
 
-    if let Some(children) = world.get::<ViewChildren>(entity) {
-        for &(_, child) in &children.slots {
-            collect(world, child, clip, entries, next_order);
-        }
-    }
+    Some(clip)
 }
 
 /// Walk from `entity` up to the view root, yielding each ancestor (starting

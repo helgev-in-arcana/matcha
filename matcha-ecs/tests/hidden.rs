@@ -16,7 +16,7 @@ use matcha_ecs::{
         view::ViewChildren,
     },
     layout::{layout_root, Constraints},
-    pick::{PickQuery, Picker, RectZPicker},
+    pick::{PickQuery, Picker, RectPicker},
     render::extract_items,
     view::run_view,
 };
@@ -104,7 +104,7 @@ fn a_hidden_subtree_is_not_pickable() {
     };
 
     build(&mut world, true);
-    let picker = RectZPicker::build(&world, root);
+    let picker = RectPicker::build(&world, root);
     let hit = picker.pick(
         &world,
         &PickQuery {
@@ -114,7 +114,7 @@ fn a_hidden_subtree_is_not_pickable() {
     assert!(hit.is_some(), "the button should be pickable while shown");
 
     build(&mut world, false);
-    let picker = RectZPicker::build(&world, root);
+    let picker = RectPicker::build(&world, root);
     let hit = picker.pick(
         &world,
         &PickQuery {

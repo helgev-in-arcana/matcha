@@ -158,7 +158,7 @@ pub fn dispatch_pointer_from(
             continue;
         };
         // Translation-only, matching every current `Layout` impl (the same
-        // assumption `RectZPicker` makes when building its rectangles).
+        // assumption `RectPicker` makes when building its rectangles).
         let origin = world
             .get::<GlobalTransform>(entity)
             .map(|t| t.affine.transform_point(&nalgebra::Point3::origin()))

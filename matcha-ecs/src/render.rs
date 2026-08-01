@@ -25,10 +25,10 @@ use crate::{
     clip::ClipArena,
     components::{
         focus::{FocusWithin, Focused},
-        layout::{Clip, GlobalTransform, Hidden, LayoutOutput},
+        layout::{Clip, GlobalTransform, LayoutOutput},
         render::{RenderCtx, RenderItem, RenderOpacity},
-        view::ViewChildren,
     },
+    traversal,
 };
 
 /// One drawable entity captured for a frame: the shared node cache, its deferred
@@ -37,6 +37,10 @@ use crate::{
 /// its current opacity (`1.0` if the entity has no `RenderOpacity`), and its
 /// focus state.
 pub struct RenderItemSnapshot {
+    /// Which entity this was extracted from. Nothing on the render path reads
+    /// it — it is here so a frame can be traced back to the tree that produced
+    /// it, by a debugger or a test asserting on paint order.
+    pub entity: Entity,
     pub cache: Arc<Mutex<Option<Arc<RenderNode>>>>,
     pub builder: Arc<dyn Fn(&RenderCtx) -> RenderNode + Send + Sync>,
     pub transform: Matrix4<f32>,
@@ -78,71 +82,64 @@ pub struct RenderSnapshot {
     pub stencil_atlas: Arc<TextureAtlas>,
 }
 
-/// Depth-first (paint order) collection of a window root's drawable entities
-/// and the clips enclosing them. Clones each entity's `RenderItem` (the
-/// `cache`/`builder` `Arc`s are shared, not deep-copied) and its
-/// `GlobalTransform`; the builder is not invoked here.
+/// Collect a window root's drawable entities and the clips enclosing them, in
+/// paint order. Clones each entity's `RenderItem` (the `cache`/`builder`
+/// `Arc`s are shared, not deep-copied) and its `GlobalTransform`; the builder
+/// is not invoked here.
+///
+/// Order comes from [`crate::traversal::walk`], the same walk picking uses, so
+/// what is drawn on top is what a click lands on.
 pub fn extract_items(world: &World, root_entity: Entity) -> ExtractedFrame {
     let mut out = ExtractedFrame::default();
-    extract_recursive(world, root_entity, None, &mut out);
+    traversal::walk(world, root_entity, None, &mut |world, entity, clip| {
+        Some(extract_one(world, entity, *clip, &mut out))
+    });
     out
 }
 
-/// `clip` is the innermost clip enclosing `entity`'s children — including one
-/// `entity` itself may have declared.
-fn extract_recursive(
+/// Record `entity` if it draws, and return the innermost clip its children
+/// sit inside — which may be one `entity` itself declared.
+fn extract_one(
     world: &World,
     entity: Entity,
     clip: Option<u32>,
     out: &mut ExtractedFrame,
-) {
-    let Some(view_children) = world.get::<ViewChildren>(entity) else {
-        return;
+) -> Option<u32> {
+    // `LayoutOutput` is written by the same `arrange_child` call that writes
+    // `GlobalTransform`, so both are present on every laid-out entity;
+    // `[0.0, 0.0]` only for one carrying a hand-inserted transform.
+    let transform = world.get::<GlobalTransform>(entity).map(|t| t.affine);
+    let size = world
+        .get::<LayoutOutput>(entity)
+        .map(|l| l.size)
+        .unwrap_or([0.0, 0.0]);
+
+    // A `Clip` covers the declaring entity too, not only its descendants, so
+    // it is opened before the entity's own item is pushed.
+    let own_clip = match (world.get::<Clip>(entity).is_some(), transform) {
+        (true, Some(transform)) => Some(out.clips.push(clip, transform, size)),
+        _ => clip,
     };
-    let children: Vec<Entity> = view_children.slots.iter().map(|(_, e)| *e).collect();
 
-    for child in children {
-        // `display: none`. Layout already skipped it, so it still carries
-        // whatever transform it was last arranged with — painting it would put
-        // it back at that stale position.
-        if world.get::<Hidden>(child).is_some() {
-            continue;
-        }
-
-        // `LayoutOutput` is written by the same `arrange_child` call that writes
-        // `GlobalTransform`, so both are present on every laid-out entity;
-        // `[0.0, 0.0]` only for one carrying a hand-inserted transform.
-        let transform = world.get::<GlobalTransform>(child).map(|t| t.affine);
-        let size = world
-            .get::<LayoutOutput>(child)
-            .map(|l| l.size)
-            .unwrap_or([0.0, 0.0]);
-
-        // A `Clip` covers the declaring entity too, not only its descendants,
-        // so it is opened before the entity's own item is pushed.
-        let child_clip = match (world.get::<Clip>(child).is_some(), transform) {
-            (true, Some(transform)) => Some(out.clips.push(clip, transform, size)),
-            _ => clip,
-        };
-
-        if let (Some(item), Some(transform)) = (world.get::<RenderItem>(child), transform) {
-            let opacity = world
-                .get::<RenderOpacity>(child)
-                .map(|o| o.0)
-                .unwrap_or(1.0);
-            out.items.push(RenderItemSnapshot {
-                cache: item.cache.clone(),
-                builder: item.builder.clone(),
-                transform,
-                size,
-                opacity,
-                focused: world.get::<Focused>(child).is_some(),
-                focus_within: world.get::<FocusWithin>(child).is_some(),
-                clip: child_clip,
-            });
-        }
-        extract_recursive(world, child, child_clip, out);
+    if let (Some(item), Some(transform)) = (world.get::<RenderItem>(entity), transform) {
+        let opacity = world
+            .get::<RenderOpacity>(entity)
+            .map(|o| o.0)
+            .unwrap_or(1.0);
+        out.items.push(RenderItemSnapshot {
+            entity,
+            cache: item.cache.clone(),
+            builder: item.builder.clone(),
+            transform,
+            size,
+            opacity,
+            focused: world.get::<Focused>(entity).is_some(),
+            focus_within: world.get::<FocusWithin>(entity).is_some(),
+            clip: own_clip,
+        });
     }
+
+    own_clip
 }
 
 /// Build each item's (cached) render node and present the frame. Shared by both

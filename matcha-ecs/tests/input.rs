@@ -1,5 +1,5 @@
 //! Headless verification of picking and click resolution: build a view, run
-//! layout, then call `RectZPicker::build`/`resolve_click_at` directly (no
+//! layout, then call `RectPicker::build`/`resolve_click_at` directly (no
 //! window/GPU) and assert rects, overlap resolution, bubbling, and that the
 //! resolved entity's `OnClick<Msg>` carries the expected message. Same style
 //! as `tests/layout.rs`/`tests/extract.rs`.
@@ -17,7 +17,7 @@ use matcha_ecs::{
     },
     input::resolve_click_at,
     layout::{layout_root, Constraints},
-    pick::{PickQuery, Picker, RectZPicker},
+    pick::{PickQuery, Picker, RectPicker},
     view::{run_view, Widget},
 };
 use matcha_ecs_widgets::{Button, ColorRect, Column, Container, Row};
@@ -35,7 +35,7 @@ fn children(world: &World, e: Entity) -> Vec<Entity> {
         .unwrap_or_default()
 }
 
-fn click_at(world: &World, picker: &RectZPicker, pos: [f32; 2]) -> Option<Entity> {
+fn click_at(world: &World, picker: &RectPicker, pos: [f32; 2]) -> Option<Entity> {
     resolve_click_at::<Msg>(world, picker, &PickQuery { viewport_pos: pos })
 }
 
@@ -56,7 +56,7 @@ fn picking_finds_the_button_under_the_cursor() {
     let row = children(&world, root)[0];
     let [minus, plus]: [Entity; 2] = children(&world, row).try_into().unwrap();
 
-    let picker = RectZPicker::build(&world, root);
+    let picker = RectPicker::build(&world, root);
 
     // Inside "-" (origin [0,0], size 120x40).
     let hit = click_at(&world, &picker, [10.0, 10.0]);
@@ -81,7 +81,7 @@ fn picking_finds_the_button_under_the_cursor() {
 
 /// Two top-level `Button`s (not wrapped in a container) are each arranged at
 /// window origin `[0,0]` independently (`layout_root`'s documented top-level
-/// behaviour), so they exactly overlap. With no explicit `ZOrder` (both
+/// behaviour), so they exactly overlap. With neither declaring a `ZIndex` (both
 /// default to `0`), resolution must fall back to paint order: the
 /// later-declared (later-painted) button wins.
 #[test]
@@ -95,7 +95,7 @@ fn overlapping_top_level_buttons_resolve_to_the_later_painted_one() {
     layout_root(&mut world, root, Constraints::from_max_size([800.0, 600.0]));
 
     let [back, front]: [Entity; 2] = children(&world, root).try_into().unwrap();
-    let picker = RectZPicker::build(&world, root);
+    let picker = RectPicker::build(&world, root);
 
     let hit = click_at(&world, &picker, [10.0, 10.0]);
     assert_eq!(
@@ -123,7 +123,7 @@ fn nested_button_inside_a_plain_container_is_still_pickable() {
     let column = children(&world, root)[0];
     let button = children(&world, column)[0];
 
-    let picker = RectZPicker::build(&world, root);
+    let picker = RectPicker::build(&world, root);
     assert_eq!(click_at(&world, &picker, [10.0, 10.0]), Some(button));
 }
 
@@ -197,7 +197,7 @@ fn a_pick_on_a_handlerless_child_bubbles_to_the_nearest_ancestor_handler() {
     let parent = children(&world, root)[0];
     let child = children(&world, parent)[0];
 
-    let picker = RectZPicker::build(&world, root);
+    let picker = RectPicker::build(&world, root);
 
     // Picking itself lands on the child (later-painted, on top of the parent).
     let picked = picker
@@ -234,7 +234,7 @@ fn a_pickable_overlay_without_a_handler_does_not_fall_through_to_what_is_behind(
     layout_root(&mut world, root, Constraints::from_max_size([800.0, 600.0]));
 
     let [button, overlay]: [Entity; 2] = children(&world, root).try_into().unwrap();
-    let picker = RectZPicker::build(&world, root);
+    let picker = RectPicker::build(&world, root);
 
     // Inside the overlay (60x20) and therefore also inside the button (120x40).
     assert_eq!(
@@ -261,7 +261,7 @@ fn resolved_message_applied_through_a_reducer_updates_the_model() {
     });
     layout_root(&mut world, root, Constraints::from_max_size([800.0, 600.0]));
 
-    let picker = RectZPicker::build(&world, root);
+    let picker = RectPicker::build(&world, root);
     let entity = click_at(&world, &picker, [10.0, 10.0]).expect("the button is under the cursor");
     let msg = world
         .get::<OnClick<Msg>>(entity)

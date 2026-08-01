@@ -10,5 +10,6 @@ pub mod render;
 pub mod resources;
 pub mod systems;
 pub mod task;
+pub mod traversal;
 pub mod ui_ecs;
 pub mod view;

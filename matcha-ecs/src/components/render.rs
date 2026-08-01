@@ -55,6 +55,16 @@ pub struct RenderCtx<'a> {
 #[derive(Component, Clone, Copy, PartialEq, Debug)]
 pub struct RenderOpacity(pub f32);
 
+/// Where this entity sits among its siblings, low to high; declaration order
+/// breaks ties. Absent means `0`.
+///
+/// Reorders **painting and picking together** — see [`crate::traversal`],
+/// which is the only thing that reads it, and whose docs give the two
+/// restrictions that keep stacking to a single stable sort. A subtree moves as
+/// a unit, and a child never goes behind its parent however negative this is.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ZIndex(pub i32);
+
 impl Default for RenderOpacity {
     fn default() -> Self {
         RenderOpacity(1.0)

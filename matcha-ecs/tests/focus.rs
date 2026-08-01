@@ -21,7 +21,7 @@ use matcha_ecs::{
     },
     focus::{clear_focus, focus_from_pick, resolve_focus_path, validate_focus, Focus},
     layout::{layout_root, Constraints},
-    pick::{PickQuery, Picker, RectZPicker},
+    pick::{PickQuery, Picker, RectPicker},
     view::{despawn_ui_entity, run_view, Widget},
 };
 use matcha_ecs_widgets::{ColorRect, Column, Container};
@@ -141,7 +141,7 @@ fn setup(world: &mut World, view: impl FnOnce(&mut matcha_ecs::view::Scope)) -> 
 }
 
 fn pick_at(world: &World, root: Entity, pos: [f32; 2]) -> Option<Entity> {
-    RectZPicker::build(world, root)
+    RectPicker::build(world, root)
         .pick(world, &PickQuery { viewport_pos: pos })
         .map(|h| h.entity)
 }

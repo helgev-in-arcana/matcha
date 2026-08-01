@@ -299,7 +299,7 @@ where
         self
     }
 
-    /// Swap the picking backend (default: [`crate::pick::RectZPicker`], the 2D
+    /// Swap the picking backend (default: [`crate::pick::RectPicker`], the 2D
     /// flat-rect implementation). A 3D application would install a BVH or
     /// GPU ID-buffer picker here instead; nothing downstream of picking cares
     /// which one is in use.

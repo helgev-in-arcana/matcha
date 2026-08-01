@@ -11,7 +11,7 @@ use bevy_ecs::{entity::Entity, world::World};
 use matcha_ecs::{
     components::view::ViewChildren,
     layout::{layout_root, Constraints},
-    pick::{PickQuery, Picker, RectZPicker},
+    pick::{PickQuery, Picker, RectPicker},
     render::extract_items,
     view::run_view,
 };
@@ -156,7 +156,7 @@ fn a_widget_clipped_out_of_sight_is_no_longer_pickable() {
             s.leaf(Button::<()>::new("hit me").size(200.0, 200.0));
         });
     });
-    let picker = RectZPicker::build(&world, root);
+    let picker = RectPicker::build(&world, root);
 
     // Inside the panel: still pickable.
     assert!(picker
@@ -183,7 +183,7 @@ fn a_widget_entirely_outside_its_clip_is_dropped_from_picking() {
             });
         });
     });
-    let picker = RectZPicker::build(&world, root);
+    let picker = RectPicker::build(&world, root);
 
     for pos in [[10.0, 0.0], [40.0, 20.0], [70.0, 35.0]] {
         assert!(
