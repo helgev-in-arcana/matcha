@@ -56,7 +56,7 @@ use matcha_ecs::{
     components::{
         focus::{FocusDispatch, FocusPolicy, Focused},
         input::{
-            ImeCursorArea, ImeDispatch, KeyDispatch, Message, Pickable, PointerDispatch,
+            Cursor, ImeCursorArea, ImeDispatch, KeyDispatch, Message, Pickable, PointerDispatch,
             PointerInput, PointerPhase,
         },
         layout::{Clip, GlobalTransform},
@@ -282,6 +282,7 @@ pub struct TextBox<Msg: Message> {
     on_update: Option<fn(&str) -> Msg>,
     on_confirm: Option<fn(&str) -> Msg>,
     confirm_key: fn(&KeyInput) -> bool,
+    cursor: matcha_window::window::CursorIcon,
 }
 
 impl<Msg: Message> TextBox<Msg> {
@@ -306,6 +307,7 @@ impl<Msg: Message> TextBox<Msg> {
             on_update: None,
             on_confirm: None,
             confirm_key: confirm_on_ctrl_enter,
+            cursor: matcha_window::window::CursorIcon::Text,
         }
     }
 
@@ -377,6 +379,13 @@ impl<Msg: Message> TextBox<Msg> {
         self
     }
 
+    /// What the pointer looks like over this box (CSS `cursor`). The default
+    /// is the I-beam every platform uses for editable text.
+    pub fn cursor(mut self, cursor: matcha_window::window::CursorIcon) -> Self {
+        self.cursor = cursor;
+        self
+    }
+
     crate::sizing_builders!();
 
     pub fn key(mut self, key: impl Into<Key>) -> Self {
@@ -432,6 +441,8 @@ impl<Msg: Message> Widget for TextBox<Msg> {
                 // not merely its children.
                 Clip,
                 Pickable,
+                // An I-beam, as over any editable text.
+                Cursor(self.cursor),
                 // A text box owns its subtree for focus purposes: decorative
                 // children must never take the vertex away from it.
                 FocusPolicy::Claim,

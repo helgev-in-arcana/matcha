@@ -50,7 +50,7 @@ use crate::{
     keyboard::{dispatch_ime, dispatch_key, sync_ime_state},
     model::{ModelHandle, ModelResource},
     pick::{update_picker, PickQuery, Picker, PickerResource},
-    pointer::{self, sync_pointer_components},
+    pointer::{self, sync_cursor, sync_pointer_components},
     render::{build_and_present, extract_items, RenderDriver, RenderSnapshot, ThreadDriver},
     resources::{
         ClipMask, FrameTime, GpuResource, RedrawRequest, RenderWindowRoot, RendererResource,
@@ -255,7 +255,8 @@ where
         // Hover is re-resolved here, after `update_picker`, so a widget that
         // appears under a stationary cursor comes up already hovered.
         render_schedule.add_systems(
-            sync_pointer_components
+            (sync_pointer_components, sync_cursor)
+                .chain()
                 .after(update_picker)
                 .in_set(MatchaSet::PreExtract),
         );

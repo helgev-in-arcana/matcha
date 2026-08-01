@@ -10,6 +10,7 @@
 
 use bevy_ecs::{component::Component, world::EntityWorldMut};
 use matcha_window::event::device_event::{ImeEvent, KeyInput};
+use matcha_window::window::CursorIcon;
 
 /// Marker: this entity is **opaque to picking**.
 ///
@@ -49,6 +50,18 @@ pub struct Hovered;
 /// cursor that has wandered away. Derived state, same caveats as [`Hovered`].
 #[derive(Component, Clone, Copy)]
 pub struct Active;
+
+/// What the pointer should look like over this entity (CSS `cursor`).
+///
+/// Resolved **leaf to root** along the hover chain, so the innermost entity
+/// that has an opinion wins and an ancestor's is a fallback — which is what
+/// makes a plain `.cursor(Text)` on a text box survive whatever container it
+/// is dropped into. An entity without this component simply has no opinion.
+///
+/// The chain is the one [`PointerState`](crate::pointer::PointerState) already
+/// resolved; see [`crate::pointer::sync_cursor`].
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Cursor(pub CursorIcon);
 
 /// Marker bound for Elm-style messages: a cheap-to-clone, comparable value.
 ///

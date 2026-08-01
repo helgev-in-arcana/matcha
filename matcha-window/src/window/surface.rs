@@ -56,6 +56,9 @@ pub(crate) trait NativeWindow: utils::MaybeSendSync {
     fn dpi(&self) -> f64;
     fn request_redraw(&self);
 
+    // --- Cursor ---
+    fn set_cursor_icon(&self, icon: super::CursorIcon);
+
     // --- IME ---
     fn set_ime_allowed(&self, allowed: bool);
     fn set_ime_cursor_area(&self, position: [f32; 2], size: [f32; 2]);
@@ -327,6 +330,10 @@ impl WindowSurface {
 
     pub fn request_redraw(&self) {
         self.window.request_redraw();
+    }
+
+    pub fn set_cursor_icon(&self, icon: super::CursorIcon) {
+        self.window.set_cursor_icon(icon);
     }
 
     pub fn set_ime_allowed(&self, allowed: bool) {

@@ -23,11 +23,13 @@ use bevy_ecs::{bundle::Bundle, change_detection::DetectChangesMut, world::Entity
 use matcha_ecs::{
     components::{
         focus::FocusPolicy,
-        input::{Message, OnClick, Pickable},
+        input::{Cursor, Message, OnClick, Pickable},
         view::Key,
     },
     view::Widget,
 };
+
+use matcha_window::window::CursorIcon;
 
 use crate::rich_text::RichText;
 
@@ -40,6 +42,7 @@ pub struct Link<Msg: Message> {
     key: Key,
     text: RichText,
     msg: Option<Msg>,
+    cursor: CursorIcon,
 }
 
 impl<Msg: Message> Link<Msg> {
@@ -48,6 +51,7 @@ impl<Msg: Message> Link<Msg> {
             key: Key::Auto,
             text: RichText::new(content).color(LINK_ACCENT).underline(true),
             msg: None,
+            cursor: CursorIcon::Pointer,
         }
     }
 
@@ -75,6 +79,13 @@ impl<Msg: Message> Link<Msg> {
         self
     }
 
+    /// What the pointer looks like over this link (CSS `cursor`). The default
+    /// is the hand every platform uses for a hyperlink.
+    pub fn cursor(mut self, cursor: CursorIcon) -> Self {
+        self.cursor = cursor;
+        self
+    }
+
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = key.into();
         self
@@ -92,6 +103,7 @@ impl<Msg: Message> Widget for Link<Msg> {
             OnClick(self.msg.clone()),
             Pickable,
             FocusPolicy::Normal,
+            Cursor(self.cursor),
         )
     }
 

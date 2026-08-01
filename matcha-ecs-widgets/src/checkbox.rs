@@ -18,12 +18,13 @@
 use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, world::EntityWorldMut,
 };
+use matcha_window::window::CursorIcon;
 use nalgebra::{Matrix4, Vector3};
 
 use matcha_ecs::{
     components::{
         focus::FocusPolicy,
-        input::{Message, OnClick, Pickable},
+        input::{Cursor, Message, OnClick, Pickable},
         render::{RenderCtx, RenderItem},
         view::Key,
     },
@@ -58,6 +59,7 @@ pub struct Checkbox<Msg: Message> {
     fill_color: [f32; 4],
     border_width: f32,
     radius: f32,
+    cursor: CursorIcon,
     msg: Option<Msg>,
 }
 
@@ -72,6 +74,7 @@ impl<Msg: Message> Checkbox<Msg> {
             fill_color: [0.25, 0.5, 0.9, 1.0],
             border_width: 2.0,
             radius: 0.0,
+            cursor: CursorIcon::Pointer,
             msg: None,
         }
     }
@@ -109,6 +112,13 @@ impl<Msg: Message> Checkbox<Msg> {
     /// Round the box's corners; half the size makes it a radio button.
     pub fn radius(mut self, radius: f32) -> Self {
         self.radius = radius;
+        self
+    }
+
+
+    /// What the pointer looks like over this widget (CSS `cursor`).
+    pub fn cursor(mut self, cursor: CursorIcon) -> Self {
+        self.cursor = cursor;
         self
     }
 
@@ -178,6 +188,7 @@ impl<Msg: Message> Widget for Checkbox<Msg> {
             LayoutDispatch::of::<RectGeometry>(),
             Pickable,
             FocusPolicy::Normal,
+            Cursor(self.cursor),
         )
     }
 

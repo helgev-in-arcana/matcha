@@ -23,12 +23,13 @@
 use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, world::EntityWorldMut,
 };
+use matcha_window::window::CursorIcon;
 use nalgebra::{Matrix4, Vector3};
 
 use matcha_ecs::{
     components::{
         focus::FocusPolicy,
-        input::{Message, OnClick, Pickable},
+        input::{Cursor, Message, OnClick, Pickable},
         render::{RenderCtx, RenderItem},
         view::Key,
     },
@@ -78,6 +79,7 @@ pub struct Button<Msg: Message> {
     label_color: [f32; 4],
     focus_ring_color: [f32; 4],
     radius: f32,
+    cursor: CursorIcon,
 }
 
 impl<Msg: Message> Button<Msg> {
@@ -97,6 +99,7 @@ impl<Msg: Message> Button<Msg> {
             label_color: [1.0, 1.0, 1.0, 1.0],
             focus_ring_color: [0.45, 0.7, 1.0, 1.0],
             radius: 0.0,
+            cursor: CursorIcon::Pointer,
         }
     }
 
@@ -165,6 +168,13 @@ impl<Msg: Message> Button<Msg> {
     /// Round the button's corners (CSS `border-radius`).
     pub fn radius(mut self, radius: f32) -> Self {
         self.radius = radius;
+        self
+    }
+
+
+    /// What the pointer looks like over this widget (CSS `cursor`).
+    pub fn cursor(mut self, cursor: CursorIcon) -> Self {
+        self.cursor = cursor;
         self
     }
 
@@ -299,6 +309,7 @@ impl<Msg: Message> Widget for Button<Msg> {
             LayoutDispatch::of::<RectGeometry>(),
             Pickable,
             FocusPolicy::Normal,
+            Cursor(self.cursor),
         )
     }
 

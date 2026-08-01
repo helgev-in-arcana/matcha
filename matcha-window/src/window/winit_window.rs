@@ -185,6 +185,33 @@ impl NativeWindow for WinitWindow {
         self.0.request_redraw();
     }
 
+    fn set_cursor_icon(&self, icon: super::CursorIcon) {
+        use super::CursorIcon as C;
+        use winit::window::CursorIcon as W;
+        match icon {
+            C::Hidden => self.0.set_cursor_visible(false),
+            other => {
+                self.0.set_cursor_visible(true);
+                self.0.set_cursor(match other {
+                    C::Default | C::Hidden => W::Default,
+                    C::Pointer => W::Pointer,
+                    C::Text => W::Text,
+                    C::Progress => W::Progress,
+                    C::Wait => W::Wait,
+                    C::Crosshair => W::Crosshair,
+                    C::Move => W::Move,
+                    C::Grab => W::Grab,
+                    C::Grabbing => W::Grabbing,
+                    C::NotAllowed => W::NotAllowed,
+                    C::ResizeHorizontal => W::EwResize,
+                    C::ResizeVertical => W::NsResize,
+                    C::ResizeNeSw => W::NeswResize,
+                    C::ResizeNwSe => W::NwseResize,
+                });
+            }
+        }
+    }
+
     fn set_ime_allowed(&self, allowed: bool) {
         self.0.set_ime_allowed(allowed);
     }

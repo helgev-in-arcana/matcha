@@ -1,6 +1,8 @@
 use crate::adapter::EventLoop;
 
+pub mod cursor;
 pub mod window_config;
+pub use cursor::CursorIcon;
 pub use window_config::*;
 
 // --- Common Types ---
@@ -223,6 +225,14 @@ impl Window {
     /// simply cannot type into the window at all. Enable it while a widget that
     /// accepts text has focus, and disable it otherwise, so ordinary keyboard
     /// shortcuts are not swallowed by the IME.
+    /// Set the pointer's appearance while it is over this window.
+    ///
+    /// Pushed by whoever tracks what the pointer is over; this crate has no
+    /// opinion about when it changes.
+    pub fn set_cursor_icon(&self, icon: CursorIcon) {
+        self.window_surface.set_cursor_icon(icon);
+    }
+
     pub fn set_ime_allowed(&self, allowed: bool) {
         self.window_surface.set_ime_allowed(allowed);
     }

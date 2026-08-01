@@ -163,6 +163,8 @@ impl NativeWindow for HeadlessWindow {
     }
 
     // No platform IME to talk to.
+    fn set_cursor_icon(&self, _icon: super::CursorIcon) {}
+
     fn set_ime_allowed(&self, _allowed: bool) {}
     fn set_ime_cursor_area(&self, _position: [f32; 2], _size: [f32; 2]) {}
 

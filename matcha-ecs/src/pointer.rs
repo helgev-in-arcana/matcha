@@ -31,10 +31,21 @@
 
 use bevy_ecs::{entity::Entity, resource::Resource, query::With, world::World};
 
+use matcha_window::window::CursorIcon;
+
 use crate::{
-    components::input::{Active, Hovered},
+    components::{
+        input::{Active, Cursor, Hovered},
+        window::Window as WindowComp,
+    },
     pick::{ancestors, PickQuery, PickerResource},
+    resources::RenderWindowRoot,
 };
+
+/// The cursor shape last pushed to the window, so an unchanged one is not
+/// re-sent every frame.
+#[derive(Resource, Default, Debug, PartialEq)]
+struct CursorWindowState(CursorIcon);
 
 /// Where the pointer is and what it is touching.
 ///
@@ -178,6 +189,36 @@ pub fn sync_pointer_components(world: &mut World) {
 
     sync_marker(world, &hovered, Hovered);
     sync_marker(world, &active, Active);
+}
+
+/// Exclusive system: push the hovered widget's requested cursor shape to the
+/// window.
+///
+/// Resolution is **leaf to root** over the hover chain — the innermost entity
+/// with an opinion wins — mirroring how a positioned pointer event finds its
+/// first responder. Nothing hovered, or nothing on the chain with an opinion,
+/// means the platform default.
+pub fn sync_cursor(world: &mut World) {
+    let wanted = world
+        .resource::<PointerState>()
+        .hovered
+        .iter()
+        .rev()
+        .find_map(|&e| world.get::<Cursor>(e).map(|c| c.0))
+        .unwrap_or_default();
+
+    if world.get_resource_or_insert_with(CursorWindowState::default).0 == wanted {
+        return;
+    }
+
+    let Some(root) = world.get_resource::<RenderWindowRoot>().map(|r| r.entity) else {
+        return;
+    };
+    let Some(window) = world.get::<WindowComp>(root) else {
+        return;
+    };
+    window.window.set_cursor_icon(wanted);
+    world.resource_mut::<CursorWindowState>().0 = wanted;
 }
 
 /// Add `M` to everything in `wanted`, remove it from everything else, and
