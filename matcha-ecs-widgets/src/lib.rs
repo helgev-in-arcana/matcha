@@ -14,6 +14,7 @@ pub mod button;
 pub mod checkbox;
 pub mod color_rect;
 pub mod image;
+pub mod interaction;
 pub mod layout;
 pub mod link;
 pub mod padding;
@@ -37,6 +38,7 @@ pub use button::{Button, ButtonLabel};
 pub use checkbox::Checkbox;
 pub use color_rect::{ColorRect, RectColor};
 pub use image::{Image, ImageSource};
+pub use interaction::{ColorCell, InteractionColors};
 pub use layout::{AlignItems, Column, Container, Gap, JustifyContent, LayoutKind, Row, Wrap};
 pub use link::Link;
 pub use matcha_ecs::components::input::{Message, OnClick};
@@ -49,3 +51,27 @@ pub use scroll_view::{
 pub use sizing::{Length, Sizing};
 pub use text::{Text, TextContent};
 pub use text_box::{TextBox, TextBoxStyle, TextEditor};
+
+/// Every system this crate's widgets need, ready for
+/// [`UiEcs::with_pre_layout_systems`](matcha_ecs::ui_ecs::UiEcs::with_pre_layout_systems).
+///
+/// One registration instead of three. Each module still exposes its own
+/// `default_systems()` for an app that wants only part of it.
+///
+/// ```ignore
+/// UiEcs::new(model, view, reduce)
+///     .with_pre_layout_systems(matcha_ecs_widgets::default_systems())
+/// ```
+///
+/// Leaving this out is the one real footgun in this crate: exit fades never
+/// despawn, text boxes never re-lay-out, carets never blink, and colour
+/// transitions never advance.
+pub fn default_systems() -> bevy_ecs::schedule::ScheduleConfigs<bevy_ecs::system::ScheduleSystem> {
+    use bevy_ecs::schedule::IntoScheduleConfigs;
+    (
+        animation::default_systems(),
+        interaction::default_systems(),
+        text_box::default_systems(),
+    )
+        .into_configs()
+}

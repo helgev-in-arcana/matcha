@@ -26,10 +26,12 @@
 //! world, so no view re-run is involved.
 
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use matcha_ecs::{ui_ecs::UiEcs, view::Scope};
 use matcha_ecs_widgets::{
-    AlignItems, Button, Checkbox, Column, ColorRect, Image, JustifyContent, Link, Panel, Row, Text,
+    AlignItems, Button, Checkbox, Column, ColorRect, Easing, Image, JustifyContent, Link, Panel,
+    Row, Text,
 };
 use matcha_window::adapter::Adapter;
 
@@ -94,9 +96,16 @@ fn view(model: &Model, s: &mut Scope) {
         });
 
         // --- Button: real shaped labels, custom font_size/label_color, RectColor patch fix ---
-        section_label(s, "Button — real label; click one to see the focus ring; justify_content(SpaceBetween) exercised but inert (see doc comment)");
+        section_label(s, "Button — hover for a colour transition, hold for the pressed colour, click for the focus ring");
         s.node(Row::new().gap(10.0).justify_content(JustifyContent::SpaceBetween), |s| {
-            s.leaf(Button::new("-").on(Msg::Dec).color([0.8, 0.3, 0.3, 1.0]));
+            s.leaf(
+                Button::new("-")
+                    .on(Msg::Dec)
+                    .color([0.8, 0.3, 0.3, 1.0])
+                    .hover_color([0.95, 0.45, 0.45, 1.0])
+                    .active_color([0.55, 0.15, 0.15, 1.0])
+                    .transition(Duration::from_millis(140), Easing::EaseInOut),
+            );
             s.leaf(
                 Button::<Msg>::new(format!("count: {}", model.count))
                     .color([0.3, 0.3, 0.4, 1.0])
@@ -104,7 +113,14 @@ fn view(model: &Model, s: &mut Scope) {
                     .font_size(20.0)
                     .label_color([1.0, 0.9, 0.4, 1.0]),
             );
-            s.leaf(Button::new("+").on(Msg::Inc).color([0.3, 0.8, 0.4, 1.0]));
+            s.leaf(
+                Button::new("+")
+                    .on(Msg::Inc)
+                    .color([0.3, 0.8, 0.4, 1.0])
+                    .hover_color([0.45, 0.95, 0.55, 1.0])
+                    .active_color([0.15, 0.5, 0.25, 1.0])
+                    .transition(Duration::from_millis(140), Easing::EaseInOut),
+            );
         });
 
         // --- Link: default underline+accent, and fully customised ---
@@ -184,11 +200,16 @@ fn reduce(model: &mut Model, msg: Msg) {
 
 fn main() {
     env_logger::init();
-    Adapter::new(UiEcs::new(
-        Model { count: 0, checked_a: false, checked_b: true },
-        view,
-        reduce,
-    ))
+    Adapter::new(
+        UiEcs::new(
+            Model { count: 0, checked_a: false, checked_b: true },
+            view,
+            reduce,
+        )
+        // Without this the hover colours still apply, but they snap rather
+        // than easing: nothing advances the transition.
+        .with_pre_layout_systems(matcha_ecs_widgets::default_systems()),
+    )
     .run()
     .expect("event loop failed");
 }

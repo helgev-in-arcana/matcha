@@ -37,10 +37,13 @@ use matcha_ecs::{
 };
 
 use crate::{
-    sizing::Sizing,
+    animation::Easing,
     color_rect::{solid_rect_node, RectColor, RectGeometry},
+    interaction::{interaction_cell, ColorCell, InteractionColors},
+    sizing::Sizing,
     text::{glyph_run_nodes, paint_tint_region, shape, FontCtx},
 };
+use std::time::Duration;
 
 /// The button's label text.
 #[derive(Component, Clone, PartialEq, Eq, Debug)]
@@ -65,6 +68,9 @@ pub struct Button<Msg: Message> {
     w: f32,
     h: f32,
     color: [f32; 4],
+    hover_color: Option<[f32; 4]>,
+    active_color: Option<[f32; 4]>,
+    transition: Option<(Duration, Easing)>,
     font_size: f32,
     label_color: [f32; 4],
     focus_ring_color: [f32; 4],
@@ -80,6 +86,9 @@ impl<Msg: Message> Button<Msg> {
             w: 120.0,
             h: 40.0,
             color: [0.35, 0.35, 0.4, 1.0],
+            hover_color: None,
+            active_color: None,
+            transition: None,
             font_size: 16.0,
             label_color: [1.0, 1.0, 1.0, 1.0],
             focus_ring_color: [0.45, 0.7, 1.0, 1.0],
@@ -102,6 +111,30 @@ impl<Msg: Message> Button<Msg> {
     /// Override the default fill colour (components in `0.0..=1.0`).
     pub fn color(mut self, color: [f32; 4]) -> Self {
         self.color = color;
+        self
+    }
+
+    /// Fill colour while the pointer is over the button (CSS `:hover`).
+    pub fn hover_color(mut self, color: [f32; 4]) -> Self {
+        self.hover_color = Some(color);
+        self
+    }
+
+    /// Fill colour while the button is held down (CSS `:active`). Falls back to
+    /// the hover colour when unset.
+    pub fn active_color(mut self, color: [f32; 4]) -> Self {
+        self.active_color = Some(color);
+        self
+    }
+
+    /// Ease between the state colours over `duration` instead of snapping
+    /// (CSS `transition`).
+    ///
+    /// Needs `matcha_ecs_widgets::default_systems()` registered with
+    /// `UiEcs::with_pre_layout_systems`; without it the colour stays at the
+    /// base one.
+    pub fn transition(mut self, duration: Duration, easing: Easing) -> Self {
+        self.transition = Some((duration, easing));
         self
     }
 
@@ -138,6 +171,15 @@ impl<Msg: Message> Button<Msg> {
         }
     }
 
+    fn colors(&self) -> InteractionColors {
+        InteractionColors {
+            base: self.color,
+            hover: self.hover_color,
+            active: self.active_color,
+            transition: self.transition,
+        }
+    }
+
     fn text_style(&self) -> ButtonTextStyle {
         ButtonTextStyle {
             font_size: self.font_size,
@@ -153,9 +195,12 @@ impl<Msg: Message> Button<Msg> {
     /// it cannot be built inside `bundle()`).
     fn rebuild_render_item(&self, entity: &mut EntityWorldMut) -> RenderItem {
         let font_ctx = entity.world_scope(|world| world.get_resource_or_insert_with(FontCtx::new).clone());
+        // The cell survives this rebuild, so an in-flight hover transition is
+        // not restarted by an unrelated prop change.
+        let box_color = interaction_cell(entity, self.colors());
         button_render_item(
             font_ctx,
-            self.color,
+            box_color,
             self.label.clone(),
             self.font_size,
             self.label_color,
@@ -171,13 +216,17 @@ const FOCUS_RING_WIDTH: f32 = 2.0;
 /// shaped text label on top (no word-wrap — a button label is one line).
 /// Drawn at the layout-allocated size (`ctx.size`), not the declared one.
 ///
+/// The fill colour comes from a [`ColorCell`] rather than being captured
+/// directly, so `:hover`/`:active` (and any transition between them) reach the
+/// builder without a rebuild of the closure itself.
+///
 /// When the button holds focus (`ctx.focused`) the box is drawn as a ring in
 /// `focus_ring_color` with the normal fill inset inside it. `focus.rs`'s
 /// `sync_focus_components` invalidates the cached node on every focus
 /// transition, so this is re-evaluated exactly when it changes.
 fn button_render_item(
     font_ctx: FontCtx,
-    box_color: [f32; 4],
+    box_color: ColorCell,
     label: String,
     font_size: f32,
     label_color: [f32; 4],
@@ -185,6 +234,10 @@ fn button_render_item(
 ) -> RenderItem {
     RenderItem::new(move |ctx: &RenderCtx| {
         let [w, h] = ctx.size;
+        // Read live: `advance_interaction_colors` writes this between frames
+        // and invalidates the cached node, so each rebuild sees the current
+        // step of the hover/press transition.
+        let box_color = box_color.get();
 
         let mut node = if ctx.focused {
             // Ring underneath, fill inset on top — the same two-quad technique
@@ -250,6 +303,10 @@ impl<Msg: Message> Widget for Button<Msg> {
 
     fn patch(&self, entity: &mut EntityWorldMut) {
         self.sync_sizing(entity);
+        // Unconditional: the builder reads the colours through the cell, so a
+        // changed hover colour or transition takes effect with no rebuild.
+        interaction_cell(entity, self.colors());
+
         let mut changed = false;
         if let Some(mut label) = entity.get_mut::<ButtonLabel>() {
             changed |= label.set_if_neq(ButtonLabel(self.label.clone()));
