@@ -9,6 +9,7 @@
 //! distinct type (so the reconciler can tell them apart by `TypeId`) exposing a
 //! `.key(id)` builder to set its intrinsic reconciliation key.
 
+pub mod anchor;
 pub mod animation;
 pub mod box_style;
 pub mod button;
@@ -23,6 +24,7 @@ pub mod panel;
 pub mod rich_text;
 pub mod scroll_view;
 pub mod shape;
+pub mod slider;
 pub mod sizing;
 pub mod text;
 pub mod text_box;
@@ -34,6 +36,7 @@ pub mod text_box;
 // dependency.
 pub use parley;
 
+pub use anchor::Anchor;
 pub use animation::Easing;
 pub use box_style::{box_node, BoxShadow, BoxStyle, Corners, Sides};
 pub use button::{Button, ButtonLabel};
@@ -44,6 +47,7 @@ pub use interaction::{ColorCell, InteractionColors};
 pub use layout::{AlignItems, Column, Container, Gap, JustifyContent, LayoutKind, Row, Wrap};
 pub use link::Link;
 pub use matcha_ecs::components::input::{Cursor, Message, OnClick};
+pub use matcha_ecs::components::render::ZIndex;
 pub use matcha_window::window::CursorIcon;
 pub use padding::{Padding, PaddingLayout};
 pub use panel::{Panel, PanelLayout};
@@ -52,6 +56,7 @@ pub use scroll_view::{
     scroll_view, Axis, Overflow, ScrollState, ScrollView, ScrollViewLayout, ScrollbarStyle,
 };
 pub use sizing::{Length, Sizing};
+pub use slider::{Slider, SliderRange};
 pub use text::{Text, TextContent};
 pub use text_box::{TextBox, TextBoxStyle, TextEditor};
 
