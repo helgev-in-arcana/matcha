@@ -15,6 +15,8 @@ use matcha_ecs::{
     view::Widget,
 };
 
+use crate::sizing::Sizing;
+
 /// Which layout a container applies. Constant per widget type; carried as a
 /// data component so systems can query it.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
@@ -33,19 +35,11 @@ pub struct Gap(pub f32);
 /// a child's own size — there is no flex-grow/flex-basis here, only
 /// repositioning. Default matches CSS's `flex-start`.
 ///
-/// **Currently has no visible effect with this crate's widget set**: every
-/// `Layout::arrange` call in this codebase (`layout_root`, `Container`,
-/// `Padding`, `Panel`) always hands a child exactly the size its own
-/// `measure()` returned for the same constraints — `Column`/`Row` size
-/// themselves to content ("fit-content"), so main-axis leftover space is
-/// always `0.0`. It starts having a visible effect once a widget exists that
-/// can allocate a `Column`/`Row` *more* main-axis space than its children's
-/// natural sum (e.g. a future "fill available space" sizing mode) — until
-/// then this is forward-compatible scaffolding, exercised directly at the
-/// unit level below rather than through an end-to-end layout test.
-/// `AlignItems` does not have this limitation: a `Column`/`Row`'s
-/// *cross*-axis size is the max of its children's natural cross sizes, so a
-/// narrower sibling reachably differs from that today.
+/// Only has an effect when the container is larger on its main axis than its
+/// children's natural sum, which means giving it a main-axis size of its own:
+/// `Column::new().height(Length::Fill).justify_content(..)`. Left at the
+/// default `Auto` sizing a `Column`/`Row` is exactly as tall/wide as its
+/// content, so there is no leftover space to distribute.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum JustifyContent {
     #[default]
@@ -76,6 +70,7 @@ struct Align(AlignItems);
 pub struct Container {
     key: Key,
     visible: bool,
+    sizing: Sizing,
 }
 
 impl Default for Container {
@@ -89,8 +84,11 @@ impl Container {
         Self {
             key: Key::Auto,
             visible: true,
+            sizing: Sizing::default(),
         }
     }
+
+    crate::sizing_builders!();
 
     /// CSS `display: none` when `false`: this container and everything under it
     /// take no part in layout, drawing or picking.
@@ -131,7 +129,11 @@ impl Widget for Container {
     }
 
     fn bundle(&self) -> impl Bundle {
-        (LayoutKind::Container, LayoutDispatch::of::<LayoutKind>())
+        (
+            LayoutKind::Container,
+            self.sizing,
+            LayoutDispatch::of::<LayoutKind>(),
+        )
     }
 
     fn after_spawn(&self, entity: &mut EntityWorldMut) {
@@ -139,8 +141,11 @@ impl Widget for Container {
     }
 
     fn patch(&self, entity: &mut EntityWorldMut) {
-        // LayoutKind is constant for this type; only visibility can change.
+        // LayoutKind is constant for this type.
         self.sync_visible(entity);
+        if let Some(mut sizing) = entity.get_mut::<Sizing>() {
+            sizing.set_if_neq(self.sizing);
+        }
     }
 }
 
@@ -152,6 +157,7 @@ macro_rules! stack_widget {
             gap: f32,
             justify: JustifyContent,
             align: AlignItems,
+            sizing: Sizing,
         }
 
         impl $name {
@@ -161,8 +167,11 @@ macro_rules! stack_widget {
                     gap: 0.0,
                     justify: JustifyContent::default(),
                     align: AlignItems::default(),
+                    sizing: Sizing::default(),
                 }
             }
+
+            crate::sizing_builders!();
 
             pub fn gap(mut self, gap: f32) -> Self {
                 self.gap = gap;
@@ -204,6 +213,7 @@ macro_rules! stack_widget {
                     Gap(self.gap),
                     Justify(self.justify),
                     Align(self.align),
+                    self.sizing,
                     LayoutDispatch::of::<LayoutKind>(),
                 )
             }
@@ -211,6 +221,9 @@ macro_rules! stack_widget {
             fn patch(&self, entity: &mut EntityWorldMut) {
                 if let Some(mut gap) = entity.get_mut::<Gap>() {
                     gap.set_if_neq(Gap(self.gap));
+                }
+                if let Some(mut sizing) = entity.get_mut::<Sizing>() {
+                    sizing.set_if_neq(self.sizing);
                 }
                 if let Some(mut justify) = entity.get_mut::<Justify>() {
                     justify.set_if_neq(Justify(self.justify));
@@ -270,6 +283,19 @@ impl LayoutKind {
         ctx.world().get::<Align>(me).map(|a| a.0).unwrap_or_default()
     }
 
+    fn sizing(&self, ctx: &LayoutCtx, me: Entity) -> Sizing {
+        ctx.world().get::<Sizing>(me).copied().unwrap_or_default()
+    }
+
+    /// Index into an `[x, y]` pair of the axis children stack along.
+    /// Meaningless for `Container`, which stacks nothing.
+    fn main_axis(&self) -> usize {
+        match self {
+            LayoutKind::Row => 0,
+            LayoutKind::Column | LayoutKind::Container => 1,
+        }
+    }
+
     fn my_affine(ctx: &LayoutCtx, me: Entity) -> Matrix4<f32> {
         ctx.world()
             .get::<GlobalTransform>(me)
@@ -280,108 +306,91 @@ impl LayoutKind {
 
 impl Layout for LayoutKind {
     fn measure(&self, ctx: &mut LayoutCtx, me: Entity, c: Constraints) -> Measured {
+        let sizing = self.sizing(ctx, me);
+        // The content sees the box's own size where it has one, so a `Fill`
+        // column wraps its text to the space it took rather than to the
+        // window.
+        let inner = sizing.content_constraints(c);
         let children = ctx.children(me);
 
-        match self {
+        let content = match self {
             LayoutKind::Container => match children.first() {
-                Some(&child) => ctx.measure_child(child, c),
+                Some(&child) => ctx.measure_child(child, inner),
                 None => Measured::exact([0.0, 0.0]),
             },
-            LayoutKind::Column => {
+            LayoutKind::Column | LayoutKind::Row => {
+                let main = self.main_axis();
+                let cross = 1 - main;
                 let gap = self.gap(ctx, me);
-                let child_c = Constraints::new([0.0, c.max_width()], [0.0, c.max_height()]);
                 let sizes: Vec<[f32; 2]> = children
                     .iter()
-                    .map(|&e| ctx.measure_child_size(e, child_c))
+                    .map(|&e| ctx.measure_child_size(e, inner))
                     .collect();
-                let total_h: f32 = sizes.iter().map(|s| s[1]).sum::<f32>()
+                let mut size = [0.0; 2];
+                size[main] = sizes.iter().map(|s| s[main]).sum::<f32>()
                     + gap * sizes.len().saturating_sub(1) as f32;
-                let max_w: f32 = sizes.iter().map(|s| s[0]).fold(0.0, f32::max);
-                Measured::exact([max_w.min(c.max_width()), total_h.min(c.max_height())])
+                size[cross] = sizes.iter().map(|s| s[cross]).fold(0.0, f32::max);
+                Measured::exact(size)
             }
-            LayoutKind::Row => {
-                let gap = self.gap(ctx, me);
-                let child_c = Constraints::new([0.0, c.max_width()], [0.0, c.max_height()]);
-                let sizes: Vec<[f32; 2]> = children
-                    .iter()
-                    .map(|&e| ctx.measure_child_size(e, child_c))
-                    .collect();
-                let total_w: f32 = sizes.iter().map(|s| s[0]).sum::<f32>()
-                    + gap * sizes.len().saturating_sub(1) as f32;
-                let max_h: f32 = sizes.iter().map(|s| s[1]).fold(0.0, f32::max);
-                Measured::exact([total_w.min(c.max_width()), max_h.min(c.max_height())])
-            }
-        }
+        };
+
+        sizing.measured(c, content)
     }
 
     fn arrange(&self, ctx: &mut LayoutCtx, me: Entity, size: [f32; 2]) {
         let children = ctx.children(me);
         let my_affine = Self::my_affine(ctx, me);
+        let child_c = Constraints::from_max_size(size);
 
-        match self {
-            LayoutKind::Container => {
-                if let Some(&child) = children.first() {
-                    let child_c = Constraints::from_max_size(size);
-                    let child_size = ctx.measure_child_size(child, child_c);
-                    ctx.arrange_child(child, [0.0, 0.0], my_affine, child_size);
-                }
+        if let LayoutKind::Container = self {
+            if let Some(&child) = children.first() {
+                let child_size = ctx.measure_child_size(child, child_c);
+                ctx.arrange_child(child, [0.0, 0.0], my_affine, child_size);
             }
-            LayoutKind::Column => {
-                let gap = self.gap(ctx, me);
-                let justify = self.justify(ctx, me);
-                let align = self.align(ctx, me);
-                let child_c = Constraints::new([0.0, size[0]], [0.0, size[1]]);
-                let natural: Vec<[f32; 2]> = children.iter().map(|&e| ctx.measure_child_size(e, child_c)).collect();
-                let natural_total: f32 = natural.iter().map(|s| s[1]).sum::<f32>()
-                    + gap * natural.len().saturating_sub(1) as f32;
-                let extra = (size[1] - natural_total).max(0.0);
-                let (mut y, extra_gap) = justify_offsets(justify, extra, children.len());
-                for (i, &child) in children.iter().enumerate() {
-                    let child_size = if align == AlignItems::Stretch {
-                        let stretched_c = Constraints::new([size[0], size[0]], [0.0, size[1]]);
-                        ctx.measure_child_size(child, stretched_c)
-                    } else {
-                        natural[i]
-                    };
-                    let x = align_offset(align, size[0], child_size[0]);
-                    ctx.arrange_child(child, [x, y], my_affine, child_size);
-                    y += child_size[1] + gap + extra_gap;
-                }
-            }
-            LayoutKind::Row => {
-                let gap = self.gap(ctx, me);
-                let justify = self.justify(ctx, me);
-                let align = self.align(ctx, me);
-                let child_c = Constraints::new([0.0, size[0]], [0.0, size[1]]);
-                let natural: Vec<[f32; 2]> = children.iter().map(|&e| ctx.measure_child_size(e, child_c)).collect();
-                let natural_total: f32 = natural.iter().map(|s| s[0]).sum::<f32>()
-                    + gap * natural.len().saturating_sub(1) as f32;
-                let extra = (size[0] - natural_total).max(0.0);
-                let (mut x, extra_gap) = justify_offsets(justify, extra, children.len());
-                for (i, &child) in children.iter().enumerate() {
-                    let child_size = if align == AlignItems::Stretch {
-                        let stretched_c = Constraints::new([0.0, size[0]], [size[1], size[1]]);
-                        ctx.measure_child_size(child, stretched_c)
-                    } else {
-                        natural[i]
-                    };
-                    let y = align_offset(align, size[1], child_size[1]);
-                    ctx.arrange_child(child, [x, y], my_affine, child_size);
-                    x += child_size[0] + gap + extra_gap;
-                }
-            }
+            return;
+        }
+
+        // Column and Row differ only in which axis stacks.
+        let main = self.main_axis();
+        let cross = 1 - main;
+        let gap = self.gap(ctx, me);
+        let justify = self.justify(ctx, me);
+        let align = self.align(ctx, me);
+
+        let natural: Vec<[f32; 2]> = children
+            .iter()
+            .map(|&e| ctx.measure_child_size(e, child_c))
+            .collect();
+        let natural_total: f32 = natural.iter().map(|s| s[main]).sum::<f32>()
+            + gap * natural.len().saturating_sub(1) as f32;
+        let extra = (size[main] - natural_total).max(0.0);
+        let (mut main_pos, extra_gap) = justify_offsets(justify, extra, children.len());
+
+        for (i, &child) in children.iter().enumerate() {
+            let child_size = if align == AlignItems::Stretch {
+                let mut min = [0.0; 2];
+                min[cross] = size[cross];
+                let stretched_c =
+                    Constraints::new([min[0], size[0]], [min[1], size[1]]);
+                ctx.measure_child_size(child, stretched_c)
+            } else {
+                natural[i]
+            };
+
+            let mut origin = [0.0; 2];
+            origin[main] = main_pos;
+            origin[cross] = align_offset(align, size[cross], child_size[cross]);
+            ctx.arrange_child(child, origin, my_affine, child_size);
+            main_pos += child_size[main] + gap + extra_gap;
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    //! `justify_offsets`/`align_offset` are pure arrange-math helpers. Given
-    //! this crate's current widget set never hands a `Column`/`Row` more
-    //! main-axis space than its children's natural sum (see
-    //! `JustifyContent`'s doc comment), `justify_offsets`'s non-zero-`extra`
-    //! branches are otherwise unreachable through an end-to-end layout test
-    //! today — exercised directly here instead.
+    //! `justify_offsets`/`align_offset` are pure arrange-math helpers, covered
+    //! here case by case; `matcha-ecs/tests/sizing.rs` drives the interesting
+    //! ones end-to-end through a `Fill`-sized column.
     use super::*;
 
     #[test]

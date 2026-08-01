@@ -21,6 +21,7 @@ pub mod panel;
 pub mod rich_text;
 pub mod scroll_view;
 pub mod shape;
+pub mod sizing;
 pub mod text;
 pub mod text_box;
 
@@ -45,5 +46,6 @@ pub use rich_text::{RichSpan, RichText, RichTextContent, TextTransform, WhiteSpa
 pub use scroll_view::{
     scroll_view, Axis, Overflow, ScrollState, ScrollView, ScrollViewLayout, ScrollbarStyle,
 };
+pub use sizing::{Length, Sizing};
 pub use text::{Text, TextContent};
 pub use text_box::{TextBox, TextBoxStyle, TextEditor};
