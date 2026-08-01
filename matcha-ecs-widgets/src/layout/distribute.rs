@@ -108,6 +108,35 @@ pub fn distribute(items: &[Item], available: f32) -> Vec<f32> {
     sizes
 }
 
+/// Split `bases` into consecutive lines that each fit `available`, allowing
+/// `gap` between neighbours on a line.
+///
+/// A line always takes at least one item, so an item wider than the whole
+/// container gets a line of its own and overflows it rather than producing an
+/// empty line and looping. Breaks are decided from the *base* sizes, before
+/// any distribution — the same order CSS uses, and the reason a line's items
+/// can still grow into whatever their line has left.
+pub fn split_lines(bases: &[f32], gap: f32, available: f32) -> Vec<std::ops::Range<usize>> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut used = 0.0;
+
+    for (i, &base) in bases.iter().enumerate() {
+        let with_gap = if i == start { base } else { used + gap + base };
+        if i > start && with_gap > available {
+            lines.push(start..i);
+            start = i;
+            used = base;
+        } else {
+            used = with_gap;
+        }
+    }
+    if start < bases.len() {
+        lines.push(start..bases.len());
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +226,33 @@ mod tests {
     #[test]
     fn an_empty_container_distributes_nothing() {
         assert_eq!(distribute(&[], 500.0), Vec::<f32>::new());
+    }
+
+    #[test]
+    fn everything_fitting_is_a_single_line() {
+        assert_eq!(split_lines(&[50.0, 30.0], 10.0, 200.0), vec![0..2]);
+    }
+
+    #[test]
+    fn a_line_breaks_before_the_item_that_would_not_fit() {
+        assert_eq!(split_lines(&[50.0, 50.0, 50.0], 0.0, 100.0), vec![0..2, 2..3]);
+    }
+
+    #[test]
+    fn gaps_count_against_the_space_a_line_has() {
+        // 50 + 10 + 50 = 110, over the 100 available, so the second wraps.
+        assert_eq!(split_lines(&[50.0, 50.0], 10.0, 100.0), vec![0..1, 1..2]);
+    }
+
+    #[test]
+    fn an_item_wider_than_the_container_gets_its_own_line_and_overflows() {
+        // The alternative would be an empty line, and then a loop.
+        assert_eq!(split_lines(&[300.0, 10.0], 0.0, 100.0), vec![0..1, 1..2]);
+    }
+
+    #[test]
+    fn no_items_means_no_lines() {
+        assert_eq!(split_lines(&[], 10.0, 100.0), Vec::<std::ops::Range<usize>>::new());
     }
 
     #[test]

@@ -37,7 +37,7 @@ pub use button::{Button, ButtonLabel};
 pub use checkbox::Checkbox;
 pub use color_rect::{ColorRect, RectColor};
 pub use image::{Image, ImageSource};
-pub use layout::{AlignItems, Column, Container, Gap, JustifyContent, LayoutKind, Row};
+pub use layout::{AlignItems, Column, Container, Gap, JustifyContent, LayoutKind, Row, Wrap};
 pub use link::Link;
 pub use matcha_ecs::components::input::{Message, OnClick};
 pub use padding::{Padding, PaddingLayout};

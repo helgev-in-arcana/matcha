@@ -63,10 +63,27 @@ pub enum AlignItems {
     Center,
 }
 
+/// CSS `flex-wrap`: whether children that do not fit start a new line.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Wrap {
+    /// Everything on one line, overflowing if it must. CSS's default.
+    #[default]
+    NoWrap,
+    Wrap,
+    /// Wraps, but stacks the lines from the far cross edge back.
+    WrapReverse,
+}
+
 /// Reverses the main axis, as CSS's `row-reverse`/`column-reverse` do: the
 /// last child is laid out first, from what was the far edge.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Default)]
 struct Reverse(bool);
+
+/// CSS `align-content`: how leftover *cross*-axis space is shared out between
+/// wrapped lines. Reuses [`JustifyContent`] because the value set is the same
+/// one — CSS spells them separately only because they act on different axes.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct AlignContent(JustifyContent);
 
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Default)]
 struct Justify(JustifyContent);
@@ -165,6 +182,8 @@ macro_rules! stack_widget {
             justify: JustifyContent,
             align: AlignItems,
             reverse: bool,
+            wrap: Wrap,
+            align_content: JustifyContent,
             sizing: Sizing,
         }
 
@@ -176,6 +195,8 @@ macro_rules! stack_widget {
                     justify: JustifyContent::default(),
                     align: AlignItems::default(),
                     reverse: false,
+                    wrap: Wrap::default(),
+                    align_content: JustifyContent::default(),
                     sizing: Sizing::default(),
                 }
             }
@@ -184,6 +205,23 @@ macro_rules! stack_widget {
             /// CSS's `row-reverse`/`column-reverse` do.
             pub fn reverse(mut self, reverse: bool) -> Self {
                 self.reverse = reverse;
+                self
+            }
+
+            /// CSS `flex-wrap`: whether children that do not fit start a new
+            /// line. Lines break at the children's natural sizes, so a
+            /// wrapping container is as long on its main axis as its widest
+            /// line and as deep on its cross axis as its lines stacked up.
+            pub fn wrap(mut self, wrap: Wrap) -> Self {
+                self.wrap = wrap;
+                self
+            }
+
+            /// CSS `align-content`: how leftover cross-axis space is shared
+            /// out between wrapped lines. Only has an effect when wrapping and
+            /// when the container has cross-axis space to spare.
+            pub fn align_content(mut self, align: JustifyContent) -> Self {
+                self.align_content = align;
                 self
             }
 
@@ -230,6 +268,8 @@ macro_rules! stack_widget {
                     Justify(self.justify),
                     Align(self.align),
                     Reverse(self.reverse),
+                    self.wrap,
+                    AlignContent(self.align_content),
                     self.sizing,
                     LayoutDispatch::of::<LayoutKind>(),
                 )
@@ -250,6 +290,12 @@ macro_rules! stack_widget {
                 }
                 if let Some(mut reverse) = entity.get_mut::<Reverse>() {
                     reverse.set_if_neq(Reverse(self.reverse));
+                }
+                if let Some(mut wrap) = entity.get_mut::<Wrap>() {
+                    wrap.set_if_neq(self.wrap);
+                }
+                if let Some(mut ac) = entity.get_mut::<AlignContent>() {
+                    ac.set_if_neq(AlignContent(self.align_content));
                 }
             }
         }
@@ -353,6 +399,46 @@ impl LayoutKind {
         ctx.world().get::<Reverse>(me).map(|r| r.0).unwrap_or(false)
     }
 
+    fn wrap(&self, ctx: &LayoutCtx, me: Entity) -> Wrap {
+        ctx.world().get::<Wrap>(me).copied().unwrap_or_default()
+    }
+
+    fn align_content(&self, ctx: &LayoutCtx, me: Entity) -> JustifyContent {
+        ctx.world()
+            .get::<AlignContent>(me)
+            .map(|a| a.0)
+            .unwrap_or_default()
+    }
+
+    /// The line breaks for these base sizes: one line per `Wrap::NoWrap`,
+    /// otherwise as many as it takes. `WrapReverse` stacks the same lines from
+    /// the far cross edge, which is a reversal of the line *order*, not of the
+    /// items within a line.
+    fn lines(
+        &self,
+        ctx: &LayoutCtx,
+        me: Entity,
+        bases: &[f32],
+        gap: f32,
+        available: f32,
+    ) -> Vec<std::ops::Range<usize>> {
+        match self.wrap(ctx, me) {
+            Wrap::NoWrap => {
+                if bases.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![0..bases.len()]
+                }
+            }
+            Wrap::Wrap => distribute::split_lines(bases, gap, available),
+            Wrap::WrapReverse => {
+                let mut lines = distribute::split_lines(bases, gap, available);
+                lines.reverse();
+                lines
+            }
+        }
+    }
+
     /// Children in layout order: by `order`, ties keeping declaration order,
     /// then flipped for `reverse`.
     ///
@@ -413,10 +499,29 @@ impl Layout for LayoutKind {
                     .iter()
                     .map(|&e| ctx.measure_child_size(e, inner))
                     .collect();
-                let mut size = [0.0; 2];
-                size[main] = sizes.iter().map(|s| s[main]).sum::<f32>()
-                    + gap * sizes.len().saturating_sub(1) as f32;
-                size[cross] = sizes.iter().map(|s| s[cross]).fold(0.0, f32::max);
+
+                let bases: Vec<f32> = sizes.iter().map(|s| s[main]).collect();
+                let limit = if main == 0 {
+                    inner.max_width()
+                } else {
+                    inner.max_height()
+                };
+                let lines = self.lines(ctx, me, &bases, gap, limit);
+
+                // Longest line along the main axis; all the lines stacked up
+                // along the cross axis. Without wrapping that is one line, and
+                // reduces to the sum and the max it always was.
+                let mut size = [0.0f32; 2];
+                for line in &lines {
+                    let extent: f32 = bases[line.clone()].iter().sum::<f32>()
+                        + gap * line.len().saturating_sub(1) as f32;
+                    size[main] = size[main].max(extent);
+                    size[cross] += sizes[line.clone()]
+                        .iter()
+                        .map(|s| s[cross])
+                        .fold(0.0, f32::max);
+                }
+                size[cross] += gap * lines.len().saturating_sub(1) as f32;
                 Measured::exact(size)
             }
         };
@@ -456,56 +561,91 @@ impl Layout for LayoutKind {
         let align = self.align(ctx, me);
         let children = Self::ordered(ctx, &children, self.reverse(ctx, me));
 
-        // Gaps are not distributable space; only what is left after them is.
-        let gaps = gap * children.len().saturating_sub(1) as f32;
-        let available = (size[main] - gaps).max(0.0);
-
         let infos = collect_children(ctx, &children, child_c, main, size[main]);
-        let items: Vec<distribute::Item> = infos.iter().map(|i| i.item).collect();
-        let resolved = distribute::distribute(&items, available);
+        let bases: Vec<f32> = infos.iter().map(|i| i.item.base).collect();
+        let lines = self.lines(ctx, me, &bases, gap, size[main]);
 
-        let used: f32 = resolved.iter().sum::<f32>() + gaps;
-        let extra = (size[main] - used).max(0.0);
-        let (mut main_pos, extra_gap) = justify_offsets(justify, extra, children.len());
+        // Each line is distributed and justified on its own; the lines
+        // themselves are then stacked and shared out along the cross axis by
+        // `align-content`. Without wrapping there is exactly one line, and all
+        // of this reduces to what it did before wrapping existed.
+        let line_cross: Vec<f32> = lines
+            .iter()
+            .map(|l| {
+                infos[l.clone()]
+                    .iter()
+                    .map(|i| i.natural[cross])
+                    .fold(0.0, f32::max)
+            })
+            .collect();
+        let cross_used: f32 =
+            line_cross.iter().sum::<f32>() + gap * lines.len().saturating_sub(1) as f32;
+        let cross_extra = (size[cross] - cross_used).max(0.0);
+        let (mut cross_pos, extra_line_gap) =
+            justify_offsets(self.align_content(ctx, me), cross_extra, lines.len());
 
-        for (i, &child) in children.iter().enumerate() {
-            let info = &infos[i];
-            let align = info.sizing.align_self.unwrap_or(align);
-            let flexed = (resolved[i] - info.item.base).abs() >= 0.01;
-
-            let child_size = if !flexed && align != AlignItems::Stretch {
-                // Nothing moved, so the child has already answered — the
-                // common case for every container whose children just fit.
-                info.natural
+        for (l, line) in lines.iter().enumerate() {
+            // A single line stretches to the container's whole cross extent,
+            // so `AlignItems::Stretch` and `align_offset` behave exactly as
+            // they did before lines existed.
+            let line_extent = if lines.len() == 1 {
+                size[cross]
             } else {
-                // Ask again now that the main size is settled: the cross size
-                // may depend on it (text wraps to the width it ended up with).
-                let mut lo = [0.0; 2];
-                let mut hi = size;
-                lo[main] = resolved[i];
-                hi[main] = resolved[i];
-                if align == AlignItems::Stretch {
-                    lo[cross] = size[cross];
-                    hi[cross] = size[cross];
-                }
-                let settled =
-                    Constraints::new([lo[0], hi[0].max(lo[0])], [lo[1], hi[1].max(lo[1])]);
-                let mut settled_size = ctx.measure_child_size(child, settled);
-                // The distributed main size is imposed, not offered: a child
-                // with a definite width would otherwise answer with that width
-                // and undo the distribution. Its own `width` is the base the
-                // distribution started from, so it has already been heard.
-                // The cross size stays the child's own answer, which is why an
-                // explicitly sized child is not stretched — CSS's rule too.
-                settled_size[main] = resolved[i];
-                settled_size
+                line_cross[l]
             };
 
-            let mut origin = [0.0; 2];
-            origin[main] = main_pos;
-            origin[cross] = align_offset(align, size[cross], child_size[cross]);
-            ctx.arrange_child(child, origin, my_affine, child_size);
-            main_pos += child_size[main] + gap + extra_gap;
+            let gaps = gap * line.len().saturating_sub(1) as f32;
+            let available = (size[main] - gaps).max(0.0);
+            let items: Vec<distribute::Item> = infos[line.clone()].iter().map(|i| i.item).collect();
+            let resolved = distribute::distribute(&items, available);
+
+            let used: f32 = resolved.iter().sum::<f32>() + gaps;
+            let extra = (size[main] - used).max(0.0);
+            let (mut main_pos, extra_gap) = justify_offsets(justify, extra, line.len());
+
+            for (k, &child) in children[line.clone()].iter().enumerate() {
+                let info = &infos[line.start + k];
+                let align = info.sizing.align_self.unwrap_or(align);
+                let flexed = (resolved[k] - info.item.base).abs() >= 0.01;
+
+                let child_size = if !flexed && align != AlignItems::Stretch {
+                    // Nothing moved, so the child has already answered — the
+                    // common case for every container whose children just fit.
+                    info.natural
+                } else {
+                    // Ask again now that the main size is settled: the cross
+                    // size may depend on it (text wraps to the width it ended
+                    // up with).
+                    let mut lo = [0.0; 2];
+                    let mut hi = size;
+                    lo[main] = resolved[k];
+                    hi[main] = resolved[k];
+                    if align == AlignItems::Stretch {
+                        lo[cross] = line_extent;
+                        hi[cross] = line_extent;
+                    }
+                    let settled =
+                        Constraints::new([lo[0], hi[0].max(lo[0])], [lo[1], hi[1].max(lo[1])]);
+                    let mut settled_size = ctx.measure_child_size(child, settled);
+                    // The distributed main size is imposed, not offered: a
+                    // child with a definite width would otherwise answer with
+                    // that width and undo the distribution. Its own `width` is
+                    // the base the distribution started from, so it has already
+                    // been heard. The cross size stays the child's own answer,
+                    // which is why an explicitly sized child is not stretched —
+                    // CSS's rule too.
+                    settled_size[main] = resolved[k];
+                    settled_size
+                };
+
+                let mut origin = [0.0; 2];
+                origin[main] = main_pos;
+                origin[cross] = cross_pos + align_offset(align, line_extent, child_size[cross]);
+                ctx.arrange_child(child, origin, my_affine, child_size);
+                main_pos += child_size[main] + gap + extra_gap;
+            }
+
+            cross_pos += line_extent + gap + extra_line_gap;
         }
     }
 }
