@@ -16,6 +16,8 @@ use bevy_ecs::component::Component;
 
 use matcha_ecs::layout::{Constraints, Measured};
 
+use crate::layout::AlignItems;
+
 /// One CSS length.
 ///
 /// `Percent` is a percentage (`Percent(50.0)` is half), resolved against the
@@ -64,7 +66,7 @@ impl Length {
 
 /// The CSS sizing properties of one box. All-`Auto` (the default) is exactly
 /// the fit-content behaviour every widget had before this type existed.
-#[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
+#[derive(Component, Clone, Copy, PartialEq, Debug)]
 pub struct Sizing {
     pub width: Length,
     pub height: Length,
@@ -77,6 +79,52 @@ pub struct Sizing {
     /// CSS `aspect-ratio`, as width ÷ height. Applies only when exactly one
     /// axis is definite; the other is then derived from it.
     pub aspect_ratio: Option<f32>,
+
+    /// Share of a container's *leftover* space this box absorbs, relative to
+    /// its siblings' shares. `0.0` (the default) means it keeps its own size.
+    ///
+    /// CSS calls this `flex-grow`, but nothing about it is specific to flex:
+    /// it is a weight any container that has space left over can distribute
+    /// by. With no siblings to share with it degenerates to
+    /// [`Length::Fill`] — consistent rather than silently ignored, which is
+    /// what a child would otherwise have to know its parent's type to predict.
+    pub grow: f32,
+
+    /// Share of a container's *overflow* this box gives back, weighted by its
+    /// own size the way CSS `flex-shrink` is. `1.0` (the default) means it
+    /// shrinks along with everything else; `0.0` refuses to.
+    ///
+    /// A box never shrinks below its `min_width`/`min_height`, or below its
+    /// min-content size where those are `Auto`.
+    pub shrink: f32,
+
+    /// Overrides the container's `align-items` for this box alone. `None`
+    /// (the default) follows the container.
+    pub align_self: Option<AlignItems>,
+
+    /// Position override within the container, low to high; ties keep
+    /// declaration order. Purely a layout/paint reordering — it does not move
+    /// the entity in the view tree.
+    pub order: i32,
+}
+
+impl Default for Sizing {
+    fn default() -> Self {
+        Self {
+            width: Length::Auto,
+            height: Length::Auto,
+            min_width: Length::Auto,
+            min_height: Length::Auto,
+            max_width: Length::Auto,
+            max_height: Length::Auto,
+            aspect_ratio: None,
+            grow: 0.0,
+            // CSS's default: boxes give way when there is not enough room.
+            shrink: 1.0,
+            align_self: None,
+            order: 0,
+        }
+    }
 }
 
 impl Sizing {
@@ -92,6 +140,31 @@ impl Sizing {
             }
         }
         [w, h]
+    }
+
+    /// The declared lower bound on `axis`, or `None` where it is left `Auto`.
+    ///
+    /// A distributing parent reads `None` as "down to your min-content size",
+    /// which is CSS's `min-width: auto` on a flex item.
+    pub fn min_bound(&self, axis: usize, available: f32) -> Option<f32> {
+        if axis == 0 {
+            self.min_width.definite(available)
+        } else {
+            self.min_height.definite(available)
+        }
+    }
+
+    /// The declared upper bound on `axis`, or `None` (CSS's `max-width:
+    /// none`) where it is left `Auto`.
+    ///
+    /// A distributing parent reads `None` as "no bound" — growth is limited
+    /// by an explicit maximum, never by the content's own max-content size.
+    pub fn max_bound(&self, axis: usize, available: f32) -> Option<f32> {
+        if axis == 0 {
+            self.max_width.definite(available)
+        } else {
+            self.max_height.definite(available)
+        }
     }
 
     /// This box's own lower and upper bounds per axis, from `min-*`/`max-*`.
@@ -139,14 +212,12 @@ impl Sizing {
 
         for axis in 0..2 {
             let (mut lo, mut pref, mut hi) = match definite[axis] {
-                // `Fill` wants everything offered but can still report how
-                // little it could live with, which is what lets a future flex
-                // pass shrink it.
-                Some(size) if self.axis_length(axis) == Length::Fill => {
-                    (content.min[axis], size, size)
-                }
-                // An explicit width/height is not negotiable.
-                Some(size) => (size, size, size),
+                // A definite size is what this box *wants* and the most it can
+                // use, but it still reports how little it could live with —
+                // its content's minimum, CSS's `min-width: auto`. That is what
+                // lets a distributing parent shrink it; a parent that merely
+                // offers space cannot, since it reads `preferred`.
+                Some(size) => (content.min[axis].min(size), size, size),
                 None => (
                     content.min[axis],
                     content.preferred[axis],
@@ -182,14 +253,6 @@ impl Sizing {
     /// [`measured`](Self::measured) keeping only the resolved size.
     pub fn resolve(&self, c: Constraints, content: [f32; 2]) -> [f32; 2] {
         self.measured(c, Measured::exact(content)).preferred
-    }
-
-    fn axis_length(&self, axis: usize) -> Length {
-        if axis == 0 {
-            self.width
-        } else {
-            self.height
-        }
     }
 }
 
@@ -244,6 +307,33 @@ macro_rules! sizing_builders {
             self.sizing.aspect_ratio = Some(ratio);
             self
         }
+
+        /// Share of the container's leftover space to absorb (CSS
+        /// `flex-grow`). See [`Sizing::grow`](crate::sizing::Sizing::grow).
+        pub fn grow(mut self, weight: f32) -> Self {
+            self.sizing.grow = weight;
+            self
+        }
+
+        /// Share of the container's overflow to give back (CSS
+        /// `flex-shrink`). Defaults to `1.0`.
+        pub fn shrink(mut self, weight: f32) -> Self {
+            self.sizing.shrink = weight;
+            self
+        }
+
+        /// Overrides the container's `align-items` for this box (CSS
+        /// `align-self`).
+        pub fn align_self(mut self, align: $crate::layout::AlignItems) -> Self {
+            self.sizing.align_self = Some(align);
+            self
+        }
+
+        /// Position override within the container, low to high (CSS `order`).
+        pub fn order(mut self, order: i32) -> Self {
+            self.sizing.order = order;
+            self
+        }
     };
 }
 
@@ -277,15 +367,20 @@ mod tests {
     }
 
     #[test]
-    fn fill_reports_its_content_as_the_minimum_it_could_shrink_to() {
-        let s = Sizing {
-            height: Length::Fill,
-            ..Default::default()
-        };
-        let m = s.measured(offered(800.0, 600.0), Measured::exact([50.0, 20.0]));
-        assert_eq!(m.min[1], 20.0);
-        assert_eq!(m.preferred[1], 600.0);
-        assert_eq!(m.max[1], 600.0);
+    fn a_sized_box_reports_its_content_as_the_minimum_it_could_shrink_to() {
+        // True of `Fill` and of an explicit size alike: the size is what it
+        // wants, its content's minimum is what a distributing parent may
+        // squeeze it to (CSS's `min-width: auto`).
+        for length in [Length::Fill, Length::Px(600.0)] {
+            let s = Sizing {
+                height: length,
+                ..Default::default()
+            };
+            let m = s.measured(offered(800.0, 600.0), Measured::exact([50.0, 20.0]));
+            assert_eq!(m.min[1], 20.0, "{length:?}");
+            assert_eq!(m.preferred[1], 600.0, "{length:?}");
+            assert_eq!(m.max[1], 600.0, "{length:?}");
+        }
     }
 
     #[test]

@@ -17,6 +17,8 @@ use matcha_ecs::{
 
 use crate::sizing::Sizing;
 
+pub mod distribute;
+
 /// Which layout a container applies. Constant per widget type; carried as a
 /// data component so systems can query it.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
@@ -60,6 +62,11 @@ pub enum AlignItems {
     End,
     Center,
 }
+
+/// Reverses the main axis, as CSS's `row-reverse`/`column-reverse` do: the
+/// last child is laid out first, from what was the far edge.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct Reverse(bool);
 
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Default)]
 struct Justify(JustifyContent);
@@ -157,6 +164,7 @@ macro_rules! stack_widget {
             gap: f32,
             justify: JustifyContent,
             align: AlignItems,
+            reverse: bool,
             sizing: Sizing,
         }
 
@@ -167,8 +175,16 @@ macro_rules! stack_widget {
                     gap: 0.0,
                     justify: JustifyContent::default(),
                     align: AlignItems::default(),
+                    reverse: false,
                     sizing: Sizing::default(),
                 }
+            }
+
+            /// Lay the children out from the far end of the main axis, as
+            /// CSS's `row-reverse`/`column-reverse` do.
+            pub fn reverse(mut self, reverse: bool) -> Self {
+                self.reverse = reverse;
+                self
             }
 
             crate::sizing_builders!();
@@ -213,6 +229,7 @@ macro_rules! stack_widget {
                     Gap(self.gap),
                     Justify(self.justify),
                     Align(self.align),
+                    Reverse(self.reverse),
                     self.sizing,
                     LayoutDispatch::of::<LayoutKind>(),
                 )
@@ -230,6 +247,9 @@ macro_rules! stack_widget {
                 }
                 if let Some(mut align) = entity.get_mut::<Align>() {
                     align.set_if_neq(Align(self.align));
+                }
+                if let Some(mut reverse) = entity.get_mut::<Reverse>() {
+                    reverse.set_if_neq(Reverse(self.reverse));
                 }
             }
         }
@@ -270,6 +290,57 @@ fn align_offset(align: AlignItems, container_cross: f32, child_cross: f32) -> f3
     }
 }
 
+/// A child's own box properties, defaulted for widgets that carry none.
+fn child_sizing(ctx: &LayoutCtx, child: Entity) -> Sizing {
+    ctx.world().get::<Sizing>(child).copied().unwrap_or_default()
+}
+
+/// What a container needs to know about one child to place it.
+struct ChildInfo {
+    item: distribute::Item,
+    sizing: Sizing,
+    /// The size it asked for before any distribution, kept so a child whose
+    /// size did not change need not be measured a third time.
+    natural: [f32; 2],
+}
+
+/// Measure each child and turn its report into a distribution input.
+///
+/// The bounds come from the child's *declared* `min-*`/`max-*` rather than
+/// from what it measured: growth is limited by an explicit maximum, never by
+/// the content's own max-content size, and `Auto` on the minimum means "down
+/// to min-content" — CSS's `min-width: auto` on a flex item.
+fn collect_children(
+    ctx: &mut LayoutCtx,
+    children: &[Entity],
+    child_c: Constraints,
+    main: usize,
+    main_available: f32,
+) -> Vec<ChildInfo> {
+    children
+        .iter()
+        .map(|&child| {
+            let measured = ctx.measure_child(child, child_c);
+            let sizing = child_sizing(ctx, child);
+            ChildInfo {
+                item: distribute::Item {
+                    base: measured.preferred[main],
+                    min: sizing
+                        .min_bound(main, main_available)
+                        .unwrap_or(measured.min[main]),
+                    max: sizing
+                        .max_bound(main, main_available)
+                        .unwrap_or(f32::INFINITY),
+                    grow: sizing.grow,
+                    shrink: sizing.shrink,
+                },
+                sizing,
+                natural: measured.preferred,
+            }
+        })
+        .collect()
+}
+
 impl LayoutKind {
     fn gap(&self, ctx: &LayoutCtx, me: Entity) -> f32 {
         ctx.world().get::<Gap>(me).map(|g| g.0).unwrap_or(0.0)
@@ -285,6 +356,31 @@ impl LayoutKind {
 
     fn sizing(&self, ctx: &LayoutCtx, me: Entity) -> Sizing {
         ctx.world().get::<Sizing>(me).copied().unwrap_or_default()
+    }
+
+    fn reverse(&self, ctx: &LayoutCtx, me: Entity) -> bool {
+        ctx.world().get::<Reverse>(me).map(|r| r.0).unwrap_or(false)
+    }
+
+    /// Children in layout order: by `order`, ties keeping declaration order,
+    /// then flipped for `reverse`.
+    ///
+    /// This reorders layout only — painting still follows declaration order,
+    /// which is invisible here because a `Column`/`Row` never overlaps its
+    /// children. Unifying the two orders is its own step in the roadmap.
+    fn ordered(ctx: &LayoutCtx, children: &[Entity], reverse: bool) -> Vec<Entity> {
+        let mut indexed: Vec<(i32, usize, Entity)> = children
+            .iter()
+            .enumerate()
+            .map(|(i, &e)| (child_sizing(ctx, e).order, i, e))
+            .collect();
+        indexed.sort_by_key(|(order, i, _)| (*order, *i));
+
+        let mut out: Vec<Entity> = indexed.into_iter().map(|(_, _, e)| e).collect();
+        if reverse {
+            out.reverse();
+        }
+        out
     }
 
     /// Index into an `[x, y]` pair of the axis children stack along.
@@ -344,8 +440,19 @@ impl Layout for LayoutKind {
 
         if let LayoutKind::Container = self {
             if let Some(&child) = children.first() {
-                let child_size = ctx.measure_child_size(child, child_c);
-                ctx.arrange_child(child, [0.0, 0.0], my_affine, child_size);
+                // A container has no main axis, so a child's `align_self`
+                // applies to both: it is placed within the container's box.
+                let align = child_sizing(ctx, child).align_self.unwrap_or(AlignItems::Start);
+                let child_size = if align == AlignItems::Stretch {
+                    ctx.measure_child_size(child, Constraints::new([size[0], size[0]], [size[1], size[1]]))
+                } else {
+                    ctx.measure_child_size(child, child_c)
+                };
+                let origin = [
+                    align_offset(align, size[0], child_size[0]),
+                    align_offset(align, size[1], child_size[1]),
+                ];
+                ctx.arrange_child(child, origin, my_affine, child_size);
             }
             return;
         }
@@ -356,25 +463,51 @@ impl Layout for LayoutKind {
         let gap = self.gap(ctx, me);
         let justify = self.justify(ctx, me);
         let align = self.align(ctx, me);
+        let children = Self::ordered(ctx, &children, self.reverse(ctx, me));
 
-        let natural: Vec<[f32; 2]> = children
-            .iter()
-            .map(|&e| ctx.measure_child_size(e, child_c))
-            .collect();
-        let natural_total: f32 = natural.iter().map(|s| s[main]).sum::<f32>()
-            + gap * natural.len().saturating_sub(1) as f32;
-        let extra = (size[main] - natural_total).max(0.0);
+        // Gaps are not distributable space; only what is left after them is.
+        let gaps = gap * children.len().saturating_sub(1) as f32;
+        let available = (size[main] - gaps).max(0.0);
+
+        let infos = collect_children(ctx, &children, child_c, main, size[main]);
+        let items: Vec<distribute::Item> = infos.iter().map(|i| i.item).collect();
+        let resolved = distribute::distribute(&items, available);
+
+        let used: f32 = resolved.iter().sum::<f32>() + gaps;
+        let extra = (size[main] - used).max(0.0);
         let (mut main_pos, extra_gap) = justify_offsets(justify, extra, children.len());
 
         for (i, &child) in children.iter().enumerate() {
-            let child_size = if align == AlignItems::Stretch {
-                let mut min = [0.0; 2];
-                min[cross] = size[cross];
-                let stretched_c =
-                    Constraints::new([min[0], size[0]], [min[1], size[1]]);
-                ctx.measure_child_size(child, stretched_c)
+            let info = &infos[i];
+            let align = info.sizing.align_self.unwrap_or(align);
+            let flexed = (resolved[i] - info.item.base).abs() >= 0.01;
+
+            let child_size = if !flexed && align != AlignItems::Stretch {
+                // Nothing moved, so the child has already answered — the
+                // common case for every container whose children just fit.
+                info.natural
             } else {
-                natural[i]
+                // Ask again now that the main size is settled: the cross size
+                // may depend on it (text wraps to the width it ended up with).
+                let mut lo = [0.0; 2];
+                let mut hi = size;
+                lo[main] = resolved[i];
+                hi[main] = resolved[i];
+                if align == AlignItems::Stretch {
+                    lo[cross] = size[cross];
+                    hi[cross] = size[cross];
+                }
+                let settled =
+                    Constraints::new([lo[0], hi[0].max(lo[0])], [lo[1], hi[1].max(lo[1])]);
+                let mut settled_size = ctx.measure_child_size(child, settled);
+                // The distributed main size is imposed, not offered: a child
+                // with a definite width would otherwise answer with that width
+                // and undo the distribution. Its own `width` is the base the
+                // distribution started from, so it has already been heard.
+                // The cross size stays the child's own answer, which is why an
+                // explicitly sized child is not stretched — CSS's rule too.
+                settled_size[main] = resolved[i];
+                settled_size
             };
 
             let mut origin = [0.0; 2];
