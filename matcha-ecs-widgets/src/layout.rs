@@ -7,8 +7,11 @@ use bevy_ecs::{
 use nalgebra::Matrix4;
 
 use matcha_ecs::{
-    components::{layout::GlobalTransform, view::Key},
-    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch},
+    components::{
+        layout::{GlobalTransform, Hidden},
+        view::Key,
+    },
+    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, Measured},
     view::Widget,
 };
 
@@ -70,19 +73,55 @@ struct Justify(JustifyContent);
 struct Align(AlignItems);
 
 /// A neutral container with a single child area.
-#[derive(Default)]
 pub struct Container {
     key: Key,
+    visible: bool,
+}
+
+impl Default for Container {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Container {
     pub fn new() -> Self {
-        Self { key: Key::Auto }
+        Self {
+            key: Key::Auto,
+            visible: true,
+        }
+    }
+
+    /// CSS `display: none` when `false`: this container and everything under it
+    /// take no part in layout, drawing or picking.
+    ///
+    /// Absent, not merely invisible — a hidden container claims no space, so a
+    /// surrounding `Column`'s `gap` closes up around it. Wrapping a subtree in
+    /// a `Container` is how any part of a view is hidden; the marker covers
+    /// descendants, so no other widget needs its own `.visible()`.
+    ///
+    /// State inside the subtree survives being hidden: the entities are still
+    /// there, so a text box keeps its text and re-showing costs no rebuild.
+    pub fn visible(mut self, visible: bool) -> Self {
+        self.visible = visible;
+        self
     }
 
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = key.into();
         self
+    }
+
+    /// `Hidden` is a data-less marker, so it cannot sit in `bundle()`'s fixed
+    /// return type conditionally — inserted and removed here instead, on spawn
+    /// and on every patch, so toggling `.visible(..)` takes effect. Same shape
+    /// as `Panel::sync_clip`.
+    fn sync_visible(&self, entity: &mut EntityWorldMut) {
+        if self.visible {
+            entity.remove::<Hidden>();
+        } else {
+            entity.insert(Hidden);
+        }
     }
 }
 
@@ -95,8 +134,13 @@ impl Widget for Container {
         (LayoutKind::Container, LayoutDispatch::of::<LayoutKind>())
     }
 
-    fn patch(&self, _entity: &mut EntityWorldMut) {
-        // LayoutKind is constant for this type; nothing to patch.
+    fn after_spawn(&self, entity: &mut EntityWorldMut) {
+        self.sync_visible(entity);
+    }
+
+    fn patch(&self, entity: &mut EntityWorldMut) {
+        // LayoutKind is constant for this type; only visibility can change.
+        self.sync_visible(entity);
     }
 }
 
@@ -235,37 +279,37 @@ impl LayoutKind {
 }
 
 impl Layout for LayoutKind {
-    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, c: Constraints) -> [f32; 2] {
+    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, c: Constraints) -> Measured {
         let children = ctx.children(me);
 
         match self {
             LayoutKind::Container => match children.first() {
                 Some(&child) => ctx.measure_child(child, c),
-                None => [0.0, 0.0],
+                None => Measured::exact([0.0, 0.0]),
             },
             LayoutKind::Column => {
                 let gap = self.gap(ctx, me);
                 let child_c = Constraints::new([0.0, c.max_width()], [0.0, c.max_height()]);
                 let sizes: Vec<[f32; 2]> = children
                     .iter()
-                    .map(|&e| ctx.measure_child(e, child_c))
+                    .map(|&e| ctx.measure_child_size(e, child_c))
                     .collect();
                 let total_h: f32 = sizes.iter().map(|s| s[1]).sum::<f32>()
                     + gap * sizes.len().saturating_sub(1) as f32;
                 let max_w: f32 = sizes.iter().map(|s| s[0]).fold(0.0, f32::max);
-                [max_w.min(c.max_width()), total_h.min(c.max_height())]
+                Measured::exact([max_w.min(c.max_width()), total_h.min(c.max_height())])
             }
             LayoutKind::Row => {
                 let gap = self.gap(ctx, me);
                 let child_c = Constraints::new([0.0, c.max_width()], [0.0, c.max_height()]);
                 let sizes: Vec<[f32; 2]> = children
                     .iter()
-                    .map(|&e| ctx.measure_child(e, child_c))
+                    .map(|&e| ctx.measure_child_size(e, child_c))
                     .collect();
                 let total_w: f32 = sizes.iter().map(|s| s[0]).sum::<f32>()
                     + gap * sizes.len().saturating_sub(1) as f32;
                 let max_h: f32 = sizes.iter().map(|s| s[1]).fold(0.0, f32::max);
-                [total_w.min(c.max_width()), max_h.min(c.max_height())]
+                Measured::exact([total_w.min(c.max_width()), max_h.min(c.max_height())])
             }
         }
     }
@@ -278,7 +322,7 @@ impl Layout for LayoutKind {
             LayoutKind::Container => {
                 if let Some(&child) = children.first() {
                     let child_c = Constraints::from_max_size(size);
-                    let child_size = ctx.measure_child(child, child_c);
+                    let child_size = ctx.measure_child_size(child, child_c);
                     ctx.arrange_child(child, [0.0, 0.0], my_affine, child_size);
                 }
             }
@@ -287,7 +331,7 @@ impl Layout for LayoutKind {
                 let justify = self.justify(ctx, me);
                 let align = self.align(ctx, me);
                 let child_c = Constraints::new([0.0, size[0]], [0.0, size[1]]);
-                let natural: Vec<[f32; 2]> = children.iter().map(|&e| ctx.measure_child(e, child_c)).collect();
+                let natural: Vec<[f32; 2]> = children.iter().map(|&e| ctx.measure_child_size(e, child_c)).collect();
                 let natural_total: f32 = natural.iter().map(|s| s[1]).sum::<f32>()
                     + gap * natural.len().saturating_sub(1) as f32;
                 let extra = (size[1] - natural_total).max(0.0);
@@ -295,7 +339,7 @@ impl Layout for LayoutKind {
                 for (i, &child) in children.iter().enumerate() {
                     let child_size = if align == AlignItems::Stretch {
                         let stretched_c = Constraints::new([size[0], size[0]], [0.0, size[1]]);
-                        ctx.measure_child(child, stretched_c)
+                        ctx.measure_child_size(child, stretched_c)
                     } else {
                         natural[i]
                     };
@@ -309,7 +353,7 @@ impl Layout for LayoutKind {
                 let justify = self.justify(ctx, me);
                 let align = self.align(ctx, me);
                 let child_c = Constraints::new([0.0, size[0]], [0.0, size[1]]);
-                let natural: Vec<[f32; 2]> = children.iter().map(|&e| ctx.measure_child(e, child_c)).collect();
+                let natural: Vec<[f32; 2]> = children.iter().map(|&e| ctx.measure_child_size(e, child_c)).collect();
                 let natural_total: f32 = natural.iter().map(|s| s[0]).sum::<f32>()
                     + gap * natural.len().saturating_sub(1) as f32;
                 let extra = (size[0] - natural_total).max(0.0);
@@ -317,7 +361,7 @@ impl Layout for LayoutKind {
                 for (i, &child) in children.iter().enumerate() {
                     let child_size = if align == AlignItems::Stretch {
                         let stretched_c = Constraints::new([0.0, size[0]], [size[1], size[1]]);
-                        ctx.measure_child(child, stretched_c)
+                        ctx.measure_child_size(child, stretched_c)
                     } else {
                         natural[i]
                     };

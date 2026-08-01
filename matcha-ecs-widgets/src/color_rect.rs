@@ -24,7 +24,7 @@ use matcha_ecs::{
         render::{RenderCtx, RenderItem, RenderOpacity},
         view::{Key, ManualDespawn},
     },
-    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch},
+    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, Measured},
     view::Widget,
 };
 
@@ -257,11 +257,11 @@ impl Widget for ColorRect {
 }
 
 impl Layout for RectGeometry {
-    fn measure(&self, _ctx: &mut LayoutCtx, _me: Entity, c: Constraints) -> [f32; 2] {
-        [
+    fn measure(&self, _ctx: &mut LayoutCtx, _me: Entity, c: Constraints) -> Measured {
+        Measured::exact([
             self.w.clamp(c.min_width(), c.max_width()),
             self.h.clamp(c.min_height(), c.max_height()),
-        ]
+        ])
     }
 
     fn arrange(&self, _ctx: &mut LayoutCtx, _me: Entity, _size: [f32; 2]) {

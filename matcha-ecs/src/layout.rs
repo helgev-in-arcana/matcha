@@ -8,12 +8,14 @@
 //! `(XxxLayout, LayoutDispatch::of::<XxxLayout>())` in a widget's `bundle()` —
 //! no registration step exists.
 
+use std::collections::HashMap;
+
 use bevy_ecs::{component::Component, entity::Entity, world::World};
 use nalgebra::{Matrix4, Vector3};
 
 use crate::{
     components::{
-        layout::{GlobalTransform, LayoutOutput},
+        layout::{GlobalTransform, Hidden, LayoutOutput},
         view::ViewChildren,
         window::Window as WindowComp,
     },
@@ -109,6 +111,67 @@ impl Constraints {
     }
 }
 
+/// What a child reports to its parent: the range of sizes it will accept, and
+/// the one it wants.
+///
+/// [`preferred`](Self::preferred) is exactly what `measure` returned before
+/// this type existed, so a parent that does not care about ranges reads that
+/// field and behaves identically. [`min`](Self::min) and [`max`](Self::max)
+/// correspond to CSS's min-content and max-content *contributions*, already
+/// folded together with whatever `min-*`/`max-*` the widget declares for
+/// itself — the parent does not need to know which part came from where.
+///
+/// # Height depends on width
+///
+/// The height components of `min`/`max` are **not** "the height at that
+/// width". Text at its min-content width is very tall and at its max-content
+/// width is one line, so a single call cannot report both a width range and
+/// the height belonging to each. Resolving a layout is therefore two passes:
+/// take the range here, decide a width, then measure again at that width to
+/// learn the height. CSS works the same way; this is why measuring is cached
+/// (see [`LayoutCtx::measure_child`]).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Measured {
+    /// Smallest size this child will accept without overflowing.
+    pub min: [f32; 2],
+    /// The size it wants, within the constraints it was given.
+    pub preferred: [f32; 2],
+    /// Largest size it can make use of; more than this is wasted on it.
+    pub max: [f32; 2],
+    /// Reserved for `align-items: baseline`. Always `None` today — no layout
+    /// reads it yet, and nothing produces it.
+    pub baseline: Option<f32>,
+}
+
+impl Measured {
+    /// A child that accepts exactly one size. The default answer while a
+    /// widget has no reason to report a range.
+    pub fn exact(size: [f32; 2]) -> Self {
+        Self {
+            min: size,
+            preferred: size,
+            max: size,
+            baseline: None,
+        }
+    }
+
+    pub fn new(min: [f32; 2], preferred: [f32; 2], max: [f32; 2]) -> Self {
+        debug_assert!(
+            min[0] <= preferred[0]
+                && preferred[0] <= max[0]
+                && min[1] <= preferred[1]
+                && preferred[1] <= max[1],
+            "Measured range is inconsistent: min={min:?}, preferred={preferred:?}, max={max:?}"
+        );
+        Self {
+            min,
+            preferred,
+            max,
+            baseline: None,
+        }
+    }
+}
+
 /// A concrete layout algorithm. `measure` is pure (bottom-up, no writes);
 /// `arrange` positions children via [`LayoutCtx::arrange_child`] (top-down,
 /// writes `LayoutOutput`/`GlobalTransform`).
@@ -125,9 +188,16 @@ impl Constraints {
 /// `view.rs`'s reconcile invariants, a cross-module dependency not yet worth
 /// taking on).
 pub trait Layout: Component + Clone {
-    /// Return this entity's desired size within `constraints`. Recurses into
-    /// children via `ctx.measure_child`; writes nothing.
-    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, constraints: Constraints) -> [f32; 2];
+    /// Report this entity's acceptable size range within `constraints`.
+    /// Recurses into children via `ctx.measure_child`; writes nothing.
+    ///
+    /// **Must be a pure function of `constraints` and the world as it stood at
+    /// the start of the layout pass.** Results are cached for the duration of
+    /// the pass (see [`LayoutCtx::measure_child`]), so a `measure` that reads
+    /// state some `arrange` writes mid-pass can be served a value from before
+    /// that write. A layout that genuinely needs the fresh value must ask for
+    /// it with [`LayoutCtx::measure_child_uncached`].
+    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, constraints: Constraints) -> Measured;
 
     /// Place children within the `size` this entity was allocated by its
     /// parent (or by [`layout_root`] for a top-level entity), via
@@ -140,7 +210,7 @@ pub trait Layout: Component + Clone {
 /// `bundle()` via [`LayoutDispatch::of`] — there is no registry.
 #[derive(Component, Clone, Copy)]
 pub struct LayoutDispatch {
-    measure: fn(&mut LayoutCtx, Entity, Constraints) -> [f32; 2],
+    measure: fn(&mut LayoutCtx, Entity, Constraints) -> Measured,
     arrange: fn(&mut LayoutCtx, Entity, [f32; 2]),
 }
 
@@ -188,6 +258,13 @@ impl LayoutDispatch {
 /// way a `Layout` impl should recurse into its children.
 pub struct LayoutCtx<'w> {
     world: &'w mut World,
+    /// Measure results for this pass only.
+    ///
+    /// The cache lives and dies with the `LayoutCtx`, which is built inside
+    /// [`layout_root`] and dropped when the pass ends — so it cannot outlive a
+    /// frame and there is nothing to invalidate. `Constraints` is quantized
+    /// `u32` and already `Hash + Eq`, so it keys directly.
+    cache: HashMap<(Entity, Constraints), Measured>,
 }
 
 impl<'w> LayoutCtx<'w> {
@@ -195,16 +272,48 @@ impl<'w> LayoutCtx<'w> {
         self.world
     }
 
-    /// `me`'s declared view children, in declaration order.
+    /// `me`'s declared view children in declaration order, minus any that are
+    /// [`Hidden`].
+    ///
+    /// Every container reaches its children through here, which is what makes
+    /// `display: none` work without a single container knowing about it.
     pub fn children(&self, me: Entity) -> Vec<Entity> {
         self.world
             .get::<ViewChildren>(me)
-            .map(|vc| vc.slots.iter().map(|(_, e)| *e).collect())
+            .map(|vc| visible_children(self.world, vc))
             .unwrap_or_default()
     }
 
-    /// Recursively measure `child` against `constraints`. Pure: writes no components.
-    pub fn measure_child(&mut self, child: Entity, constraints: Constraints) -> [f32; 2] {
+    /// Recursively measure `child` against `constraints`. Pure: writes no
+    /// components.
+    ///
+    /// Cached for the rest of this layout pass, since resolving a size
+    /// legitimately measures the same child more than once — `Column::arrange`
+    /// already re-measures every child, and intrinsic sizing needs a second
+    /// pass by construction (see [`Measured`]). Without the cache those
+    /// repeats multiply with depth.
+    pub fn measure_child(&mut self, child: Entity, constraints: Constraints) -> Measured {
+        if let Some(hit) = self.cache.get(&(child, constraints)) {
+            return *hit;
+        }
+        let measured = self.measure_child_uncached(child, constraints);
+        self.cache.insert((child, constraints), measured);
+        measured
+    }
+
+    /// [`measure_child`](Self::measure_child) keeping only the size the child
+    /// asked for. The common case for a layout that does not reason about
+    /// ranges.
+    pub fn measure_child_size(&mut self, child: Entity, constraints: Constraints) -> [f32; 2] {
+        self.measure_child(child, constraints).preferred
+    }
+
+    /// Measure without consulting or filling the cache.
+    ///
+    /// The escape hatch for a layout whose `measure` cannot honour the purity
+    /// contract on [`Layout::measure`] — it reads state that an `arrange`
+    /// earlier in the same pass wrote. Nothing needs this today.
+    pub fn measure_child_uncached(&mut self, child: Entity, constraints: Constraints) -> Measured {
         let dispatch = *self.world.get::<LayoutDispatch>(child).unwrap_or_else(|| {
             panic!("entity {child:?} has no LayoutDispatch; every entity reachable from a layout-managed subtree must carry one")
         });
@@ -259,16 +368,32 @@ impl<'w> LayoutCtx<'w> {
 /// `LayoutDispatch` of its own — it is either the window-root entity or a
 /// headless test root spawned with just a `ViewChildren`).
 pub fn layout_root(world: &mut World, root: Entity, constraints: Constraints) {
+    // Same `Hidden` filter `LayoutCtx::children` applies. Spelled out because
+    // the root is read directly here rather than through the ctx, which does
+    // not exist yet.
     let top_level: Vec<Entity> = world
         .get::<ViewChildren>(root)
-        .map(|vc| vc.slots.iter().map(|(_, e)| *e).collect())
+        .map(|vc| visible_children(world, vc))
         .unwrap_or_default();
 
-    let mut ctx = LayoutCtx { world };
+    let mut ctx = LayoutCtx {
+        world,
+        cache: HashMap::new(),
+    };
     for child in top_level {
-        let size = ctx.measure_child(child, constraints);
+        let size = ctx.measure_child_size(child, constraints);
         ctx.arrange_child(child, [0.0, 0.0], Matrix4::identity(), size);
     }
+}
+
+/// Declared children in order, skipping [`Hidden`] ones.
+fn visible_children(world: &World, children: &ViewChildren) -> Vec<Entity> {
+    children
+        .slots
+        .iter()
+        .map(|(_, e)| *e)
+        .filter(|e| world.get::<Hidden>(*e).is_none())
+        .collect()
 }
 
 /// Exclusive system: find the window root and lay out its view tree against

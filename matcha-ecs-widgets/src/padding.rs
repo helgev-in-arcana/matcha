@@ -8,7 +8,7 @@ use nalgebra::Matrix4;
 
 use matcha_ecs::{
     components::{layout::GlobalTransform, view::Key},
-    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch},
+    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, Measured},
     view::Widget,
 };
 
@@ -120,7 +120,7 @@ impl Widget for Padding {
 }
 
 impl Layout for PaddingLayout {
-    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, c: Constraints) -> [f32; 2] {
+    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, c: Constraints) -> Measured {
         let h = self.horizontal();
         let v = self.vertical();
         let inner_c = Constraints::new(
@@ -130,10 +130,10 @@ impl Layout for PaddingLayout {
 
         match ctx.children(me).first() {
             Some(&child) => {
-                let s = ctx.measure_child(child, inner_c);
-                [s[0] + h, s[1] + v]
+                let s = ctx.measure_child_size(child, inner_c);
+                Measured::exact([s[0] + h, s[1] + v])
             }
-            None => [h, v],
+            None => Measured::exact([h, v]),
         }
     }
 
@@ -149,7 +149,7 @@ impl Layout for PaddingLayout {
             let v = self.vertical();
             let inner_size = [(size[0] - h).max(0.0), (size[1] - v).max(0.0)];
             let child_c = Constraints::from_max_size(inner_size);
-            let child_size = ctx.measure_child(child, child_c);
+            let child_size = ctx.measure_child_size(child, child_c);
             ctx.arrange_child(child, [self.left, self.top], my_affine, child_size);
         }
     }

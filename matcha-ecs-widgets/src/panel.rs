@@ -23,7 +23,7 @@ use matcha_ecs::{
         render::{RenderCtx, RenderItem},
         view::Key,
     },
-    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch},
+    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, Measured},
     view::Widget,
 };
 
@@ -189,11 +189,11 @@ impl Widget for Panel {
 }
 
 impl Layout for PanelLayout {
-    fn measure(&self, _ctx: &mut LayoutCtx, _me: Entity, c: Constraints) -> [f32; 2] {
-        [
+    fn measure(&self, _ctx: &mut LayoutCtx, _me: Entity, c: Constraints) -> Measured {
+        Measured::exact([
             self.w.clamp(c.min_width(), c.max_width()),
             self.h.clamp(c.min_height(), c.max_height()),
-        ]
+        ])
     }
 
     fn arrange(&self, ctx: &mut LayoutCtx, me: Entity, size: [f32; 2]) {
@@ -207,7 +207,7 @@ impl Layout for PanelLayout {
             let inset = self.border_width;
             let inner_size = [(size[0] - inset * 2.0).max(0.0), (size[1] - inset * 2.0).max(0.0)];
             let child_c = Constraints::from_max_size(inner_size);
-            let child_size = ctx.measure_child(child, child_c);
+            let child_size = ctx.measure_child_size(child, child_c);
             // Unlike `Padding` (which sizes itself to its child, so the child
             // always fills the inner area exactly), `Panel` is fixed-size:
             // the inner area can be larger than the child. Centre the child

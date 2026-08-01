@@ -64,7 +64,7 @@ use matcha_ecs::{
         view::Key,
     },
     input::emit_message,
-    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch},
+    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, Measured},
     resources::{FrameTime, RedrawRequest},
     view::Widget,
 };
@@ -768,14 +768,14 @@ fn emit<Msg: Message, C: Component + Clone>(
 // ---------------------------------------------------------------------------
 
 impl Layout for TextBoxLayout {
-    fn measure(&self, _ctx: &mut LayoutCtx, _me: Entity, c: Constraints) -> [f32; 2] {
+    fn measure(&self, _ctx: &mut LayoutCtx, _me: Entity, c: Constraints) -> Measured {
         // Fixed size: the box does not grow with its content. This is what
         // keeps the wrap width knowable before layout runs, instead of the
         // circular "wrap width needs measure, measure needs wrap width".
-        [
+        Measured::exact([
             self.w.clamp(c.min_width(), c.max_width()),
             self.h.clamp(c.min_height(), c.max_height()),
-        ]
+        ])
     }
 
     /// Publishes the size layout actually allocated.

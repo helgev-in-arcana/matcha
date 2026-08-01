@@ -64,7 +64,7 @@ use matcha_ecs::{
         layout::{Clip, GlobalTransform},
         view::Key,
     },
-    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch},
+    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, Measured},
     view::{Scope, Widget},
 };
 
@@ -462,16 +462,16 @@ impl Widget for ScrollView {
 }
 
 impl Layout for ScrollViewLayout {
-    fn measure(&self, _ctx: &mut LayoutCtx, _me: Entity, c: Constraints) -> [f32; 2] {
+    fn measure(&self, _ctx: &mut LayoutCtx, _me: Entity, c: Constraints) -> Measured {
         // `clamp`, not `min`: a parent `Column`/`Row` with the default
         // `AlignItems::Stretch` passes `min == max`, and ignoring the minimum
         // would leave `LayoutOutput` disagreeing with the space actually
         // allocated — which would desync the clip rect and the pick rect from
         // what is drawn.
-        [
+        Measured::exact([
             self.w.clamp(c.min_width(), c.max_width()),
             self.h.clamp(c.min_height(), c.max_height()),
-        ]
+        ])
     }
 
     fn arrange(&self, ctx: &mut LayoutCtx, me: Entity, size: [f32; 2]) {
@@ -509,7 +509,7 @@ impl Layout for ScrollViewLayout {
                     [size[i], size[i]]
                 }
             };
-            let content_size = ctx.measure_child(child, Constraints::new(span(0), span(1)));
+            let content_size = ctx.measure_child_size(child, Constraints::new(span(0), span(1)));
 
             state.publish_sizes(size, content_size);
             let offset = state.offset();

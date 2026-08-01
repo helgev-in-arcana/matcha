@@ -26,7 +26,7 @@ use crate::{
     clip::intersect,
     components::{
         input::{Pickable, ZOrder},
-        layout::{Clip, GlobalTransform, LayoutOutput},
+        layout::{Clip, GlobalTransform, Hidden, LayoutOutput},
         view::ViewChildren,
     },
 };
@@ -156,6 +156,12 @@ fn collect(
     entries: &mut Vec<PickEntry>,
     next_order: &mut u32,
 ) {
+    // `display: none`: absent from layout, so its rectangle is stale. Nothing
+    // here or below can be picked.
+    if world.get::<Hidden>(entity).is_some() {
+        return;
+    }
+
     let box_of = |entity: Entity| {
         let layout = world.get::<LayoutOutput>(entity)?;
         let transform = world.get::<GlobalTransform>(entity)?;

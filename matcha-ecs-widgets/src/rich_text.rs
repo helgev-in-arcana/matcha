@@ -70,7 +70,7 @@ use matcha_ecs::{
         render::{RenderCtx, RenderItem, RenderOpacity},
         view::{Key, ManualDespawn},
     },
-    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, SUB_PIXEL_QUANTIZE},
+    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, Measured, SUB_PIXEL_QUANTIZE},
     view::Widget,
 };
 
@@ -907,21 +907,23 @@ fn rich_text_render_item(
 }
 
 impl Layout for RichTextStyle {
-    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, constraints: Constraints) -> [f32; 2] {
+    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, constraints: Constraints) -> Measured {
         let Some(font_ctx) = ctx.world().get_resource::<ParleyFontCtx>() else {
-            return [0.0, 0.0];
+            return Measured::exact([0.0, 0.0]);
         };
         let Some(content) = ctx.world().get::<RichTextContent>(me) else {
-            return [0.0, 0.0];
+            return Measured::exact([0.0, 0.0]);
         };
         if content.text.is_empty() {
-            return [0.0, 0.0];
+            return Measured::exact([0.0, 0.0]);
         }
         let layout = shape(font_ctx, content, self, constraints.max_width());
-        [
+        // parley can report min/max-content widths, but reporting a real range
+        // is deferred to when a layout consumes one (see the roadmap's P1).
+        Measured::exact([
             layout.width().clamp(constraints.min_width(), constraints.max_width()),
             layout.height().clamp(constraints.min_height(), constraints.max_height()),
-        ]
+        ])
     }
 
     fn arrange(&self, ctx: &mut LayoutCtx, me: Entity, size: [f32; 2]) {

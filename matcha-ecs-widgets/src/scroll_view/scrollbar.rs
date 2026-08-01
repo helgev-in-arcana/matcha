@@ -32,7 +32,7 @@ use matcha_ecs::{
         render::{RenderCtx, RenderItem},
         view::Key,
     },
-    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch},
+    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, Measured},
     view::Widget,
 };
 
@@ -218,14 +218,21 @@ impl Widget for Scrollbar {
 }
 
 impl Layout for ScrollbarLayout {
-    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, _c: Constraints) -> [f32; 2] {
+    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, _c: Constraints) -> Measured {
         // The enclosing view places this at the track rectangle regardless, so
         // what is reported here only matters for `LayoutOutput` — but it must
         // agree, or the hit area would not match what is drawn.
+        //
+        // Note this reads the parent's `ScrollState`, which `ScrollViewLayout::arrange`
+        // publishes into mid-pass — the one case in this crate that could fall
+        // foul of the purity contract on `Layout::measure`. It does not today:
+        // that `arrange` places the bars from `geometry::metrics` directly and
+        // never measures them. Should a bar ever be measured by an ordinary
+        // container, it wants `LayoutCtx::measure_child_uncached`.
         let Some(metrics) = self.metrics(ctx, me) else {
-            return [0.0, 0.0];
+            return Measured::exact([0.0, 0.0]);
         };
-        [metrics.track[2], metrics.track[3]]
+        Measured::exact([metrics.track[2], metrics.track[3]])
     }
 
     fn arrange(&self, ctx: &mut LayoutCtx, me: Entity, _size: [f32; 2]) {

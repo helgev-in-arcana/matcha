@@ -50,7 +50,7 @@ use matcha_ecs::{
         render::{RenderCtx, RenderItem, RenderOpacity},
         view::{Key, ManualDespawn},
     },
-    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch},
+    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, Measured},
     view::Widget,
 };
 
@@ -295,18 +295,20 @@ fn text_render_item(
 }
 
 impl Layout for TextStyle {
-    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, constraints: Constraints) -> [f32; 2] {
+    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, constraints: Constraints) -> Measured {
         let Some(font_ctx) = ctx.world().get_resource::<FontCtx>() else {
-            return [0.0, 0.0];
+            return Measured::exact([0.0, 0.0]);
         };
         let Some(content) = ctx.world().get::<TextContent>(me) else {
-            return [0.0, 0.0];
+            return Measured::exact([0.0, 0.0]);
         };
         let layout = shape(font_ctx, &content.0, self.font_size, constraints.max_width());
-        [
+        // Reporting a real min/max-content range is deferred to when a layout
+        // exists that consumes one (see the roadmap's P1).
+        Measured::exact([
             layout.total_width.clamp(constraints.min_width(), constraints.max_width()),
             layout.total_height.clamp(constraints.min_height(), constraints.max_height()),
-        ]
+        ])
     }
 
     fn arrange(&self, ctx: &mut LayoutCtx, me: Entity, size: [f32; 2]) {

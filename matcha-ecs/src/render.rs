@@ -25,7 +25,7 @@ use crate::{
     clip::ClipArena,
     components::{
         focus::{FocusWithin, Focused},
-        layout::{Clip, GlobalTransform, LayoutOutput},
+        layout::{Clip, GlobalTransform, Hidden, LayoutOutput},
         render::{RenderCtx, RenderItem, RenderOpacity},
         view::ViewChildren,
     },
@@ -102,6 +102,13 @@ fn extract_recursive(
     let children: Vec<Entity> = view_children.slots.iter().map(|(_, e)| *e).collect();
 
     for child in children {
+        // `display: none`. Layout already skipped it, so it still carries
+        // whatever transform it was last arranged with — painting it would put
+        // it back at that stale position.
+        if world.get::<Hidden>(child).is_some() {
+            continue;
+        }
+
         // `LayoutOutput` is written by the same `arrange_child` call that writes
         // `GlobalTransform`, so both are present on every laid-out entity;
         // `[0.0, 0.0]` only for one carrying a hand-inserted transform.
