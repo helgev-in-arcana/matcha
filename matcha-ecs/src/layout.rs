@@ -386,6 +386,20 @@ pub fn layout_root(world: &mut World, root: Entity, constraints: Constraints) {
     }
 }
 
+/// Measure a single entity as a pass of its own, without arranging anything.
+///
+/// The counterpart to [`layout_root`] for callers that want a child's report
+/// rather than a placement — a parent driving its own sizing outside the
+/// normal walk, and tests asserting on a widget's [`Measured`] range, which
+/// `layout_root` discards.
+pub fn measure_entity(world: &mut World, entity: Entity, constraints: Constraints) -> Measured {
+    let mut ctx = LayoutCtx {
+        world,
+        cache: HashMap::new(),
+    };
+    ctx.measure_child(entity, constraints)
+}
+
 /// Declared children in order, skipping [`Hidden`] ones.
 fn visible_children(world: &World, children: &ViewChildren) -> Vec<Entity> {
     children

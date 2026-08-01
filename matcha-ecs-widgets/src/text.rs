@@ -303,8 +303,13 @@ impl Layout for TextStyle {
             return Measured::exact([0.0, 0.0]);
         };
         let layout = shape(font_ctx, &content.0, self.font_size, constraints.max_width());
-        // Reporting a real min/max-content range is deferred to when a layout
-        // exists that consumes one (see the roadmap's P1).
+        // Reports no range, unlike `RichText`. parley hands that widget its
+        // min/max-content widths off the layout it already built, whereas
+        // suzuri/fontdue has no such API: deriving the pair here would mean
+        // two extra full shaping passes per measure, on the widget that has
+        // no shape cache at all and is kept as the reference/fallback
+        // implementation. A `Text` in a future flex row therefore will not
+        // shrink below the width it wrapped to; `RichText` will.
         Measured::exact([
             layout.total_width.clamp(constraints.min_width(), constraints.max_width()),
             layout.total_height.clamp(constraints.min_height(), constraints.max_height()),

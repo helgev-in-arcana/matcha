@@ -918,12 +918,28 @@ impl Layout for RichTextStyle {
             return Measured::exact([0.0, 0.0]);
         }
         let layout = shape(font_ctx, content, self, constraints.max_width());
-        // parley can report min/max-content widths, but reporting a real range
-        // is deferred to when a layout consumes one (see the roadmap's P1).
-        Measured::exact([
-            layout.width().clamp(constraints.min_width(), constraints.max_width()),
-            layout.height().clamp(constraints.min_height(), constraints.max_height()),
-        ])
+        let width = layout
+            .width()
+            .clamp(constraints.min_width(), constraints.max_width());
+        let height = layout
+            .height()
+            .clamp(constraints.min_height(), constraints.max_height());
+
+        // CSS min-content / max-content, straight from the layout already
+        // built: every soft break taken, and none taken. Deliberately *not*
+        // clamped to `constraints` — a contribution is what this text would
+        // want, which is the whole point of reporting it separately from the
+        // size it settled for.
+        //
+        // The height is reported as a single value rather than a range: it
+        // depends on the width finally chosen, and neither content width is
+        // that width (see `Measured`'s docs).
+        let content_widths = layout.calculate_content_widths();
+        Measured::new(
+            [content_widths.min.min(width), height],
+            [width, height],
+            [content_widths.max.max(width), height],
+        )
     }
 
     fn arrange(&self, ctx: &mut LayoutCtx, me: Entity, size: [f32; 2]) {
