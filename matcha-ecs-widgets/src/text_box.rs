@@ -76,7 +76,7 @@ use renderer::RenderNode;
 
 use crate::{
     sizing::Sizing,
-    color_rect::solid_rect_node,
+    box_style::{box_node, BoxStyle},
     rich_text::{draw_parley_layout, paint_tint_region, ParleyFontCtx, RichTextBrush},
 };
 
@@ -958,6 +958,7 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
     let live = entity.get::<TextBoxLive>().cloned().unwrap_or_default();
     let font_ctx = entity
         .world_scope(|world| world.get_resource_or_insert_with(ParleyFontCtx::new).clone());
+    let shape_ctx = crate::shape::ShapeCtx::get(entity);
 
     RenderItem::new(move |ctx: &RenderCtx| {
         let [w, h] = ctx.size;
@@ -968,16 +969,12 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
         } else {
             style.border_color
         };
-        let mut node = solid_rect_node(ctx, w, h, border_color);
-        let fill = solid_rect_node(
+        let mut node = box_node(
             ctx,
-            (w - border * 2.0).max(0.0),
-            (h - border * 2.0).max(0.0),
-            style.background_color,
-        );
-        node.push_child(
-            fill,
-            Matrix4::new_translation(&Vector3::new(border, border, 0.0)),
+            &shape_ctx,
+            [w, h],
+            &BoxStyle::fill(style.background_color)
+                .border(border, border_color),
         );
 
         let inset = style.border_width + style.padding;

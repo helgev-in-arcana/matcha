@@ -42,7 +42,8 @@ use crate::{
         geometry::{self, Axis, ScrollbarStyle},
         DragAnchor, ScrollAxes, ScrollState,
     },
-    shape::{rounded_rect_node, ShapeCtx},
+    box_style::{box_node, BoxStyle},
+    shape::ShapeCtx,
 };
 
 /// Marks an entity as a scrollbar rather than scrollable content.
@@ -131,8 +132,11 @@ impl Scrollbar {
 }
 
 fn track_render_item(shape: ShapeCtx, style: ScrollbarStyle) -> RenderItem {
-    RenderItem::new(move |ctx: &RenderCtx| match style.track_color {
-        Some(color) => rounded_rect_node(ctx, &shape, ctx.size, style.radius, color),
+    let track = style
+        .track_color
+        .map(|color| BoxStyle::fill(color).radius(style.radius));
+    RenderItem::new(move |ctx: &RenderCtx| match &track {
+        Some(track) => box_node(ctx, &shape, ctx.size, track),
         None => RenderNode::new(),
     })
 }
@@ -305,9 +309,8 @@ impl ScrollThumb {
 }
 
 fn thumb_render_item(shape: ShapeCtx, style: ScrollbarStyle) -> RenderItem {
-    RenderItem::new(move |ctx: &RenderCtx| {
-        rounded_rect_node(ctx, &shape, ctx.size, style.radius, style.thumb_color)
-    })
+    let thumb = BoxStyle::fill(style.thumb_color).radius(style.radius);
+    RenderItem::new(move |ctx: &RenderCtx| box_node(ctx, &shape, ctx.size, &thumb))
 }
 
 /// Pressing the thumb records where it was grabbed. The drag itself is handled

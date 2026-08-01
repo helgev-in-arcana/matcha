@@ -45,6 +45,10 @@ impl Widget for Swatch {
         (self.inner.bundle(), Pickable)
     }
     fn after_spawn(&self, entity: &mut EntityWorldMut) {
+        // A wrapper that delegates `bundle()` must delegate `after_spawn()`
+        // too — `ColorRect` builds its `RenderItem` there, since that is the
+        // only place it can reach the `ShapeCtx` resource.
+        Widget::after_spawn(&self.inner, entity);
         interaction::interaction_cell(entity, self.colors);
     }
     fn patch(&self, entity: &mut EntityWorldMut) {

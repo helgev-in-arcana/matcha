@@ -38,7 +38,9 @@ use matcha_ecs::{
 
 use crate::{
     animation::Easing,
-    color_rect::{solid_rect_node, RectColor, RectGeometry},
+    shape::ShapeCtx,
+    box_style::{box_node, BoxStyle, Corners},
+    color_rect::{RectColor, RectGeometry},
     interaction::{interaction_cell, ColorCell, InteractionColors},
     sizing::Sizing,
     text::{glyph_run_nodes, paint_tint_region, shape, FontCtx},
@@ -57,6 +59,7 @@ struct ButtonTextStyle {
     font_size: f32,
     label_color: [f32; 4],
     focus_ring_color: [f32; 4],
+    radius: f32,
 }
 
 /// A solid-colour rectangle with a centred text label that emits `Msg` on click.
@@ -74,6 +77,7 @@ pub struct Button<Msg: Message> {
     font_size: f32,
     label_color: [f32; 4],
     focus_ring_color: [f32; 4],
+    radius: f32,
 }
 
 impl<Msg: Message> Button<Msg> {
@@ -92,6 +96,7 @@ impl<Msg: Message> Button<Msg> {
             font_size: 16.0,
             label_color: [1.0, 1.0, 1.0, 1.0],
             focus_ring_color: [0.45, 0.7, 1.0, 1.0],
+            radius: 0.0,
         }
     }
 
@@ -157,6 +162,12 @@ impl<Msg: Message> Button<Msg> {
         self
     }
 
+    /// Round the button's corners (CSS `border-radius`).
+    pub fn radius(mut self, radius: f32) -> Self {
+        self.radius = radius;
+        self
+    }
+
     crate::sizing_builders!();
 
     pub fn key(mut self, key: impl Into<Key>) -> Self {
@@ -185,6 +196,7 @@ impl<Msg: Message> Button<Msg> {
             font_size: self.font_size,
             label_color: self.label_color,
             focus_ring_color: self.focus_ring_color,
+            radius: self.radius,
         }
     }
 
@@ -198,13 +210,16 @@ impl<Msg: Message> Button<Msg> {
         // The cell survives this rebuild, so an in-flight hover transition is
         // not restarted by an unrelated prop change.
         let box_color = interaction_cell(entity, self.colors());
+        let shape_ctx = ShapeCtx::get(entity);
         button_render_item(
             font_ctx,
+            shape_ctx,
             box_color,
             self.label.clone(),
             self.font_size,
             self.label_color,
             self.focus_ring_color,
+            self.radius,
         )
     }
 }
@@ -224,13 +239,16 @@ const FOCUS_RING_WIDTH: f32 = 2.0;
 /// `focus_ring_color` with the normal fill inset inside it. `focus.rs`'s
 /// `sync_focus_components` invalidates the cached node on every focus
 /// transition, so this is re-evaluated exactly when it changes.
+#[allow(clippy::too_many_arguments)]
 fn button_render_item(
     font_ctx: FontCtx,
+    shape_ctx: ShapeCtx,
     box_color: ColorCell,
     label: String,
     font_size: f32,
     label_color: [f32; 4],
     focus_ring_color: [f32; 4],
+    radius: f32,
 ) -> RenderItem {
     RenderItem::new(move |ctx: &RenderCtx| {
         let [w, h] = ctx.size;
@@ -239,25 +257,13 @@ fn button_render_item(
         // step of the hover/press transition.
         let box_color = box_color.get();
 
-        let mut node = if ctx.focused {
-            // Ring underneath, fill inset on top — the same two-quad technique
-            // `Panel` uses for its border.
-            let mut ring = solid_rect_node(ctx, w, h, focus_ring_color);
-            let inset = FOCUS_RING_WIDTH;
-            let fill = solid_rect_node(
-                ctx,
-                (w - inset * 2.0).max(0.0),
-                (h - inset * 2.0).max(0.0),
-                box_color,
-            );
-            ring.push_child(
-                fill,
-                Matrix4::new_translation(&Vector3::new(inset, inset, 0.0)),
-            );
-            ring
-        } else {
-            solid_rect_node(ctx, w, h, box_color)
-        };
+        // The focus ring is a border on the same box rather than a second
+        // quad underneath, so the two agree about the corner radius for free.
+        let mut style = BoxStyle::fill(box_color).corners(Corners::all(radius));
+        if ctx.focused {
+            style = style.border(FOCUS_RING_WIDTH, focus_ring_color);
+        }
+        let mut node = box_node(ctx, &shape_ctx, [w, h], &style);
 
         let layout = shape(&font_ctx, &label, font_size, f32::MAX);
         let Some(tint_region) = paint_tint_region(ctx, label_color) else {

@@ -10,6 +10,7 @@
 //! `.key(id)` builder to set its intrinsic reconciliation key.
 
 pub mod animation;
+pub mod box_style;
 pub mod button;
 pub mod checkbox;
 pub mod color_rect;
@@ -34,6 +35,7 @@ pub mod text_box;
 pub use parley;
 
 pub use animation::Easing;
+pub use box_style::{box_node, BoxShadow, BoxStyle, Corners, Sides};
 pub use button::{Button, ButtonLabel};
 pub use checkbox::Checkbox;
 pub use color_rect::{ColorRect, RectColor};

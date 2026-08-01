@@ -30,8 +30,8 @@ use std::time::Duration;
 
 use matcha_ecs::{ui_ecs::UiEcs, view::Scope};
 use matcha_ecs_widgets::{
-    AlignItems, Button, Checkbox, Column, ColorRect, Easing, Image, JustifyContent, Link, Panel,
-    Row, Text,
+    AlignItems, BoxShadow, Button, Checkbox, Column, ColorRect, Easing, Image, JustifyContent,
+    Link, Panel, Row, Sides, Text,
 };
 use matcha_window::adapter::Adapter;
 
@@ -90,7 +90,9 @@ fn view(model: &Model, s: &mut Scope) {
                     .size(28.0)
                     .border_width(3.0)
                     .border_color([0.9, 0.3, 0.5, 1.0])
-                    .fill_color([0.95, 0.75, 0.1, 1.0]),
+                    .fill_color([0.95, 0.75, 0.1, 1.0])
+                    // Half the size: a checkbox drawn as a radio button.
+                    .radius(14.0),
             );
             s.leaf(Text::new(if model.checked_b { "checked" } else { "unchecked" }));
         });
@@ -104,7 +106,8 @@ fn view(model: &Model, s: &mut Scope) {
                     .color([0.8, 0.3, 0.3, 1.0])
                     .hover_color([0.95, 0.45, 0.45, 1.0])
                     .active_color([0.55, 0.15, 0.15, 1.0])
-                    .transition(Duration::from_millis(140), Easing::EaseInOut),
+                    .transition(Duration::from_millis(140), Easing::EaseInOut)
+                    .radius(8.0),
             );
             s.leaf(
                 Button::<Msg>::new(format!("count: {}", model.count))
@@ -119,7 +122,8 @@ fn view(model: &Model, s: &mut Scope) {
                     .color([0.3, 0.8, 0.4, 1.0])
                     .hover_color([0.45, 0.95, 0.55, 1.0])
                     .active_color([0.15, 0.5, 0.25, 1.0])
-                    .transition(Duration::from_millis(140), Easing::EaseInOut),
+                    .transition(Duration::from_millis(140), Easing::EaseInOut)
+                    .radius(8.0),
             );
         });
 
@@ -141,7 +145,10 @@ fn view(model: &Model, s: &mut Scope) {
         // panel the row's full cross size (the tallest sibling's height) and
         // — now that widgets draw at their *allocated* size — visibly grow
         // them. This demo wants the declared sizes compared side by side.
-        section_label(s, "Panel — background-only (border_width 0) vs bordered");
+        section_label(
+            s,
+            "Panel — plain, bordered, rounded, shadowed, and bordered on one side only",
+        );
         s.node(Row::new().gap(16.0).align_items(AlignItems::Start), |s| {
             s.node(Panel::new(150.0, 60.0).background_color([0.18, 0.22, 0.3, 1.0]), |s| {
                 s.leaf(Text::new("no border").font_size(13.0));
@@ -153,6 +160,36 @@ fn view(model: &Model, s: &mut Scope) {
                     .background_color([0.18, 0.18, 0.2, 1.0]),
                 |s| {
                     s.leaf(Text::new("bordered").font_size(13.0));
+                },
+            );
+            // Everything below here needs a rasterised coverage bitmap; the two
+            // above cost nothing but a shared 1x1 tint texel.
+            s.node(
+                Panel::new(150.0, 60.0)
+                    .radius(14.0)
+                    .border_width(2.0)
+                    .border_color([0.4, 0.8, 0.9, 1.0])
+                    .background_color([0.14, 0.2, 0.24, 1.0]),
+                |s| {
+                    s.leaf(Text::new("rounded").font_size(13.0));
+                },
+            );
+            s.node(
+                Panel::new(150.0, 60.0)
+                    .radius(8.0)
+                    .background_color([0.24, 0.24, 0.3, 1.0])
+                    .shadow(BoxShadow::drop(6.0, 18.0, [0.0, 0.0, 0.0, 0.7])),
+                |s| {
+                    s.leaf(Text::new("shadowed").font_size(13.0));
+                },
+            );
+            s.node(
+                Panel::new(150.0, 60.0)
+                    .borders(Sides::bottom(3.0))
+                    .border_color([0.9, 0.3, 0.5, 1.0])
+                    .background_color([0.16, 0.16, 0.18, 1.0]),
+                |s| {
+                    s.leaf(Text::new("underlined").font_size(13.0));
                 },
             );
         });

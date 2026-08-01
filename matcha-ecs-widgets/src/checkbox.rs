@@ -31,8 +31,10 @@ use matcha_ecs::{
     view::Widget,
 };
 
+use crate::box_style::{box_node, BoxStyle};
+use crate::color_rect::RectGeometry;
+use crate::shape::ShapeCtx;
 use crate::sizing::Sizing;
-use crate::color_rect::{solid_rect_node, RectGeometry};
 
 /// Draw-relevant checkbox state, tracked so `patch` can detect changes and
 /// rebuild the cached render item.
@@ -42,6 +44,7 @@ struct CheckboxState {
     border_color: [f32; 4],
     fill_color: [f32; 4],
     border_width: f32,
+    radius: f32,
 }
 
 /// A `size`×`size` checkbox: an outer bordered box, filled with `fill_color`
@@ -54,6 +57,7 @@ pub struct Checkbox<Msg: Message> {
     border_color: [f32; 4],
     fill_color: [f32; 4],
     border_width: f32,
+    radius: f32,
     msg: Option<Msg>,
 }
 
@@ -67,6 +71,7 @@ impl<Msg: Message> Checkbox<Msg> {
             border_color: [0.6, 0.6, 0.65, 1.0],
             fill_color: [0.25, 0.5, 0.9, 1.0],
             border_width: 2.0,
+            radius: 0.0,
             msg: None,
         }
     }
@@ -101,6 +106,12 @@ impl<Msg: Message> Checkbox<Msg> {
         self
     }
 
+    /// Round the box's corners; half the size makes it a radio button.
+    pub fn radius(mut self, radius: f32) -> Self {
+        self.radius = radius;
+        self
+    }
+
     crate::sizing_builders!();
 
     pub fn key(mut self, key: impl Into<Key>) -> Self {
@@ -121,6 +132,7 @@ impl<Msg: Message> Checkbox<Msg> {
             border_color: self.border_color,
             fill_color: self.fill_color,
             border_width: self.border_width,
+            radius: self.radius,
         }
     }
 }
@@ -129,15 +141,22 @@ impl<Msg: Message> Checkbox<Msg> {
 /// box on top, only when `checked`. Drawn at the layout-allocated size
 /// (`ctx.size`) — normally the declared square, but a stretching parent
 /// layout may allocate a non-square box, and paint must track layout.
-fn checkbox_render_item(state: CheckboxState) -> RenderItem {
+fn checkbox_render_item(shape: ShapeCtx, state: CheckboxState) -> RenderItem {
+    let outline = BoxStyle::default()
+        .border(state.border_width, state.border_color)
+        .radius(state.radius);
+    // The tick is a second, inset box rather than part of the outline's style:
+    // it comes and goes while the outline never moves, and the two therefore
+    // want separate cached shapes.
+    let inset = state.border_width;
+    let tick = BoxStyle::fill(state.fill_color).radius((state.radius - inset).max(0.0));
+
     RenderItem::new(move |ctx: &RenderCtx| {
         let [w, h] = ctx.size;
-        let mut node = solid_rect_node(ctx, w, h, state.border_color);
+        let mut node = box_node(ctx, &shape, [w, h], &outline);
         if state.checked {
-            let inset = state.border_width;
-            let fill_w = (w - inset * 2.0).max(0.0);
-            let fill_h = (h - inset * 2.0).max(0.0);
-            let fill_node = solid_rect_node(ctx, fill_w, fill_h, state.fill_color);
+            let fill_size = [(w - inset * 2.0).max(0.0), (h - inset * 2.0).max(0.0)];
+            let fill_node = box_node(ctx, &shape, fill_size, &tick);
             let transform = Matrix4::new_translation(&Vector3::new(inset, inset, 0.0));
             node.push_child(fill_node, transform);
         }
@@ -159,8 +178,14 @@ impl<Msg: Message> Widget for Checkbox<Msg> {
             LayoutDispatch::of::<RectGeometry>(),
             Pickable,
             FocusPolicy::Normal,
-            checkbox_render_item(self.state()),
         )
+    }
+
+    fn after_spawn(&self, entity: &mut EntityWorldMut) {
+        // Built here rather than in `bundle()`: it needs the `ShapeCtx`
+        // resource, which only world access can reach.
+        let shape = ShapeCtx::get(entity);
+        entity.insert(checkbox_render_item(shape, self.state()));
     }
 
     fn patch(&self, entity: &mut EntityWorldMut) {
@@ -177,7 +202,8 @@ impl<Msg: Message> Widget for Checkbox<Msg> {
         }
 
         if changed {
-            let item = checkbox_render_item(self.state());
+            let shape = ShapeCtx::get(entity);
+            let item = checkbox_render_item(shape, self.state());
             if let Some(mut existing) = entity.get_mut::<RenderItem>() {
                 *existing = item;
             }
