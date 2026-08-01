@@ -441,3 +441,80 @@ fn arrange_publishes_the_allocated_size_for_wrapping() {
         "declared width is only an input to measure"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Clipboard
+// ---------------------------------------------------------------------------
+//
+// The system clipboard is real shared OS state, so these tests deliberately do
+// **not** assert on its contents — a parallel test run, or a CI box with no
+// display server, would make that flaky for reasons unrelated to this code.
+// What is asserted is the part that can actually regress: the chords are
+// recognised as clipboard operations rather than falling through to the
+// editing keys, which is the bug that would otherwise type a literal "v".
+
+#[test]
+fn ctrl_v_is_never_typed_as_a_literal_v() {
+    let (mut world, _root, text_box) = setup("");
+    dispatch_key(&mut world, &with_ctrl(character("v")));
+
+    let text = text_of(&world, text_box);
+    assert!(
+        text != "v",
+        "Ctrl+V must paste (or do nothing), never insert the letter; got {text:?}"
+    );
+}
+
+#[test]
+fn ctrl_c_consumes_the_key_and_leaves_the_text_alone() {
+    let (mut world, _root, text_box) = setup("hello");
+    dispatch_key(&mut world, &with_ctrl(character("a"))); // select all
+    let consumed = dispatch_key(&mut world, &with_ctrl(character("c")));
+
+    assert!(consumed, "a copy chord belongs to the focused text box");
+    assert_eq!(
+        text_of(&world, text_box),
+        "hello",
+        "copying must not modify the buffer"
+    );
+}
+
+#[test]
+fn ctrl_x_removes_the_selection() {
+    // Cut is the one clipboard operation whose *local* effect is observable
+    // without reading the OS clipboard back.
+    let (mut world, _root, text_box) = setup("hello");
+    dispatch_key(&mut world, &with_ctrl(character("a")));
+    dispatch_key(&mut world, &with_ctrl(character("x")));
+
+    assert_eq!(text_of(&world, text_box), "");
+}
+
+#[test]
+fn a_cut_reports_the_edit_but_a_copy_does_not() {
+    let (mut world, _root, _text_box) = setup("hello");
+    dispatch_key(&mut world, &with_ctrl(character("a")));
+    // Select-all reports itself as an edit (pre-existing: the editing path
+    // does not separate "the buffer changed" from "the selection changed").
+    // Drain it so what is measured below is only the clipboard's doing.
+    let _ = queued(&mut world);
+
+    dispatch_key(&mut world, &with_ctrl(character("c")));
+    assert!(
+        queued(&mut world).is_empty(),
+        "a copy changes no text, so it must not emit an update"
+    );
+
+    dispatch_key(&mut world, &with_ctrl(character("x")));
+    assert_eq!(queued(&mut world), vec![Msg::Edited(String::new())]);
+}
+
+#[test]
+fn an_unrelated_ctrl_chord_still_falls_through() {
+    // The clipboard check must not swallow every Ctrl+letter.
+    let (mut world, _root, text_box) = setup("hello");
+    let consumed = dispatch_key(&mut world, &with_ctrl(character("q")));
+
+    assert!(!consumed, "Ctrl+Q is nobody's business here");
+    assert_eq!(text_of(&world, text_box), "hello");
+}

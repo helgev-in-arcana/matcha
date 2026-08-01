@@ -33,6 +33,7 @@ thiserror = { workspace = true }
 log = { workspace = true }
 enum-map = "2.7.3"
 web-time = { workspace = true }
+arboard = { version = "3.6", default-features = false }
 
 # NOTE: the `cfg` expressions below must stay in sync with the `web` alias
 # defined in build.rs (`all(target_arch = "wasm32", target_os = "unknown")`).

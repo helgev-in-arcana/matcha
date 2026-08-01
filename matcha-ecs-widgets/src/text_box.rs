@@ -68,6 +68,7 @@ use matcha_ecs::{
     resources::{FrameTime, RedrawRequest},
     view::Widget,
 };
+use matcha_window::clipboard::Clipboard;
 use matcha_window::event::device_event::{ImeEvent, Key as LogicalKey, KeyInput, NamedKey};
 use nalgebra::{Matrix4, Point3, Vector3};
 use parking_lot::Mutex;
@@ -524,6 +525,14 @@ impl<Msg: Message> Widget for TextBox<Msg> {
 }
 
 /// Run `f` against the entity's editor.
+/// The system clipboard, as a world resource.
+///
+/// Lazily inserted on first copy/paste so an app that never uses one never
+/// opens it — and so the core never has to know this exists, the same pattern
+/// `FontCtx`/`ShapeCtx`/`ImageCtx` follow.
+#[derive(bevy_ecs::resource::Resource, Clone, Default)]
+pub struct ClipboardResource(pub Arc<Clipboard>);
+
 fn with_editor<R>(
     entity: &mut EntityWorldMut,
     f: impl FnOnce(&mut PlainEditor<RichTextBrush>) -> R,
@@ -555,6 +564,86 @@ fn with_editor_driver<R>(
 // Input handling — parley is fair game from here down
 // ---------------------------------------------------------------------------
 
+/// Copy, cut and paste.
+///
+/// Handled before the editing keys because the chords overlap: `Ctrl+V` is a
+/// `Character("v")` and would otherwise be typed as a literal `v`.
+///
+/// The clipboard is reached as a lazily-inserted world resource rather than
+/// being opened per keystroke: on Windows and X11 opening it is a real syscall
+/// that can fail while another process holds it. Returns `None` for a key that
+/// is not one of these, `Some(edited)` otherwise — a copy consumes the key but
+/// changes no text, so those two answers are not the same thing.
+fn handle_clipboard_key(entity: &mut EntityWorldMut, input: &KeyInput) -> Option<bool> {
+    let modifiers = input.snapshot.modifiers();
+    if !modifiers.control_key() {
+        return None;
+    }
+    let LogicalKey::Character(text) = input.logical_key() else {
+        return None;
+    };
+
+    enum Op {
+        Copy,
+        Cut,
+        Paste,
+    }
+    let op = if text.eq_ignore_ascii_case("c") {
+        Op::Copy
+    } else if text.eq_ignore_ascii_case("x") {
+        Op::Cut
+    } else if text.eq_ignore_ascii_case("v") {
+        Op::Paste
+    } else {
+        return None;
+    };
+
+    let clipboard = entity.world_scope(|world| {
+        world
+            .get_resource_or_insert_with(ClipboardResource::default)
+            .0
+            .clone()
+    });
+
+    match op {
+        Op::Copy | Op::Cut => {
+            let selected = with_editor(entity, |editor| {
+                editor.selected_text().map(|s| s.to_owned())
+            })
+            .flatten();
+            // An empty selection is not an error and not a no-op to report:
+            // the chord was still ours, it just had nothing to act on.
+            let Some(selected) = selected.filter(|s| !s.is_empty()) else {
+                return Some(false);
+            };
+            clipboard.set_text(selected);
+            if matches!(op, Op::Cut) {
+                return Some(with_editor_driver(entity, |d| {
+                    d.delete_selection();
+                    true
+                })
+                .unwrap_or(false));
+            }
+            Some(false)
+        }
+        Op::Paste => {
+            // Newlines are pasted verbatim: this widget is multi-line, so
+            // there is nothing to strip. A future single-line variant is where
+            // that decision would have to be made.
+            let Some(text) = clipboard.get_text().filter(|t| !t.is_empty()) else {
+                return Some(false);
+            };
+            Some(
+                with_editor_driver(entity, |d| {
+                    d.insert_or_replace_selection(&text);
+                    true
+                })
+                .unwrap_or(false),
+            )
+        }
+    }
+}
+
 fn on_key<Msg: Message>(entity: &mut EntityWorldMut, input: &KeyInput) -> bool {
     let modifiers = input.snapshot.modifiers();
     let shift = modifiers.shift_key();
@@ -572,6 +661,15 @@ fn on_key<Msg: Message>(entity: &mut EntityWorldMut, input: &KeyInput) -> bool {
         .is_some_and(|predicate| (predicate.0)(input));
     if confirms {
         emit::<Msg, OnTextConfirm<Msg>>(entity, |c| c.0);
+        return true;
+    }
+
+    // Before the editing keys: `Ctrl+V` is a `Character("v")` and would
+    // otherwise be inserted literally.
+    if let Some(edited) = handle_clipboard_key(entity, input) {
+        if edited {
+            emit::<Msg, OnTextUpdate<Msg>>(entity, |c| c.0);
+        }
         return true;
     }
 
