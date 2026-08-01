@@ -41,6 +41,14 @@ pub struct RenderCtx<'a> {
     /// Whether the focus vertex is this entity or one of its descendants
     /// (CSS `:focus-within`). Always `true` when [`focused`](Self::focused) is.
     pub focus_within: bool,
+    /// Whether the pointer is inside this entity's box (CSS `:hover`), whether
+    /// directly or via a descendant. Arrives through the context for the same
+    /// reason `focused` does; `pointer::sync_pointer_components` invalidates
+    /// the cached node on every transition.
+    pub hovered: bool,
+    /// Whether a held press landed inside this entity and the pointer has not
+    /// left it since (CSS `:active`).
+    pub active: bool,
 }
 
 /// A widget's current opacity, `0.0` (invisible) to `1.0` (fully visible).

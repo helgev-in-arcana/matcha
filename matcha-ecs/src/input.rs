@@ -53,6 +53,10 @@ pub struct PointerPress<Msg: Message> {
     /// in the app model, so a focus-only change needs a redraw but **not** a
     /// re-run of the view.
     pub focus_changed: bool,
+    /// Whether `:hover`/`:active` moved. Same reasoning as
+    /// [`focus_changed`](Self::focus_changed): pointer state is ECS state, so a
+    /// redraw is enough and re-running the view would be wasted work.
+    pub pointer_changed: bool,
 }
 
 /// Resolve one pointer press: pick once, then serve both click routing and
@@ -74,6 +78,9 @@ pub fn resolve_pointer_press<Msg: Message>(
         .and_then(|target| world.get::<OnClick<Msg>>(target).and_then(|c| c.0.clone()));
 
     let focus_changed = focus_from_pick(world, hit);
+    // The same pick also settles `:active`: the press chain is derived from
+    // what was hit, not from a second query.
+    let pointer_changed = crate::pointer::set_pressed(world, hit);
 
     // After focus, so a widget's pointer handler can assume it already has it.
     // Whoever consumes the press owns the drag that may follow; if nobody does,
@@ -86,6 +93,7 @@ pub fn resolve_pointer_press<Msg: Message>(
     PointerPress {
         click_msg,
         focus_changed,
+        pointer_changed,
     }
 }
 

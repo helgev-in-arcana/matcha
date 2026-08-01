@@ -26,6 +26,30 @@ use matcha_window::event::device_event::{ImeEvent, KeyInput};
 #[derive(Component, Clone, Copy)]
 pub struct Pickable;
 
+/// CSS `:hover` — the pointer is inside this entity's box.
+///
+/// Present on the whole chain from the picked entity up to the root, exactly
+/// as in CSS: hovering a button's label hovers the button, the row holding it,
+/// and so on. There is therefore no `:hover-within` counterpart to
+/// [`FocusWithin`](crate::components::focus::FocusWithin) — this marker
+/// already is it.
+///
+/// Derived state, written only by [`crate::pointer::sync_pointer_components`].
+/// Prefer `Has<Hovered>` or the [`PointerState`](crate::pointer::PointerState)
+/// resource over `Changed<Hovered>`: change detection does not fire on removal,
+/// so a `Changed` query would never see an entity *losing* hover.
+#[derive(Component, Clone, Copy)]
+pub struct Hovered;
+
+/// CSS `:active` — a pointer button is held down and the press landed inside
+/// this entity.
+///
+/// Cleared while the pointer is dragged off the pressed entity and restored
+/// when it comes back, so a button does not stay looking pressed under a
+/// cursor that has wandered away. Derived state, same caveats as [`Hovered`].
+#[derive(Component, Clone, Copy)]
+pub struct Active;
+
 /// Marker bound for Elm-style messages: a cheap-to-clone, comparable value.
 ///
 /// Deliberately `Clone` rather than `Copy`: a text widget's change notification

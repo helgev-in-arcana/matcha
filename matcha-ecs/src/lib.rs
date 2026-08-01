@@ -6,6 +6,7 @@ pub mod keyboard;
 pub mod layout;
 pub mod model;
 pub mod pick;
+pub mod pointer;
 pub mod render;
 pub mod resources;
 pub mod systems;

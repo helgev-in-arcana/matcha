@@ -28,7 +28,7 @@ use matcha_window::{
     adapter::{EventLoop, EventLoopProxy},
     application::Application,
     event::{
-        device_event::DeviceEvent,
+        device_event::{DeviceEvent, DeviceEventData},
         raw_device_event::{RawDeviceEvent, RawDeviceId},
         window_event::WindowEvent,
     },
@@ -50,6 +50,7 @@ use crate::{
     keyboard::{dispatch_ime, dispatch_key, sync_ime_state},
     model::{ModelHandle, ModelResource},
     pick::{update_picker, PickQuery, Picker, PickerResource},
+    pointer::{self, sync_pointer_components},
     render::{build_and_present, extract_items, RenderDriver, RenderSnapshot, ThreadDriver},
     resources::{
         ClipMask, FrameTime, GpuResource, RedrawRequest, RenderWindowRoot, RendererResource,
@@ -251,6 +252,13 @@ where
                 .chain()
                 .in_set(MatchaSet::PreExtract),
         );
+        // Hover is re-resolved here, after `update_picker`, so a widget that
+        // appears under a stationary cursor comes up already hovered.
+        render_schedule.add_systems(
+            sync_pointer_components
+                .after(update_picker)
+                .in_set(MatchaSet::PreExtract),
+        );
 
         Self {
             world,
@@ -372,7 +380,7 @@ where
             (self.reducer)(&mut model.0, msg);
             drop(model);
             self.rerun_view_and_redraw();
-        } else if !self.drain_message_queue() && press.focus_changed {
+        } else if !self.drain_message_queue() && (press.focus_changed || press.pointer_changed) {
             self.request_redraw_all();
         }
     }
@@ -760,6 +768,21 @@ where
         _window_id: WindowId,
         event: DeviceEvent,
     ) {
+        // Hover first, so a press is resolved against an up-to-date chain.
+        //
+        // There is no move-specific arm because a plain cursor move produces no
+        // `MouseInput` of its own once `matcha-window`'s state machine has
+        // processed it — its whole payload is the updated position, which every
+        // mouse event carries. Keyboard events are excluded so an early
+        // keystroke cannot claim the pointer is at the origin.
+        if let DeviceEventData::MouseInput { event: mouse, .. } = event.event() {
+            let left = matches!(mouse, Some(matcha_window::event::device_event::MouseInput::Left));
+            let position = (!left).then(|| event.mouse_viewport_position());
+            if pointer::set_position(&mut self.world, position) {
+                self.request_redraw_all();
+            }
+        }
+
         // `on_click` only fires on the primary-button press edge (not every
         // move/release), so a hit is always a genuine new click.
         if let Some(count) = event.on_click(|count| count) {
@@ -770,6 +793,9 @@ where
         // next one starts from whatever the next press lands on.
         if event.on_click_released(|_count| ()).is_some() {
             set_pointer_capture(&mut self.world, None);
+            if pointer::set_pressed(&mut self.world, None) {
+                self.request_redraw_all();
+            }
         }
 
         // A drag continues an interaction a press already started (dragging out

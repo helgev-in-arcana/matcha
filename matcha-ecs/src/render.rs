@@ -25,6 +25,7 @@ use crate::{
     clip::ClipArena,
     components::{
         focus::{FocusWithin, Focused},
+        input::{Active, Hovered},
         layout::{Clip, GlobalTransform, LayoutOutput},
         render::{RenderCtx, RenderItem, RenderOpacity},
     },
@@ -35,7 +36,7 @@ use crate::{
 /// builder, its window-space transform (already composed by M3 layout), the size
 /// layout allocated to it (`LayoutOutput::size` — what the builder must draw at),
 /// its current opacity (`1.0` if the entity has no `RenderOpacity`), and its
-/// focus state.
+/// focus and pointer state.
 pub struct RenderItemSnapshot {
     /// Which entity this was extracted from. Nothing on the render path reads
     /// it — it is here so a frame can be traced back to the tree that produced
@@ -48,6 +49,8 @@ pub struct RenderItemSnapshot {
     pub opacity: f32,
     pub focused: bool,
     pub focus_within: bool,
+    pub hovered: bool,
+    pub active: bool,
     /// Innermost enclosing clip, as an index into the frame's [`ClipArena`].
     /// The clips it inherits are that one's ancestors.
     pub clip: Option<u32>,
@@ -135,6 +138,8 @@ fn extract_one(
             opacity,
             focused: world.get::<Focused>(entity).is_some(),
             focus_within: world.get::<FocusWithin>(entity).is_some(),
+            hovered: world.get::<Hovered>(entity).is_some(),
+            active: world.get::<Active>(entity).is_some(),
             clip: own_clip,
         });
     }
@@ -162,7 +167,7 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
 
     let mut nodes: Vec<FlatItem> = Vec::with_capacity(items.len());
     for item in &items {
-        // Size and focus vary per item, so `RenderCtx` is built fresh per item
+        // Size and interaction state vary per item, so `RenderCtx` is built fresh per item
         // rather than shared across the loop. Opacity is deliberately not in
         // it: it is applied at draw time, so it never reaches a builder and
         // never invalidates a cached node.
@@ -174,6 +179,8 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
             size: item.size,
             focused: item.focused,
             focus_within: item.focus_within,
+            hovered: item.hovered,
+            active: item.active,
         };
         let node = build_node(&item.cache, &item.builder, &ctx);
         nodes.push(
