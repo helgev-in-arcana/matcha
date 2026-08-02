@@ -192,3 +192,90 @@ fn a_widget_entirely_outside_its_clip_is_dropped_from_picking() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// The clip model itself
+//
+// Picking used to carry a running rectangle intersection while drawing carried
+// this arena: two models of the same thing, agreeing only for as long as every
+// transform stayed a translation. These pin the arena's own containment rule,
+// which both now use.
+// ---------------------------------------------------------------------------
+
+/// A unit-quad transform for the axis-aligned box at `origin` of `size`.
+fn box_transform(origin: [f32; 2], size: [f32; 2]) -> nalgebra::Matrix4<f32> {
+    nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(origin[0], origin[1], 0.0))
+        * nalgebra::Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(
+            size[0], size[1], 1.0,
+        ))
+}
+
+#[test]
+fn containment_is_half_open_so_abutting_clips_never_both_claim_a_point() {
+    let mut arena = matcha_ecs::clip::ClipArena::default();
+    let a = arena.push(None, box_transform([0.0, 0.0], [1.0, 1.0]), [10.0, 10.0]);
+    let b = arena.push(None, box_transform([10.0, 0.0], [1.0, 1.0]), [10.0, 10.0]);
+
+    // x = 10 is a's exclusive far edge and b's inclusive near edge.
+    assert!(arena.contains(Some(a), [9.99, 5.0]));
+    assert!(!arena.contains(Some(a), [10.0, 5.0]));
+    assert!(arena.contains(Some(b), [10.0, 5.0]));
+}
+
+#[test]
+fn an_unclipped_item_is_contained_everywhere() {
+    let arena = matcha_ecs::clip::ClipArena::default();
+    assert!(arena.contains(None, [-1e6, 1e6]));
+}
+
+#[test]
+fn a_chain_requires_every_clip_in_it() {
+    let mut arena = matcha_ecs::clip::ClipArena::default();
+    let outer = arena.push(None, box_transform([0.0, 0.0], [1.0, 1.0]), [100.0, 100.0]);
+    let inner = arena.push(
+        Some(outer),
+        box_transform([50.0, 50.0], [1.0, 1.0]),
+        [100.0, 100.0],
+    );
+
+    // Inside `inner`'s own box but outside `outer` — only the chain catches it.
+    assert!(arena.contains(Some(inner), [70.0, 70.0]));
+    assert!(!arena.contains(Some(inner), [120.0, 120.0]));
+    assert!(arena.contains(Some(outer), [70.0, 70.0]));
+}
+
+#[test]
+fn a_rotated_clip_cuts_along_its_own_edges_not_its_bounding_box() {
+    // This is the case a rectangle intersection cannot express, and the reason
+    // picking now reads the same arena the renderer does. A 100x100 box rotated
+    // 45 degrees about its centre still has a 100x100 axis-aligned bounding
+    // box, but its corners are no longer inside it.
+    let centre = nalgebra::Vector3::new(50.0, 50.0, 0.0);
+    let transform = nalgebra::Matrix4::new_translation(&centre)
+        * nalgebra::Matrix4::from_euler_angles(0.0, 0.0, std::f32::consts::FRAC_PI_4)
+        * nalgebra::Matrix4::new_translation(&-centre)
+        * box_transform([0.0, 0.0], [1.0, 1.0]);
+
+    let mut arena = matcha_ecs::clip::ClipArena::default();
+    let clip = arena.push(None, transform, [100.0, 100.0]);
+
+    assert!(
+        arena.contains(Some(clip), [50.0, 50.0]),
+        "the centre is inside under any rotation"
+    );
+    assert!(
+        !arena.contains(Some(clip), [2.0, 2.0]),
+        "the unrotated box's top-left corner is now outside the diamond"
+    );
+    assert!(
+        arena.contains(Some(clip), [50.0, 5.0]),
+        "but the diamond's own top vertex region is inside"
+    );
+}
+
+#[test]
+fn a_degenerate_clip_contains_nothing() {
+    let mut arena = matcha_ecs::clip::ClipArena::default();
+    let clip = arena.push(None, box_transform([0.0, 0.0], [1.0, 1.0]), [0.0, 50.0]);
+    assert!(!arena.contains(Some(clip), [0.0, 25.0]));
+}

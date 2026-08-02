@@ -24,10 +24,10 @@ use bevy_ecs::{entity::Entity, resource::Resource, world::World};
 use nalgebra::Point3;
 
 use crate::{
-    clip::intersect,
+    clip::ClipArena,
     components::{
         input::Pickable,
-        layout::{Clip, GlobalTransform, LayoutOutput},
+        layout::{GlobalTransform, LayoutOutput},
     },
     traversal,
 };
@@ -99,6 +99,9 @@ struct PickEntry {
     entity: Entity,
     /// `[min_x, min_y, max_x, max_y]` in window space.
     rect: [f32; 4],
+    /// Innermost enclosing clip, as an index into the picker's own
+    /// [`ClipArena`]. The clips it inherits are that one's ancestors.
+    clip: Option<u32>,
 }
 
 /// The 2D backend: a flat array of axis-aligned rectangles in paint order, so
@@ -115,6 +118,13 @@ struct PickEntry {
 pub struct RectPicker {
     /// Back to front.
     entries: Vec<PickEntry>,
+    /// The clips those entries sit inside, in the same arena shape the renderer
+    /// is handed. Picking used to carry a running rectangle intersection
+    /// instead — cheaper, but it is a *different model* of the same thing, and
+    /// one that cannot express a rotated clip, so the day a transform stops
+    /// being translation-only what you can click and what you can see would
+    /// disagree. Sharing the model is what makes that impossible.
+    clips: ClipArena,
 }
 
 impl RectPicker {
@@ -130,11 +140,11 @@ impl RectPicker {
 
 impl Picker for RectPicker {
     fn update(&mut self, world: &World, root: Entity) {
-        let mut entries = Vec::new();
+        let mut out = RectPicker::default();
         traversal::walk(world, root, None, &mut |world, entity, clip| {
-            collect_one(world, entity, *clip, &mut entries)
+            Some(collect_one(world, entity, *clip, &mut out))
         });
-        self.entries = entries;
+        *self = out;
     }
 
     fn pick(&self, _world: &World, q: &PickQuery) -> Option<PickHit> {
@@ -142,59 +152,50 @@ impl Picker for RectPicker {
         self.entries
             .iter()
             .rev()
-            .find(|e| x >= e.rect[0] && x < e.rect[2] && y >= e.rect[1] && y < e.rect[3])
+            // Own box first: it rejects almost everything, and costs no matrix
+            // inversion. A widget only partly visible stays pickable over the
+            // visible part, because the clip test runs on the point.
+            .find(|e| {
+                x >= e.rect[0]
+                    && x < e.rect[2]
+                    && y >= e.rect[1]
+                    && y < e.rect[3]
+                    && self.clips.contains(e.clip, q.viewport_pos)
+            })
             .map(|e| PickHit { entity: e.entity })
     }
 }
 
-/// Record `entity` if it is pickable, and return the clip its children sit
-/// inside — the intersection of every [`Clip`] enclosing them, in window
-/// space, or `None` when nothing does. `None` as the *return* prunes the
-/// subtree, which is what an entity clipped entirely away does.
+/// Record `entity` if it is pickable, and return the innermost clip its
+/// children sit inside.
 fn collect_one(
     world: &World,
     entity: Entity,
-    clip: Option<[f32; 4]>,
-    entries: &mut Vec<PickEntry>,
-) -> Option<Option<[f32; 4]>> {
-    let box_of = |entity: Entity| {
-        let layout = world.get::<LayoutOutput>(entity)?;
-        let transform = world.get::<GlobalTransform>(entity)?;
-        let origin = transform.affine.transform_point(&Point3::origin());
-        Some([
-            origin.x,
-            origin.y,
-            origin.x + layout.size[0],
-            origin.y + layout.size[1],
-        ])
-    };
-
-    // A `Clip` covers the declaring entity as well as its descendants, so it
-    // narrows this entity's own rectangle before it is recorded.
-    let clip = match (world.get::<Clip>(entity).is_some(), box_of(entity)) {
-        (true, Some(own)) => match clip {
-            Some(outer) => match intersect(outer, own) {
-                Some(narrowed) => Some(narrowed),
-                // Entirely clipped away: nothing here or below can be picked.
-                None => return None,
-            },
-            None => Some(own),
-        },
-        _ => clip,
-    };
+    clip: Option<u32>,
+    out: &mut RectPicker,
+) -> Option<u32> {
+    // A `Clip` covers the declaring entity as well as its descendants, so the
+    // index this returns is also the one `entity` is recorded with.
+    let clip = crate::clip::descend(&mut out.clips, world, entity, clip);
 
     if world.get::<Pickable>(entity).is_some()
-        && let Some(rect) = box_of(entity)
+        && let (Some(layout), Some(transform)) = (
+            world.get::<LayoutOutput>(entity),
+            world.get::<GlobalTransform>(entity),
+        )
     {
-        // A widget only partly visible stays pickable over the visible part.
-        let visible = match clip {
-            Some(clip) => intersect(rect, clip),
-            None => Some(rect),
-        };
-        if let Some(rect) = visible {
-            entries.push(PickEntry { entity, rect });
-        }
+        let origin = transform.affine.transform_point(&Point3::origin());
+        out.entries.push(PickEntry {
+            entity,
+            rect: [
+                origin.x,
+                origin.y,
+                origin.x + layout.size[0],
+                origin.y + layout.size[1],
+            ],
+            clip,
+        });
     }
 
-    Some(clip)
+    clip
 }

@@ -118,11 +118,9 @@ fn extract_one(
         .unwrap_or([0.0, 0.0]);
 
     // A `Clip` covers the declaring entity too, not only its descendants, so
-    // it is opened before the entity's own item is pushed.
-    let own_clip = match (world.get::<Clip>(entity).is_some(), transform) {
-        (true, Some(transform)) => Some(out.clips.push(clip, transform, size)),
-        _ => clip,
-    };
+    // it is opened before the entity's own item is pushed. Shared with picking
+    // so both agree on which clips apply to what.
+    let own_clip = crate::clip::descend(&mut out.clips, world, entity, clip);
 
     if let (Some(item), Some(transform)) = (world.get::<RenderItem>(entity), transform) {
         let opacity = world
