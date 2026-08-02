@@ -1,12 +1,26 @@
-//! Layout protocol: `Constraints`, the `Layout` trait, and the `LayoutDispatch`
-//! fn-pointer table that lets a single exclusive system ([`layout_root`]) walk
-//! an arbitrarily-typed tree of layouts without the core knowing any concrete
-//! layout type (`ECS_ARCHITECTURE.md` §8.3/§8.4).
+//! Layout: the protocol a widget implements, and the pass that runs it.
+//!
+//! - **Protocol** — [`Constraints`] and [`Measured`] (what a parent asks and
+//!   what a child reports), the [`Layout`] trait, and the [`LayoutDispatch`]
+//!   fn-pointer table that lets one exclusive system walk an arbitrarily-typed
+//!   tree without the core knowing any concrete layout type
+//!   (`ECS_ARCHITECTURE.md` §8.3/§8.4).
+//! - **Pass** — [`LayoutCtx`], which carries the world and the frame's measure
+//!   cache and is the only thing a `Layout` impl is handed, plus the two ways
+//!   to start one: [`layout_root`] (a root and explicit constraints — what
+//!   tests drive) and [`run_layout`] (the registered system, which resolves the
+//!   UI root and its window size and then calls it).
 //!
 //! Core owns the protocol; concrete layouts (`Column`, `Row`, ...) live in
 //! `matcha-ecs-widgets` and are wired in purely by including
 //! `(XxxLayout, LayoutDispatch::of::<XxxLayout>())` in a widget's `bundle()` —
 //! no registration step exists.
+//!
+//! Kept in one file deliberately: implementing a layout means reading the
+//! constraint vocabulary, the trait and `LayoutCtx`'s methods together, and
+//! splitting them would only add navigation to the most common reading path.
+//! Worth revisiting when `LayoutCtx` grows a real cache policy or an
+//! intrinsic-sizing pass of its own — not for size alone.
 
 use std::collections::HashMap;
 
