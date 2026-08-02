@@ -4,6 +4,7 @@ compile_error!("feature \"winit\" and feature \"baseview\" cannot be enabled at 
 pub mod adapter;
 pub mod clipboard;
 pub mod application;
+pub mod error;
 pub mod event;
 pub mod window;
 

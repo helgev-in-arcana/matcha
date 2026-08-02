@@ -3,7 +3,7 @@ use crate::{adapter::Adapter, application::Application};
 
 pub(crate) fn run<App: Application>(
     adapter: Adapter<App>,
-) -> Result<(), winit::error::EventLoopError> {
+) -> Result<(), crate::error::RunError> {
     let event_loop =
         winit::event_loop::EventLoop::<WinitUserMessage<App>>::with_user_event().build()?;
 
@@ -13,5 +13,6 @@ pub(crate) fn run<App: Application>(
         adapter,
         event_loop_proxy,
     };
-    event_loop.run_app(&mut interface)
+    event_loop.run_app(&mut interface)?;
+    Ok(())
 }

@@ -33,7 +33,7 @@ impl WindowSurface {
     ) -> Result<Self, WindowSurfaceError> {
         let window = event_loop
             .create_window(config.to_winit_attributes())
-            .map_err(WindowSurfaceError::CreateWindow)?;
+            .map_err(|e| WindowSurfaceError::CreateWindow(e.to_string()))?;
 
         Ok(Self::from_native(
             Box::new(WinitWindow(Arc::new(window))),

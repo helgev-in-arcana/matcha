@@ -460,9 +460,14 @@ pub enum SurfaceTextureError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum WindowSurfaceError {
-    #[cfg(feature = "winit")]
-    #[error("Failed to create window")]
-    CreateWindow(winit::error::OsError),
+    /// The OS refused to create the window.
+    ///
+    /// Carries the backend's message rather than its error type: winit's
+    /// `OsError` has no public fields, so formatting it is already the only
+    /// thing a caller could do with it, and a backend-specific payload here
+    /// would put a windowing library back into this crate's public API.
+    #[error("failed to create window: {0}")]
+    CreateWindow(String),
     #[error("Failed to create window surface")]
     CreateWindowSurface(wgpu::CreateSurfaceError),
 }
