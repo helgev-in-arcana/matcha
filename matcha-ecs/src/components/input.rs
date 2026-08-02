@@ -7,6 +7,22 @@
 //! specifically — a protocol multiple widgets share, so it belongs in core per
 //! `ECS_IMPLEMENTATION_PLAN.md` §3.1's crate-direction test. The widgets crate
 //! re-exports both for source compatibility.
+//!
+//! # Why the event types are `matcha-window`'s
+//!
+//! [`Cursor`] holds a `matcha_window::window::CursorIcon`, and
+//! [`KeyDispatch`]/[`ImeDispatch`] name `matcha_window`'s `KeyInput`/`ImeEvent`
+//! in their signatures. That is deliberate, not an oversight to be tidied away.
+//! `matcha-window` is *already* the abstraction over winit and baseview, so a
+//! matcha-ecs-side mirror of those enums would be a second abstraction over the
+//! first, kept in sync by hand, buying nothing but the ability to say the core
+//! does not name a windowing crate.
+//!
+//! The price, which is real and should be known rather than rediscovered: any
+//! widget handling raw keys or IME depends on `matcha-window` too, which is why
+//! `matcha-ecs-widgets` carries that dependency for `TextBox` alone. Revisit
+//! only if a second windowing backend ever wants an event vocabulary
+//! `matcha-window` cannot express.
 
 use bevy_ecs::{component::Component, world::EntityWorldMut};
 use matcha_window::event::device_event::{ImeEvent, KeyInput};
