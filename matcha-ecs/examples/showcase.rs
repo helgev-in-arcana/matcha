@@ -48,7 +48,7 @@ const IMAGE_BYTES: &[u8] = include_bytes!("../../matcha/src/assets/videoframe_21
 static IMAGE: LazyLock<Arc<[u8]>> = LazyLock::new(|| Arc::from(IMAGE_BYTES));
 
 const INK: [f32; 4] = [0.88, 0.88, 0.92, 1.0];
-const MUTED: [f32; 4] = [0.55, 0.55, 0.62, 1.0];
+const MUTED: [f32; 4] = [0.55, 0.55, 0.62, 0.4];
 const SURFACE: [f32; 4] = [0.14, 0.14, 0.17, 1.0];
 const OUTLINE: [f32; 4] = [0.30, 0.30, 0.36, 1.0];
 const ACCENT: [f32; 4] = [0.35, 0.60, 0.95, 1.0];
@@ -461,6 +461,54 @@ fn images(s: &mut Scope) {
                     note(s, label);
                 });
             }
+        });
+
+        // Translucent text over an image — and the reason it is here.
+        //
+        // Glyph colour is painted as a tint texel that the glyph's coverage
+        // mask multiplies, and the pipeline blends premultiplied. A tint
+        // written straight-alpha therefore composites too bright, which is
+        // invisible over a flat background (you cannot tell "wrong colour"
+        // from "correct colour, lower alpha" by eye) and obvious over an
+        // image, where a correct translucent glyph lets the picture through.
+        //
+        // That bug shipped once and survived because nothing drew translucent
+        // text. This is the canary: if the two lines below ever stop differing
+        // in the same way, something has regressed in `widgets::color`.
+        s.node(Column::new().gap(4.0), |s| {
+            s.node(
+                Panel::new(320.0, 140.0).radius(8.0).clip(true),
+                |s| {
+                    s.node(Column::new().align_items(AlignItems::Start), |s| {
+                        // Declared *before* the image, so only `Anchor`'s
+                        // default `z_index(1)` puts it in front — the overlay
+                        // case `tests/overlay.rs` pins.
+                        s.node(Anchor::at(14.0, 78.0), |s| {
+                            s.node(Column::new().gap(2.0), |s| {
+                                s.leaf(
+                                    RichText::new("opaque — reference")
+                                        .font_size(15.0)
+                                        .color([1.0, 1.0, 1.0, 1.0]),
+                                );
+                                s.leaf(
+                                    RichText::new("translucent — image must show through")
+                                        .font_size(15.0)
+                                        .color([1.0, 1.0, 1.0, 0.45]),
+                                );
+                            });
+                        });
+                        s.leaf(
+                            Image::from_bytes(IMAGE.clone(), 320.0, 140.0)
+                                .fit(ObjectFit::Cover),
+                        );
+                    });
+                },
+            );
+            note(
+                s,
+                "alpha 1.0 vs 0.45 over an image: the lower line must read as \
+                 see-through, not merely darker",
+            );
         });
     });
 }
