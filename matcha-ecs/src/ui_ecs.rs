@@ -15,6 +15,7 @@
 use std::sync::{atomic::AtomicBool, mpsc, Arc, OnceLock};
 
 use bevy_ecs::{
+    entity::Entity,
     schedule::{IntoScheduleConfigs, Schedule, SystemSet},
     system::{Query, Res, ResMut, ScheduleSystem},
     world::World,
@@ -53,7 +54,7 @@ use crate::{
     pointer::{self, sync_cursor, sync_pointer_components},
     render::{build_and_present, extract_items, RenderDriver, RenderSnapshot, ThreadDriver},
     resources::{
-        ClipMask, FrameTime, GpuResource, RedrawRequest, RenderWindowRoot, RendererResource,
+        ClipMask, FrameTime, GpuResource, RedrawRequest, RenderWindowRoot, RendererResource, ui_root,
     },
     view::{run_view, Scope},
 };
@@ -352,10 +353,9 @@ where
     /// redraw on every window. Shared by [`Self::process_model_update`] (model
     /// queue drain) and [`Self::dispatch_click`] (click -> reducer).
     fn rerun_view_and_redraw(&mut self) {
-        let Some(root) = self.world.get_resource::<RenderWindowRoot>() else {
+        let Some(root_entity) = ui_root(&self.world) else {
             return;
         };
-        let root_entity = root.entity;
         let view_fn = &self.view_fn;
         self.world
             .resource_scope::<ModelResource<M>, _>(|world, model| {
@@ -425,6 +425,26 @@ where
         }
     }
 
+    /// The root entity of `window_id`'s view tree, if that is the window this
+    /// app is driving.
+    ///
+    /// The window-id check is what the plain [`ui_root`] accessor cannot do:
+    /// these callers are answering "is the window the event names *mine*?",
+    /// which is a question that survives there being more than one root.
+    fn root_of(&self, window_id: WindowId) -> Option<Entity> {
+        let root = self.world.get_resource::<RenderWindowRoot>()?;
+        (root.window_id == window_id).then_some(root.entity)
+    }
+
+    /// Ask one window to redraw, ignoring an id that is not ours.
+    fn request_redraw_of(&self, window_id: WindowId) {
+        if let Some(root) = self.root_of(window_id)
+            && let Some(window_comp) = self.world.get::<WindowComp>(root)
+        {
+            window_comp.window.request_redraw();
+        }
+    }
+
     /// Ask every window for a redraw, without re-running the view.
     fn request_redraw_all(&mut self) {
         let _ = self.world.run_system_cached(|q: Query<&WindowComp>| {
@@ -450,12 +470,7 @@ where
     /// if the frame should be skipped (wrong window, no GPU/root, or the
     /// surface has no texture to give this frame).
     fn build_snapshot(&mut self, window_id: WindowId) -> Option<RenderSnapshot> {
-        let root = self.world.get_resource::<RenderWindowRoot>()?;
-        // Only one window is supported currently.
-        if root.window_id != window_id {
-            return None;
-        }
-        let root_entity = root.entity;
+        let root_entity = self.root_of(window_id)?;
 
         let (device, queue) = self.world.resource::<GpuResource>().gpu.context()?;
         let (core, texture_atlas, stencil_atlas) = {
@@ -572,14 +587,7 @@ where
         if !self.world.resource::<RedrawRequest>().is_requested() {
             return;
         }
-        if let Some(root) = self.world.get_resource::<RenderWindowRoot>() {
-            if root.window_id == window_id {
-                let root_entity = root.entity;
-                if let Some(window_comp) = self.world.get::<WindowComp>(root_entity) {
-                    window_comp.window.request_redraw();
-                }
-            }
-        }
+        self.request_redraw_of(window_id);
     }
 
     /// Render and present `window_id` synchronously on the calling thread,
@@ -717,14 +725,7 @@ where
         // Coalesce: if the previous frame for this window is still encoding on its
         // render thread, request another redraw and drop this one.
         if self.render_driver.get_mut().is_busy(window_id) {
-            if let Some(root) = self.world.get_resource::<RenderWindowRoot>() {
-                if root.window_id == window_id {
-                    let root_entity = root.entity;
-                    if let Some(window_comp) = self.world.get::<WindowComp>(root_entity) {
-                        window_comp.window.request_redraw();
-                    }
-                }
-            }
+            self.request_redraw_of(window_id);
             return;
         }
 

@@ -34,12 +34,9 @@ use bevy_ecs::{entity::Entity, resource::Resource, query::With, world::World};
 use matcha_window::window::CursorIcon;
 
 use crate::{
-    components::{
-        input::{Active, Cursor, Hovered},
-        window::Window as WindowComp,
-    },
+    components::input::{Active, Cursor, Hovered},
     pick::{PickQuery, PickerResource},
-    resources::RenderWindowRoot,
+    resources::ui_root_window,
     traversal::ancestors,
 };
 
@@ -212,10 +209,7 @@ pub fn sync_cursor(world: &mut World) {
         return;
     }
 
-    let Some(root) = world.get_resource::<RenderWindowRoot>().map(|r| r.entity) else {
-        return;
-    };
-    let Some(window) = world.get::<WindowComp>(root) else {
+    let Some((_, window)) = ui_root_window(world) else {
         return;
     };
     window.window.set_cursor_icon(wanted);

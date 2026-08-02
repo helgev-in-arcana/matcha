@@ -282,10 +282,7 @@ pub fn validate_focus(world: &mut World, root: Entity) {
 /// Exclusive system wrapper for [`validate_focus`], registered in
 /// `MatchaSet::PreExtract`.
 pub fn run_validate_focus(world: &mut World) {
-    let Some(root) = world
-        .get_resource::<crate::resources::RenderWindowRoot>()
-        .map(|r| r.entity)
-    else {
+    let Some(root) = crate::resources::ui_root(world) else {
         return;
     };
     validate_focus(world, root);

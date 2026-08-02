@@ -15,12 +15,9 @@ use bevy_ecs::{entity::Entity, world::World};
 use matcha_window::event::device_event::{ImeEvent, KeyInput};
 
 use crate::{
-    components::{
-        input::{ImeCursorArea, ImeDispatch, KeyDispatch},
-        window::Window as WindowComp,
-    },
+    components::input::{ImeCursorArea, ImeDispatch, KeyDispatch},
     focus::Focus,
-    resources::RenderWindowRoot,
+    resources::ui_root_window,
 };
 
 /// Deliver `input` down the focus path. Returns whether any entity consumed it.
@@ -86,13 +83,6 @@ pub struct ImeWindowState {
 /// the caret by one frame; that is imperceptible for candidate-list placement
 /// and it keeps this system free of any ordering constraint against the widget.
 pub fn sync_ime_state(world: &mut World) {
-    let Some(root) = world
-        .get_resource::<RenderWindowRoot>()
-        .map(|r| r.entity)
-    else {
-        return;
-    };
-
     let focus_top = world.resource::<Focus>().top();
     let wants_ime = focus_top.is_some_and(|e| world.get::<ImeDispatch>(e).is_some());
     let cursor_area = focus_top.and_then(|e| world.get::<ImeCursorArea>(e).copied());
@@ -104,7 +94,7 @@ pub fn sync_ime_state(world: &mut World) {
         return;
     }
 
-    let Some(window_comp) = world.get::<WindowComp>(root) else {
+    let Some((_, window_comp)) = ui_root_window(world) else {
         return;
     };
     if allowed_changed {

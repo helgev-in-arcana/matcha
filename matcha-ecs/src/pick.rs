@@ -85,8 +85,7 @@ impl Default for PickerResource {
 /// Exclusive system: refresh the active picker for the window root.
 /// Registered in `MatchaSet::PreExtract`, after layout has run.
 pub fn update_picker(world: &mut World) {
-    let Some(root) = world.get_resource::<crate::resources::RenderWindowRoot>().map(|r| r.entity)
-    else {
+    let Some(root) = crate::resources::ui_root(world) else {
         return;
     };
     world.resource_scope::<PickerResource, _>(|world, mut picker| {

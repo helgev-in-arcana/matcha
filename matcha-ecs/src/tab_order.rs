@@ -32,7 +32,7 @@ use matcha_window::event::device_event::{Key, KeyInput, NamedKey};
 use crate::{
     components::focus::FocusPolicy,
     focus::{request_focus, Focus},
-    resources::RenderWindowRoot,
+    resources::ui_root,
     traversal,
 };
 
@@ -109,10 +109,7 @@ pub fn next_focusable(world: &World, root: Entity, direction: TabDirection) -> O
 
 /// Move focus one tab stop. Returns whether it moved.
 pub fn move_focus(world: &mut World, direction: TabDirection) -> bool {
-    let Some(root) = world
-        .get_resource::<RenderWindowRoot>()
-        .map(|r| r.entity)
-    else {
+    let Some(root) = ui_root(world) else {
         return false;
     };
     let Some(next) = next_focusable(world, root, direction) else {

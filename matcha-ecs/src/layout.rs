@@ -17,9 +17,8 @@ use crate::{
     components::{
         layout::{GlobalTransform, Hidden, LayoutOutput},
         view::ViewChildren,
-        window::Window as WindowComp,
     },
-    resources::RenderWindowRoot,
+    resources::ui_root_window,
 };
 
 /// Quantization factor for layout size/bound keys, matching
@@ -413,10 +412,7 @@ fn visible_children(world: &World, children: &ViewChildren) -> Vec<Entity> {
 /// Exclusive system: find the window root and lay out its view tree against
 /// the window's current inner size. Registered in `MatchaSet::Layout`.
 pub fn run_layout(world: &mut World) {
-    let Some(root) = world.get_resource::<RenderWindowRoot>().map(|r| r.entity) else {
-        return;
-    };
-    let Some(window) = world.get::<WindowComp>(root) else {
+    let Some((root, window)) = ui_root_window(world) else {
         return;
     };
     let inner = window.window.inner_size();
