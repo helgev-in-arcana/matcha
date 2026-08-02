@@ -407,6 +407,24 @@ where
         true
     }
 
+    /// Close out an input event: redeem anything it queued, and redraw if it
+    /// changed something without producing a message.
+    ///
+    /// Every input arm ends the same way, because the two ways an event can
+    /// matter are exhaustive. A message means app state moved, so the view is
+    /// re-run (inside [`Self::drain_message_queue`]). No message but consumed
+    /// means only ECS-side state moved — a caret, a scroll offset, a hover —
+    /// which widgets read off their own entity, so a redraw suffices and
+    /// re-running the view would be wasted. Unconsumed means nothing happened.
+    ///
+    /// Having this in one place is also what keeps adding an input kind to
+    /// [`Application::device_event`] a one-line change.
+    fn settle(&mut self, consumed: bool) {
+        if consumed && !self.drain_message_queue() {
+            self.request_redraw_all();
+        }
+    }
+
     /// Ask every window for a redraw, without re-running the view.
     fn request_redraw_all(&mut self) {
         let _ = self.world.run_system_cached(|q: Query<&WindowComp>| {
@@ -779,50 +797,44 @@ where
         if let DeviceEventData::MouseInput { event: mouse, .. } = event.event() {
             let left = matches!(mouse, Some(matcha_window::event::device_event::MouseInput::Left));
             let position = (!left).then(|| event.mouse_viewport_position());
-            if pointer::set_position(&mut self.world, position) {
-                self.request_redraw_all();
-            }
+            let moved = pointer::set_position(&mut self.world, position);
+            self.settle(moved);
         }
 
+        let at_pointer = PickQuery {
+            viewport_pos: event.mouse_viewport_position(),
+        };
+
         // `on_click` only fires on the primary-button press edge (not every
-        // move/release), so a hit is always a genuine new click.
+        // move/release), so a hit is always a genuine new click. This one arm
+        // does not go through `settle`: a click can produce a message *and*
+        // change focus, and the reducer has to run before the view is re-run.
         if let Some(count) = event.on_click(|count| count) {
-            self.on_pointer_press(event.mouse_viewport_position(), count);
+            self.on_pointer_press(at_pointer.viewport_pos, count);
         }
 
         // Releasing the button ends the drag the press had captured, so the
         // next one starts from whatever the next press lands on.
         if event.on_click_released(|_count| ()).is_some() {
             set_pointer_capture(&mut self.world, None);
-            if pointer::set_pressed(&mut self.world, None) {
-                self.request_redraw_all();
-            }
+            let released = pointer::set_pressed(&mut self.world, None);
+            self.settle(released);
         }
 
         // A drag continues an interaction a press already started (dragging out
         // a text selection, say), so it goes straight to positioned delivery
         // without touching focus or click routing.
         if event.on_drag(|_from, _button| ()).is_some() {
-            let query = PickQuery {
-                viewport_pos: event.mouse_viewport_position(),
-            };
-            if dispatch_pointer_drag(&mut self.world, &query) && !self.drain_message_queue() {
-                self.request_redraw_all();
-            }
+            let consumed = dispatch_pointer_drag(&mut self.world, &at_pointer);
+            self.settle(consumed);
         }
 
         // Scrolling is positioned like a drag but starts no interaction, so it
         // likewise bypasses focus and click routing. An unconsumed scroll means
-        // nothing under the pointer could move; there is nothing to redraw.
+        // nothing under the pointer could move.
         if let Some(delta) = event.on_scroll(|delta| delta) {
-            let query = PickQuery {
-                viewport_pos: event.mouse_viewport_position(),
-            };
-            if dispatch_pointer_scroll(&mut self.world, &query, delta)
-                && !self.drain_message_queue()
-            {
-                self.request_redraw_all();
-            }
+            let consumed = dispatch_pointer_scroll(&mut self.world, &at_pointer, delta);
+            self.settle(consumed);
         }
 
         // Keyboard and IME have no spatial origin: they go to whatever holds
@@ -831,18 +843,14 @@ where
             // Tab moves focus before the focused widget is offered the key: no
             // widget in this workspace wants a literal tab character, and a
             // `Tab` that fell through would be typed instead of navigating.
-            if crate::tab_order::handle_tab_key(&mut self.world, &key_input) {
-                self.request_redraw_all();
-            } else if dispatch_key(&mut self.world, &key_input) && !self.drain_message_queue() {
-                // Consumed but produced no message: ECS-side state changed
-                // (a caret moved, say), so redraw without re-running the view.
-                self.request_redraw_all();
-            }
+            let consumed = crate::tab_order::handle_tab_key(&mut self.world, &key_input)
+                || dispatch_key(&mut self.world, &key_input);
+            self.settle(consumed);
         }
+
         if let Some(ime_event) = event.on_ime(|ime| ime.clone()) {
-            if dispatch_ime(&mut self.world, &ime_event) && !self.drain_message_queue() {
-                self.request_redraw_all();
-            }
+            let consumed = dispatch_ime(&mut self.world, &ime_event);
+            self.settle(consumed);
         }
     }
 
