@@ -38,10 +38,7 @@
 //! - No clipboard (a separate delivery path — what is pasted is not necessarily
 //!   text), no undo/redo (parley has none either), no per-span styling.
 
-use std::sync::{
-    atomic::{AtomicBool, AtomicU32, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 use bevy_ecs::{
     bundle::Bundle,
@@ -76,6 +73,7 @@ use parley::{PlainEditor, StyleProperty};
 use renderer::RenderNode;
 
 use crate::{
+    live::{LiveBool, LiveF32, LiveVec},
     sizing::Sizing,
     box_style::{box_node, BoxStyle},
     rich_text::{draw_parley_layout, paint_tint_region, ParleyFontCtx, RichTextBrush},
@@ -147,59 +145,58 @@ pub struct TextBoxStyle {
 /// Values the render builder needs but that change *after* it was captured.
 ///
 /// The builder is a closure with no world access, so these travel through
-/// shared cells it holds a clone of — the same side-channel `Text`/`RichText`
-/// use for their wrap width. Written by [`default_systems`], read on every
-/// rebuild.
+/// [`crate::live`] cells it holds a clone of — the same side-channel
+/// `Text`/`RichText` use for their wrap width. Written by [`default_systems`],
+/// read on every rebuild.
 #[derive(Component, Clone, Default)]
 pub struct TextBoxLive {
-    /// Vertical scroll offset in pixels, `f32` bit-cast.
-    scroll: Arc<AtomicU32>,
+    inner: Arc<TextBoxLiveInner>,
+}
+
+#[derive(Default)]
+struct TextBoxLiveInner {
+    /// Vertical scroll offset in pixels.
+    scroll: LiveF32,
     /// Whether the caret is in its visible blink phase.
-    caret_visible: Arc<AtomicBool>,
-    /// The size layout actually allocated, published by `arrange`. `f32`
-    /// bit-cast. Zero until the first arrange.
-    allocated: Arc<[AtomicU32; 2]>,
+    caret_visible: LiveBool,
+    /// The size layout actually allocated, published by `arrange`. Zero until
+    /// the first arrange.
+    allocated: LiveVec<2>,
     /// The wrap width the editor was last shaped at. `PlainEditor::set_width`
     /// dirties the layout unconditionally and exposes no getter, so the applied
     /// value is tracked here to avoid re-shaping every frame.
-    applied_wrap_width: Arc<AtomicU32>,
+    applied_wrap_width: LiveF32,
 }
 
 impl TextBoxLive {
     fn scroll(&self) -> f32 {
-        f32::from_bits(self.scroll.load(Ordering::Relaxed))
+        self.inner.scroll.get()
     }
 
     fn set_scroll(&self, value: f32) -> bool {
-        let bits = value.to_bits();
-        self.scroll.swap(bits, Ordering::Relaxed) != bits
+        self.inner.scroll.replace(value)
     }
 
     fn caret_visible(&self) -> bool {
-        self.caret_visible.load(Ordering::Relaxed)
+        self.inner.caret_visible.get()
     }
 
     /// Returns whether the value actually changed.
     fn set_caret_visible(&self, value: bool) -> bool {
-        self.caret_visible.swap(value, Ordering::Relaxed) != value
+        self.inner.caret_visible.replace(value)
     }
 
     fn allocated(&self) -> [f32; 2] {
-        [
-            f32::from_bits(self.allocated[0].load(Ordering::Relaxed)),
-            f32::from_bits(self.allocated[1].load(Ordering::Relaxed)),
-        ]
+        self.inner.allocated.get()
     }
 
     fn set_allocated(&self, size: [f32; 2]) {
-        self.allocated[0].store(size[0].to_bits(), Ordering::Relaxed);
-        self.allocated[1].store(size[1].to_bits(), Ordering::Relaxed);
+        self.inner.allocated.set(size);
     }
 
     /// Records `width` as applied, returning whether it differs from the last.
     fn take_wrap_width_change(&self, width: f32) -> bool {
-        let bits = width.to_bits();
-        self.applied_wrap_width.swap(bits, Ordering::Relaxed) != bits
+        self.inner.applied_wrap_width.replace(width)
     }
 }
 

@@ -20,15 +20,12 @@
 //! `measure()`, `arrange()`, and the `RenderItem` builder each independently
 //! (re)run `FontSystem::layout_text` from scratch. The only value threaded
 //! between layout and render is the resolved wrap width (a single `f32`,
-//! shared via `TextWrapWidth`'s `Arc<AtomicU32>`) — passing the actual shaped
+//! shared via `TextWrapWidth`'s `Arc<LiveF32>`) — passing the actual shaped
 //! glyph list between stages is left as a future optimisation.
 
 use std::{
     collections::HashMap,
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::Duration,
 };
 
@@ -54,6 +51,7 @@ use matcha_ecs::{
     view::Widget,
 };
 
+use crate::live::LiveF32;
 use crate::sizing::Sizing;
 use crate::animation::{Easing, ExitFade, OpacityTween};
 
@@ -71,7 +69,7 @@ struct TextStyle {
 /// Shares the most recently resolved wrap width between `TextStyle::arrange`
 /// (writer, every layout pass) and the `RenderItem` builder (reader, every
 /// rebuild). Deliberately not part of `TextStyle`'s `PartialEq`/`Clone`-based
-/// change comparison in `patch` — `AtomicU32` has no meaningful `PartialEq`,
+/// change comparison in `patch` — `LiveF32` has no meaningful `PartialEq`,
 /// and this cell must survive being read from a system that never replaces
 /// it, only the entity's `TextStyle`/`RenderItem` are replaced on patch.
 ///
@@ -79,15 +77,15 @@ struct TextStyle {
 /// runs before this entity's first `arrange()` still degrades safely to
 /// "effectively no wrap" rather than wrapping after every glyph.
 #[derive(Component)]
-struct TextWrapWidth(Arc<AtomicU32>);
+struct TextWrapWidth(Arc<LiveF32>);
 
 impl TextWrapWidth {
     fn new() -> Self {
-        Self(Arc::new(AtomicU32::new(f32::MAX.to_bits())))
+        Self(Arc::new(LiveF32::new(f32::MAX)))
     }
 
     fn store(&self, width: f32) {
-        self.0.store(width.to_bits(), Ordering::Relaxed);
+        self.0.set(width);
     }
 }
 
@@ -225,7 +223,7 @@ pub(crate) fn glyph_run_nodes(
 /// tint-texture quad masked by its cached stencil coverage bitmap.
 fn text_render_item(
     font_ctx: FontCtx,
-    wrap_width: Arc<AtomicU32>,
+    wrap_width: Arc<LiveF32>,
     content: String,
     font_size: f32,
     color: [f32; 4],
@@ -233,7 +231,7 @@ fn text_render_item(
     RenderItem::new(move |ctx: &RenderCtx| {
         let mut node = RenderNode::new();
 
-        let max_width = f32::from_bits(wrap_width.load(Ordering::Relaxed));
+        let max_width = wrap_width.get();
         let layout = shape(&font_ctx, &content, font_size, max_width);
 
         let Some(tint_region) = paint_tint_region(ctx, color) else {
@@ -452,8 +450,7 @@ mod tests {
         layout_root(&mut world, root, Constraints::from_max_size([123.0, 456.0]));
 
         let child = world.get::<ViewChildren>(root).unwrap().slots[0].1;
-        let stored_width = world.get::<TextWrapWidth>(child).unwrap().0.load(Ordering::Relaxed);
-        let stored_width = f32::from_bits(stored_width);
+        let stored_width = world.get::<TextWrapWidth>(child).unwrap().0.get();
 
         let out = world.get::<matcha_ecs::components::layout::LayoutOutput>(child).unwrap();
         assert_eq!(

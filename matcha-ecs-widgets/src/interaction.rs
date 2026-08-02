@@ -23,10 +23,7 @@
 //! `UiEcs::with_pre_layout_systems`. Without it the cell never updates and a
 //! widget stays at its base colour — degraded, but not broken.
 
-use std::sync::{
-    atomic::{AtomicU32, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bevy_ecs::{
@@ -44,6 +41,7 @@ use matcha_ecs::{
 };
 
 use crate::easing::Easing;
+use crate::live::LiveVec;
 
 /// A colour written by a system between frames and read by a `RenderItem`
 /// builder while it draws.
@@ -54,21 +52,19 @@ use crate::easing::Easing;
 /// halfway between two steps of a transition, which is indistinguishable from
 /// any other frame of that transition.
 #[derive(Clone, Debug)]
-pub struct ColorCell(Arc<[AtomicU32; 4]>);
+pub struct ColorCell(Arc<LiveVec<4>>);
 
 impl ColorCell {
     pub fn new(color: [f32; 4]) -> Self {
-        Self(Arc::new(color.map(|c| AtomicU32::new(c.to_bits()))))
+        Self(Arc::new(LiveVec::new(color)))
     }
 
     pub fn get(&self) -> [f32; 4] {
-        std::array::from_fn(|i| f32::from_bits(self.0[i].load(Ordering::Relaxed)))
+        self.0.get()
     }
 
     pub fn set(&self, color: [f32; 4]) {
-        for (slot, c) in self.0.iter().zip(color) {
-            slot.store(c.to_bits(), Ordering::Relaxed);
-        }
+        self.0.set(color)
     }
 }
 

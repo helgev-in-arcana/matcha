@@ -46,10 +46,7 @@
 pub mod geometry;
 pub mod scrollbar;
 
-use std::sync::{
-    atomic::{AtomicU32, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, entity::Entity,
@@ -67,6 +64,8 @@ use matcha_ecs::{
     layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, Measured},
     view::{Scope, Widget},
 };
+
+use crate::live::LiveVec;
 
 pub use geometry::{Axis, ScrollGeometry, ScrollbarMetrics, ScrollbarStyle};
 pub use scrollbar::{ScrollThumb, Scrollbar, ScrollbarSlot};
@@ -95,25 +94,6 @@ impl Overflow {
     }
 }
 
-/// A pair of `f32`s shared between layout and the input handlers, bit-cast into
-/// atomics.
-#[derive(Debug, Default)]
-struct SharedVec2([AtomicU32; 2]);
-
-impl SharedVec2 {
-    fn get(&self) -> [f32; 2] {
-        [
-            f32::from_bits(self.0[0].load(Ordering::Relaxed)),
-            f32::from_bits(self.0[1].load(Ordering::Relaxed)),
-        ]
-    }
-
-    fn set(&self, v: [f32; 2]) {
-        self.0[0].store(v[0].to_bits(), Ordering::Relaxed);
-        self.0[1].store(v[1].to_bits(), Ordering::Relaxed);
-    }
-}
-
 /// Where a thumb drag started, so the offset can be derived from the pointer's
 /// total displacement rather than accumulated per-event deltas (which would
 /// drift, and would fight the clamp at either end).
@@ -128,9 +108,9 @@ pub(crate) struct DragAnchor {
 
 #[derive(Debug, Default)]
 struct ScrollStateInner {
-    offset: SharedVec2,
-    content: SharedVec2,
-    viewport: SharedVec2,
+    offset: LiveVec<2>,
+    content: LiveVec<2>,
+    viewport: LiveVec<2>,
     drag: Mutex<Option<DragAnchor>>,
 }
 

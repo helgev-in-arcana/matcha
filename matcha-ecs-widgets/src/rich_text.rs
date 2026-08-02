@@ -45,10 +45,7 @@ use std::{
     collections::HashMap,
     num::NonZeroUsize,
     ops::Range,
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::Duration,
 };
 
@@ -74,6 +71,7 @@ use matcha_ecs::{
     view::Widget,
 };
 
+use crate::live::LiveF32;
 use crate::sizing::Sizing;
 use crate::animation::{Easing, ExitFade, OpacityTween};
 
@@ -424,15 +422,15 @@ struct RichTextStyle {
 /// for the full rationale (not shared with it directly, to keep the two
 /// widgets fully independent while both exist).
 #[derive(Component)]
-struct RichTextWrapWidth(Arc<AtomicU32>);
+struct RichTextWrapWidth(Arc<LiveF32>);
 
 impl RichTextWrapWidth {
     fn new() -> Self {
-        Self(Arc::new(AtomicU32::new(f32::MAX.to_bits())))
+        Self(Arc::new(LiveF32::new(f32::MAX)))
     }
 
     fn store(&self, width: f32) {
-        self.0.store(width.to_bits(), Ordering::Relaxed);
+        self.0.set(width);
     }
 }
 
@@ -856,7 +854,7 @@ pub(crate) fn draw_parley_layout(
 /// live wrap width from `wrap_width`.
 fn rich_text_render_item(
     font_ctx: ParleyFontCtx,
-    wrap_width: Arc<AtomicU32>,
+    wrap_width: Arc<LiveF32>,
     content: RichTextContent,
     style: RichTextStyle,
 ) -> RenderItem {
@@ -865,7 +863,7 @@ fn rich_text_render_item(
             return RenderNode::new();
         }
 
-        let max_width = f32::from_bits(wrap_width.load(Ordering::Relaxed));
+        let max_width = wrap_width.get();
         let layout = shape(&font_ctx, &content, &style, max_width);
         draw_parley_layout(&font_ctx, ctx, &layout)
     })
@@ -1306,8 +1304,7 @@ mod tests {
         layout_root(&mut world, root, Constraints::from_max_size([123.0, 456.0]));
 
         let child = world.get::<ViewChildren>(root).unwrap().slots[0].1;
-        let stored_width = world.get::<RichTextWrapWidth>(child).unwrap().0.load(Ordering::Relaxed);
-        let stored_width = f32::from_bits(stored_width);
+        let stored_width = world.get::<RichTextWrapWidth>(child).unwrap().0.get();
 
         let out = world.get::<matcha_ecs::components::layout::LayoutOutput>(child).unwrap();
         assert_eq!(
