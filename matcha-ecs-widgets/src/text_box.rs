@@ -27,16 +27,16 @@
 //!
 //! # v1 limits
 //!
-//! - **Multi-line only.** The box wraps at its own width. A single-line field
-//!   needs horizontal scrolling, which needs real clipping, which this renderer
-//!   does not have yet. Enter therefore inserts a newline by default and
-//!   confirmation is bound to Ctrl+Enter — see
-//!   [`confirm_key`](TextBox::confirm_key) to change that.
-//! - **Overflow is clipped** by the `Clip` marker on the widget's own entity: the
-//!   content box is dropped rather than cut, so one straddling the edge pops
-//!   instead of sliding.
-//! - No clipboard (a separate delivery path — what is pasted is not necessarily
-//!   text), no undo/redo (parley has none either), no per-span styling.
+//! - **Multi-line only.** The box wraps at its own width; Enter inserts a
+//!   newline by default and confirmation is bound to Ctrl+Enter — see
+//!   [`confirm_key`](TextBox::confirm_key) to change that. A single-line field
+//!   needs horizontal scrolling, which is a different arrangement from the
+//!   draw-time vertical offset here, not a missing renderer feature.
+//! - **Overflow is clipped** by the `Clip` marker on the widget's own entity.
+//! - Copy/cut/paste are handled here as ordinary Ctrl chords (see
+//!   `handle_clipboard_key`), reaching the process clipboard through
+//!   [`matcha_ecs::clipboard`]. No undo/redo (parley has none either), no
+//!   per-span styling.
 
 use std::sync::Arc;
 
@@ -65,7 +65,6 @@ use matcha_ecs::{
     resources::{FrameTime, RedrawRequest},
     view::Widget,
 };
-use matcha_window::clipboard::Clipboard;
 use matcha_window::event::device_event::{ImeEvent, Key as LogicalKey, KeyInput, NamedKey};
 use nalgebra::{Matrix4, Point3, Vector3};
 use parking_lot::Mutex;
@@ -522,14 +521,6 @@ impl<Msg: Message> Widget for TextBox<Msg> {
 }
 
 /// Run `f` against the entity's editor.
-/// The system clipboard, as a world resource.
-///
-/// Lazily inserted on first copy/paste so an app that never uses one never
-/// opens it — and so the core never has to know this exists, the same pattern
-/// `FontCtx`/`ShapeCtx`/`ImageCtx` follow.
-#[derive(bevy_ecs::resource::Resource, Clone, Default)]
-pub struct ClipboardResource(pub Arc<Clipboard>);
-
 fn with_editor<R>(
     entity: &mut EntityWorldMut,
     f: impl FnOnce(&mut PlainEditor<RichTextBrush>) -> R,
@@ -595,12 +586,7 @@ fn handle_clipboard_key(entity: &mut EntityWorldMut, input: &KeyInput) -> Option
         return None;
     };
 
-    let clipboard = entity.world_scope(|world| {
-        world
-            .get_resource_or_insert_with(ClipboardResource::default)
-            .0
-            .clone()
-    });
+    let clipboard = entity.world_scope(matcha_ecs::clipboard::clipboard);
 
     match op {
         Op::Copy | Op::Cut => {

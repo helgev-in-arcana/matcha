@@ -12,17 +12,25 @@
 //!
 //! [`Cursor`] holds a `matcha_window::window::CursorIcon`, and
 //! [`KeyDispatch`]/[`ImeDispatch`] name `matcha_window`'s `KeyInput`/`ImeEvent`
-//! in their signatures. That is deliberate, not an oversight to be tidied away.
-//! `matcha-window` is *already* the abstraction over winit and baseview, so a
-//! matcha-ecs-side mirror of those enums would be a second abstraction over the
-//! first, kept in sync by hand, buying nothing but the ability to say the core
-//! does not name a windowing crate.
+//! in their signatures. A matcha-ecs-side mirror of those would be a second
+//! abstraction over the first, kept in sync by hand, buying only the ability to
+//! say the core does not name a windowing crate.
 //!
-//! The price, which is real and should be known rather than rediscovered: any
-//! widget handling raw keys or IME depends on `matcha-window` too, which is why
-//! `matcha-ecs-widgets` carries that dependency for `TextBox` alone. Revisit
-//! only if a second windowing backend ever wants an event vocabulary
-//! `matcha-window` cannot express.
+//! That argument used to be weaker than it looked, and it is worth recording
+//! why. Until d787f2f, `matcha-window`'s key enums were a straight re-export of
+//! `winit::keyboard` — so this module's vocabulary was not "the windowing
+//! abstraction's", it was **winit's**, and a baseview backend could not have
+//! produced it. The abstraction being abstract was an assumption, not a fact.
+//! It is now a fact: the key types are `keyboard-types`, the W3C UI Events
+//! enums, which both winit and baseview already encode. `CursorIcon` and
+//! `ImeEvent` were always `matcha-window`'s own.
+//!
+//! The remaining price, which is real: a widget cannot implement these
+//! components without naming these types, so any widget handling raw keys, IME
+//! or a cursor shape depends on `matcha-window` too — which is why
+//! `matcha-ecs-widgets` carries that dependency. Closing that would be a
+//! re-export from this crate, not a mirror type; it is deferred along with the
+//! rest of the public module tree, not rejected.
 
 use bevy_ecs::{component::Component, world::EntityWorldMut};
 use matcha_window::event::device_event::{ImeEvent, KeyInput};

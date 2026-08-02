@@ -7,7 +7,16 @@ publish = false
 [dependencies]
 # self
 matcha-ecs = { workspace = true }
-# TextBox handles raw keyboard/IME events, which are matcha-window types.
+# Two vocabularies, both of which matcha-ecs *defines components in terms of*
+# but does not re-export: `CursorIcon` (Button/Checkbox/Link/Slider/TextBox all
+# declare one) and the key/IME event types a `KeyDispatch`/`ImeDispatch`
+# handler receives (Slider's arrow keys, TextBox's editing). A widget cannot
+# implement those core components without naming these types, so the direct
+# dependency stands until the core re-exports them — deferred deliberately,
+# along with the rest of the crate's public module tree.
+#
+# Not a backend dependency: since d787f2f the key types are the W3C UI Events
+# vocabulary (`keyboard-types`), so nothing here is tied to winit or baseview.
 matcha-window = { workspace = true }
 
 # ecs

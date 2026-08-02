@@ -1,4 +1,5 @@
 pub mod clip;
+pub mod clipboard;
 pub mod components;
 pub mod focus;
 pub mod input;
