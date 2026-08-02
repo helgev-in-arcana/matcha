@@ -595,8 +595,8 @@ struct FetchTrigger;
 impl matcha_ecs::view::Widget for FetchTrigger {
     fn bundle(&self) -> impl bevy_ecs::bundle::Bundle {
         (
-            matcha_ecs_widgets::color_rect::RectGeometry { w: 0.0, h: 0.0 },
-            matcha_ecs::layout::LayoutDispatch::of::<matcha_ecs_widgets::color_rect::RectGeometry>(),
+            matcha_ecs_widgets::RectGeometry { w: 0.0, h: 0.0 },
+            matcha_ecs::layout::LayoutDispatch::of::<matcha_ecs_widgets::RectGeometry>(),
         )
     }
 

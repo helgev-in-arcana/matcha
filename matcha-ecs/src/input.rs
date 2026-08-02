@@ -20,7 +20,8 @@ use crate::{
         layout::GlobalTransform,
     },
     focus::focus_from_pick,
-    pick::{ancestors, PickHit, PickQuery, Picker, PickerResource},
+    pick::{PickHit, PickQuery, Picker, PickerResource},
+    traversal::ancestors,
 };
 
 /// Walk up from `from` (inclusive) and return the first entity carrying

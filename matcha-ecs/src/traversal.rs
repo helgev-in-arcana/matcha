@@ -13,6 +13,10 @@
 //! paints but is not pickable — so each filters as it goes, but neither
 //! chooses an order.
 //!
+//! [`ancestors`] is the upward walk, and lives here for the same reason: what
+//! a pick resolves to — the click target, the focus path, the hover chain — is
+//! decided by going up from the one entity picking returned.
+//!
 //! # Stacking
 //!
 //! Ordering within a parent is declaration order, overridable per child by
@@ -31,7 +35,7 @@
 //! A subtree stays contiguous, so `ZIndex` moves a whole widget, not just its
 //! own box.
 
-use bevy_ecs::{entity::Entity, world::World};
+use bevy_ecs::{entity::Entity, hierarchy::ChildOf, world::World};
 
 use crate::components::{layout::Hidden, render::ZIndex, view::ViewChildren};
 
@@ -81,4 +85,21 @@ pub fn paint_ordered_children(world: &World, entity: Entity) -> Vec<Entity> {
         out.sort_by_key(|e| world.get::<ZIndex>(*e).map(|z| z.0).unwrap_or(0));
     }
     out
+}
+
+/// Walk from `entity` up to the view root, yielding each ancestor (starting
+/// with `entity` itself).
+///
+/// The upward counterpart to [`walk`], and the traversal everything downstream
+/// of a pick is built on: picking hands over one entity, and click routing,
+/// focus resolution, hover chains and `:active` are all decided by going up
+/// from it. Unlike [`walk`] this does not skip [`Hidden`] subtrees — an entity
+/// you already hold is by definition one you got from somewhere that filtered.
+pub fn ancestors(world: &World, entity: Entity) -> impl Iterator<Item = Entity> + '_ {
+    let mut current = Some(entity);
+    std::iter::from_fn(move || {
+        let e = current?;
+        current = world.get::<ChildOf>(e).map(|c| c.parent());
+        Some(e)
+    })
 }

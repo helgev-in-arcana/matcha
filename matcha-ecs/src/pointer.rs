@@ -38,8 +38,9 @@ use crate::{
         input::{Active, Cursor, Hovered},
         window::Window as WindowComp,
     },
-    pick::{ancestors, PickQuery, PickerResource},
+    pick::{PickQuery, PickerResource},
     resources::RenderWindowRoot,
+    traversal::ancestors,
 };
 
 /// The cursor shape last pushed to the window, so an unchanged one is not

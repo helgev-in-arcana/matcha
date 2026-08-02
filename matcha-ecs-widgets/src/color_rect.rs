@@ -25,14 +25,7 @@ use matcha_ecs::{
 use crate::animation::{Easing, ExitFade, OpacityTween};
 use crate::box_style::{box_node, BoxStyle};
 use crate::shape::ShapeCtx;
-use crate::sizing::Sizing;
-
-/// A [`ColorRect`]'s requested (unconstrained) size.
-#[derive(Component, Clone, Copy, PartialEq, Debug)]
-pub struct RectGeometry {
-    pub w: f32,
-    pub h: f32,
-}
+use crate::sizing::{RectGeometry, Sizing};
 
 /// The RGBA fill colour of a [`ColorRect`], carried so `patch` can detect changes.
 #[derive(Component, Clone, Copy, PartialEq, Debug)]
@@ -217,21 +210,3 @@ impl Widget for ColorRect {
     }
 }
 
-impl Layout for RectGeometry {
-    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, c: Constraints) -> Measured {
-        // Shared by every widget that is a plain box: `ColorRect`, `Button`,
-        // `Checkbox`, `Image`. The declared `w`/`h` are the content size; a
-        // `Sizing` on the entity overrides or bounds it.
-        let sizing = Sizing::of(ctx, me);
-        let inner = sizing.content_constraints(c);
-        let content = [
-            self.w.clamp(inner.min_width(), inner.max_width()),
-            self.h.clamp(inner.min_height(), inner.max_height()),
-        ];
-        sizing.measured(c, Measured::exact(content))
-    }
-
-    fn arrange(&self, _ctx: &mut LayoutCtx, _me: Entity, _size: [f32; 2]) {
-        // Leaf: no children to arrange.
-    }
-}

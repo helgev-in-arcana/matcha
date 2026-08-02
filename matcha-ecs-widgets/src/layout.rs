@@ -17,6 +17,13 @@ use matcha_ecs::{
 
 use crate::sizing::Sizing;
 
+/// Re-exported so a container's alignment vocabulary reads from the module a
+/// caller already reaches for. It is *defined* in [`crate::sizing`] because
+/// `align-self` — a per-item override — names the same type, and filing the
+/// shared vocabulary under the container made the two modules depend on each
+/// other in both directions.
+pub use crate::sizing::AlignItems;
+
 pub mod distribute;
 
 /// Which layout a container applies. Constant per widget type; carried as a
@@ -50,17 +57,6 @@ pub enum JustifyContent {
     Center,
     SpaceBetween,
     SpaceAround,
-}
-
-/// CSS `align-items` subset: cross-axis placement of each child within the
-/// container's cross-axis size. Default matches CSS's `stretch`.
-#[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum AlignItems {
-    #[default]
-    Stretch,
-    Start,
-    End,
-    Center,
 }
 
 /// CSS `flex-wrap`: whether children that do not fit start a new line.

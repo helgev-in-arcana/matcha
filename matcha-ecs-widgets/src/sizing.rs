@@ -14,9 +14,50 @@
 
 use bevy_ecs::{component::Component, entity::Entity};
 
-use matcha_ecs::layout::{Constraints, LayoutCtx, Measured};
+use matcha_ecs::layout::{Constraints, Layout, LayoutCtx, Measured};
 
-use crate::layout::AlignItems;
+/// CSS `align-items` subset: cross-axis placement of each child within the
+/// container's cross-axis size. Default matches CSS's `stretch`.
+///
+/// Lives here rather than with the containers that read it because
+/// [`align_self`](crate::sizing_builders) — the per-item override — names the
+/// same type. `crate::layout` re-exports it.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum AlignItems {
+    #[default]
+    Stretch,
+    Start,
+    End,
+    Center,
+}
+
+/// A layout leaf that is a plain box: its declared `w`/`h` are the content
+/// size, and the entity's [`Sizing`] overrides or bounds them.
+///
+/// This is every fixed-size, childless widget in the crate — `ColorRect`,
+/// `Button`, `Checkbox`, `Image`, `Slider`, the scrollbar parts — so it lives
+/// beside the sizing vocabulary it resolves rather than inside any one of them.
+#[derive(Component, Clone, Copy, PartialEq, Debug)]
+pub struct RectGeometry {
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Layout for RectGeometry {
+    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, c: Constraints) -> Measured {
+        let sizing = Sizing::of(ctx, me);
+        let inner = sizing.content_constraints(c);
+        let content = [
+            self.w.clamp(inner.min_width(), inner.max_width()),
+            self.h.clamp(inner.min_height(), inner.max_height()),
+        ];
+        sizing.measured(c, Measured::exact(content))
+    }
+
+    fn arrange(&self, _ctx: &mut LayoutCtx, _me: Entity, _size: [f32; 2]) {
+        // Leaf: no children to arrange.
+    }
+}
 
 /// One CSS length.
 ///

@@ -49,22 +49,10 @@ use matcha_ecs::{
     view::despawn_ui_entity,
 };
 
-/// An easing curve applied to the raw `0.0..=1.0` tween progress before
-/// interpolating.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Easing {
-    Linear,
-    EaseInOut,
-}
-
-impl Easing {
-    pub fn apply(self, t: f32) -> f32 {
-        match self {
-            Easing::Linear => t,
-            Easing::EaseInOut => t * t * (3.0 - 2.0 * t),
-        }
-    }
-}
+/// Re-exported for callers already reaching for this module; defined in
+/// [`crate::easing`] because colour transitions ease too and do not otherwise
+/// depend on fades.
+pub use crate::easing::Easing;
 
 /// An in-flight opacity interpolation. Self-contained (carries both endpoints),
 /// so a reversal is just a fresh `OpacityTween` overwriting the old one.

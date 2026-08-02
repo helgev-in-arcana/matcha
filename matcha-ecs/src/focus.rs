@@ -34,7 +34,7 @@ use bevy_ecs::{
 
 use crate::{
     components::focus::{FocusDispatch, FocusPolicy, FocusWithin, Focused, LastFocusedChild},
-    pick::ancestors,
+    traversal::ancestors,
 };
 
 /// Guards the [`FocusPolicy::RestoreLast`] descent against a pathological

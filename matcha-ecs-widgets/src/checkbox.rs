@@ -33,7 +33,7 @@ use matcha_ecs::{
 };
 
 use crate::box_style::{box_node, BoxStyle};
-use crate::color_rect::RectGeometry;
+use crate::sizing::RectGeometry;
 use crate::shape::ShapeCtx;
 use crate::sizing::Sizing;
 

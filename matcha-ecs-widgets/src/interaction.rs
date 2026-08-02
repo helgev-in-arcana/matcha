@@ -43,7 +43,7 @@ use matcha_ecs::{
     resources::{FrameTime, RedrawRequest},
 };
 
-use crate::animation::Easing;
+use crate::easing::Easing;
 
 /// A colour written by a system between frames and read by a `RenderItem`
 /// builder while it draws.

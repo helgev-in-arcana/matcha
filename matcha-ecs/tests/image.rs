@@ -12,7 +12,7 @@ use std::sync::Arc;
 use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::components::{render::RenderItem, view::ViewChildren};
-use matcha_ecs_widgets::{color_rect::RectGeometry, Image};
+use matcha_ecs_widgets::{Image, RectGeometry};
 
 fn setup() -> (World, Entity) {
     let mut world = World::new();

@@ -15,6 +15,7 @@ pub mod box_style;
 pub mod button;
 pub mod checkbox;
 pub mod color_rect;
+pub mod easing;
 pub mod image;
 pub mod interaction;
 pub mod layout;
@@ -37,7 +38,7 @@ pub mod text_box;
 pub use parley;
 
 pub use anchor::Anchor;
-pub use animation::Easing;
+pub use easing::Easing;
 pub use box_style::{box_node, BoxShadow, BoxStyle, Corners, Sides};
 pub use button::{Button, ButtonLabel};
 pub use checkbox::Checkbox;
@@ -55,7 +56,7 @@ pub use rich_text::{RichSpan, RichText, RichTextContent, TextTransform, WhiteSpa
 pub use scroll_view::{
     scroll_view, Axis, Overflow, ScrollState, ScrollView, ScrollViewLayout, ScrollbarStyle,
 };
-pub use sizing::{Length, Sizing};
+pub use sizing::{Length, RectGeometry, Sizing};
 pub use slider::{Slider, SliderRange};
 pub use text::{Text, TextContent};
 pub use text_box::{TextBox, TextBoxStyle, TextEditor};

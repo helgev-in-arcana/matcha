@@ -48,9 +48,8 @@ use matcha_ecs::{
 
 use crate::{
     box_style::{box_node, BoxStyle},
-    color_rect::RectGeometry,
     shape::ShapeCtx,
-    sizing::Sizing,
+    sizing::{RectGeometry, Sizing},
 };
 
 /// How the value maps onto the track.

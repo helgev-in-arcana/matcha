@@ -37,13 +37,13 @@ use matcha_ecs::{
 };
 
 use crate::{
-    color_rect::RectGeometry,
     scroll_view::{
         geometry::{self, Axis, ScrollbarStyle},
         DragAnchor, ScrollAxes, ScrollState,
     },
     box_style::{box_node, BoxStyle},
     shape::ShapeCtx,
+    sizing::RectGeometry,
 };
 
 /// Marks an entity as a scrollbar rather than scrollable content.

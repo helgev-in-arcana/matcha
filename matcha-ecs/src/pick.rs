@@ -20,7 +20,7 @@
 //! Mirrors [`crate::render::RenderDriver`]'s shape: a `Box<dyn>` backend held
 //! as a resource, swappable at construction via `UiEcs::with_picker`.
 
-use bevy_ecs::{entity::Entity, hierarchy::ChildOf, resource::Resource, world::World};
+use bevy_ecs::{entity::Entity, resource::Resource, world::World};
 use nalgebra::Point3;
 
 use crate::{
@@ -197,19 +197,4 @@ fn collect_one(
     }
 
     Some(clip)
-}
-
-/// Walk from `entity` up to the view root, yielding each ancestor (starting
-/// with `entity` itself).
-///
-/// This is the single traversal both click routing and focus resolution are
-/// built on: picking hands us one leaf, and everything above it is decided by
-/// going up.
-pub fn ancestors(world: &World, entity: Entity) -> impl Iterator<Item = Entity> + '_ {
-    let mut current = Some(entity);
-    std::iter::from_fn(move || {
-        let e = current?;
-        current = world.get::<ChildOf>(e).map(|c| c.parent());
-        Some(e)
-    })
 }

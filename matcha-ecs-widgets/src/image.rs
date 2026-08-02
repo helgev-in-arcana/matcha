@@ -64,7 +64,7 @@ use matcha_ecs::{
 };
 
 use crate::sizing::Sizing;
-use crate::color_rect::RectGeometry;
+use crate::sizing::RectGeometry;
 
 /// Where an `Image`'s bytes come from. Identity (not content) is what
 /// matters for change-detection and cache keying — see `PartialEq`/

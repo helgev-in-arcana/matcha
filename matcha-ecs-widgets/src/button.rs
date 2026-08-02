@@ -41,9 +41,9 @@ use crate::{
     animation::Easing,
     shape::ShapeCtx,
     box_style::{box_node, BoxStyle, Corners},
-    color_rect::{RectColor, RectGeometry},
+    color_rect::RectColor,
     interaction::{interaction_cell, ColorCell, InteractionColors},
-    sizing::Sizing,
+    sizing::{RectGeometry, Sizing},
     text::{glyph_run_nodes, paint_tint_region, shape, FontCtx},
 };
 use std::time::Duration;
