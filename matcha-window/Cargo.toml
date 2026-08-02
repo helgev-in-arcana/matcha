@@ -25,6 +25,7 @@ nalgebra = { features = ["bytemuck"], workspace = true }
 
 # other
 bitflags = { workspace = true }
+keyboard-types = { workspace = true }
 num = { workspace = true }
 fxhash = { workspace = true }
 dashmap = { workspace = true }

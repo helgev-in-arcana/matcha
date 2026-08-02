@@ -74,7 +74,7 @@ impl TabDirection {
         if input.logical_key != Key::Named(NamedKey::Tab) {
             return None;
         }
-        Some(if input.modifiers().shift_key() {
+        Some(if input.modifiers().shift() {
             TabDirection::Backward
         } else {
             TabDirection::Forward

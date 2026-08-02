@@ -244,13 +244,13 @@ pub struct ConfirmKey(pub fn(&KeyInput) -> bool);
 /// single-line-style field wants.
 pub fn confirm_on_enter(input: &KeyInput) -> bool {
     matches!(input.logical_key(), LogicalKey::Named(NamedKey::Enter))
-        && !input.snapshot.modifiers().control_key()
+        && !input.snapshot.modifiers().ctrl()
 }
 
 /// Confirm on Ctrl+Enter, leaving plain Enter to insert a newline. The default.
 pub fn confirm_on_ctrl_enter(input: &KeyInput) -> bool {
     matches!(input.logical_key(), LogicalKey::Named(NamedKey::Enter))
-        && input.snapshot.modifiers().control_key()
+        && input.snapshot.modifiers().ctrl()
 }
 
 // ---------------------------------------------------------------------------
@@ -573,7 +573,7 @@ fn with_editor_driver<R>(
 /// changes no text, so those two answers are not the same thing.
 fn handle_clipboard_key(entity: &mut EntityWorldMut, input: &KeyInput) -> Option<bool> {
     let modifiers = input.snapshot.modifiers();
-    if !modifiers.control_key() {
+    if !modifiers.ctrl() {
         return None;
     }
     let LogicalKey::Character(text) = input.logical_key() else {
@@ -643,8 +643,8 @@ fn handle_clipboard_key(entity: &mut EntityWorldMut, input: &KeyInput) -> Option
 
 fn on_key<Msg: Message>(entity: &mut EntityWorldMut, input: &KeyInput) -> bool {
     let modifiers = input.snapshot.modifiers();
-    let shift = modifiers.shift_key();
-    let ctrl = modifiers.control_key();
+    let shift = modifiers.shift();
+    let ctrl = modifiers.ctrl();
 
     // While the IME is composing it owns the keyboard; forwarding keys here
     // would double-handle them.
@@ -728,7 +728,10 @@ fn on_key<Msg: Message>(entity: &mut EntityWorldMut, input: &KeyInput) -> bool {
                 // Reached only when Enter is not the configured confirm chord
                 // (checked above, before any editing).
                 NamedKey::Enter => d.insert_or_replace_selection("\n"),
-                NamedKey::Space => d.insert_or_replace_selection(" "),
+                // No `Space` arm: the W3C vocabulary reports the space bar as
+                // the character `" "`, so it arrives in the `Character` arm
+                // below along with every other text-producing key.
+                //
                 // Left alone so a future focus-traversal binding can have it.
                 NamedKey::Tab => return false,
                 _ => return false,

@@ -26,7 +26,7 @@ use crate::{
     components::{
         focus::{FocusWithin, Focused},
         input::{Active, Hovered},
-        layout::{Clip, GlobalTransform, LayoutOutput},
+        layout::{GlobalTransform, LayoutOutput},
         render::{RenderCtx, RenderItem, RenderOpacity},
     },
     traversal,

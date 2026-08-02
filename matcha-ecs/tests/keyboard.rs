@@ -29,7 +29,7 @@ use matcha_ecs::{
 };
 use matcha_ecs_widgets::{ColorRect, Container};
 use matcha_window::event::device_event::{
-    ElementState, ImeEvent, Key, KeyCode, KeyInput, KeyLocation, KeyboardState, PhysicalKey,
+    Code, ElementState, ImeEvent, Key, KeyInput, KeyboardState, Location,
 };
 
 // ---------------------------------------------------------------------------
@@ -194,10 +194,10 @@ fn setup(world: &mut World, view: impl FnOnce(&mut matcha_ecs::view::Scope)) -> 
 /// A synthetic key press. Shape matches what `winit_interface` produces.
 fn key(text: &str) -> KeyInput {
     KeyInput {
-        physical_key: PhysicalKey::Code(KeyCode::KeyA),
+        physical_key: Code::KeyA,
         logical_key: Key::Character(text.into()),
         text: Some(text.to_string()),
-        location: KeyLocation::Standard,
+        location: Location::Standard,
         state: ElementState::Pressed(0),
         repeat: false,
         snapshot: KeyboardState::default(),

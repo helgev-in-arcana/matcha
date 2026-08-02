@@ -22,8 +22,7 @@ use matcha_ecs::{
 };
 use matcha_ecs_widgets::{TextBox, TextEditor};
 use matcha_window::event::device_event::{
-    ElementState, ImeEvent, Key, KeyCode, KeyInput, KeyLocation, KeyboardState, ModifiersState,
-    NamedKey, PhysicalKey,
+    Code, ElementState, ImeEvent, Key, KeyInput, KeyboardState, Location, Modifiers, NamedKey,
 };
 
 #[derive(Clone, PartialEq, Debug)]
@@ -83,10 +82,10 @@ fn text_of(world: &World, entity: Entity) -> String {
 
 fn character(text: &str) -> KeyInput {
     KeyInput {
-        physical_key: PhysicalKey::Code(KeyCode::KeyA),
+        physical_key: Code::KeyA,
         logical_key: Key::Character(text.into()),
         text: Some(text.to_string()),
-        location: KeyLocation::Standard,
+        location: Location::Standard,
         state: ElementState::Pressed(0),
         repeat: false,
         snapshot: KeyboardState::default(),
@@ -95,10 +94,10 @@ fn character(text: &str) -> KeyInput {
 
 fn named(key: NamedKey) -> KeyInput {
     KeyInput {
-        physical_key: PhysicalKey::Code(KeyCode::Backspace),
+        physical_key: Code::Backspace,
         logical_key: Key::Named(key),
         text: None,
-        location: KeyLocation::Standard,
+        location: Location::Standard,
         state: ElementState::Pressed(0),
         repeat: false,
         snapshot: KeyboardState::default(),
@@ -107,7 +106,7 @@ fn named(key: NamedKey) -> KeyInput {
 
 /// A key press with Ctrl held, as the keyboard state machine would report it.
 fn with_ctrl(mut input: KeyInput) -> KeyInput {
-    input.snapshot.modifiers_changed(ModifiersState::CONTROL);
+    input.snapshot.modifiers_changed(Modifiers::CONTROL);
     input
 }
 
