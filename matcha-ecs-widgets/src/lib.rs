@@ -14,6 +14,7 @@ pub mod animation;
 pub mod box_style;
 pub mod button;
 pub mod checkbox;
+pub mod color;
 pub mod color_rect;
 pub mod easing;
 pub mod image;

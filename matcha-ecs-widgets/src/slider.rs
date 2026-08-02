@@ -22,7 +22,7 @@
 //! plain `f32` — a discrete slider is `step`, which *is* here.
 
 use bevy_ecs::{
-    bundle::Bundle, change_detection::DetectChangesMut, component::Component, entity::Entity,
+    bundle::Bundle, change_detection::DetectChangesMut, component::Component,
     world::EntityWorldMut,
 };
 use matcha_window::{
@@ -42,7 +42,7 @@ use matcha_ecs::{
         view::Key,
     },
     input::emit_message,
-    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, Measured},
+    layout::LayoutDispatch,
     view::Widget,
 };
 

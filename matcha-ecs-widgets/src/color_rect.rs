@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use bevy_ecs::{
-    bundle::Bundle, change_detection::DetectChangesMut, component::Component, entity::Entity,
+    bundle::Bundle, change_detection::DetectChangesMut, component::Component,
     world::EntityWorldMut,
 };
 
@@ -18,7 +18,7 @@ use matcha_ecs::{
         render::{RenderCtx, RenderItem, RenderOpacity},
         view::{Key, ManualDespawn},
     },
-    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, Measured},
+    layout::LayoutDispatch,
     view::Widget,
 };
 

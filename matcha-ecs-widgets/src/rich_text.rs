@@ -718,46 +718,10 @@ fn shape(
     layout
 }
 
-/// Gamma-encode a linear colour component into the sRGB space the atlas
-/// texture is stored in. See `Text`'s identical `linear_to_srgb_u8` for the
-/// full rationale (`write_data` is a raw byte copy with no automatic
-/// linear->sRGB conversion).
-fn linear_to_srgb_u8(c: f32) -> u8 {
-    let c = c.clamp(0.0, 1.0);
-    let encoded = if c <= 0.0031308 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    };
-    (encoded * 255.0).round() as u8
-}
-
-/// Paint a 1x1 solid-colour region into `ctx.texture_atlas`, reused
-/// (UV-clamped to any on-screen size) as every glyph's stencil "tint". See
-/// `Text`'s identical `paint_tint_region` for why this is written directly
-/// via `write_data` rather than a `ColorRect`-style render pass.
+/// Paint the 1x1 tint pixel a glyph's stencil — or a decoration rule — is
+/// masked against.
 pub(crate) fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<AtlasRegion> {
-    let region = match ctx.texture_atlas.allocate(ctx.device, ctx.queue, [1, 1]) {
-        Ok(region) => region,
-        Err(e) => {
-            log::error!("RichText tint region allocation failed: {e}");
-            return None;
-        }
-    };
-
-    let alpha = color[3].clamp(0.0, 1.0);
-    let bytes = [
-        linear_to_srgb_u8(color[0]),
-        linear_to_srgb_u8(color[1]),
-        linear_to_srgb_u8(color[2]),
-        (alpha * 255.0).round() as u8,
-    ];
-    if let Err(e) = region.write_data(ctx.queue, &bytes) {
-        log::error!("RichText tint upload failed: {e}");
-        return None;
-    }
-
-    Some(region)
+    crate::color::paint_tint_region(ctx, color, "RichText")
 }
 
 /// Composite a shaped parley layout into a `RenderNode`: one stencil-masked

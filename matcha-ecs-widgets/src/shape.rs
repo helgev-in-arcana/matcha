@@ -32,6 +32,8 @@ use parking_lot::Mutex;
 
 use matcha_ecs::components::render::RenderCtx;
 
+use crate::color::premultiplied_srgb_bytes;
+
 /// Identifies a coverage bitmap. Quantised to whole pixels because that is what
 /// is rasterised — keying on raw floats would miss on every sub-pixel wobble
 /// and grow the cache without bound.
@@ -171,59 +173,17 @@ impl ShapeCtx {
     /// that one texel everywhere. Same trick the core's `ClipMask` uses, and
     /// it is why recolouring a box costs no rasterisation at all.
     pub fn tint_region(&self, color: [f32; 4], ctx: &RenderCtx) -> Option<AtlasRegion> {
+        // Keyed on the bytes actually uploaded, so two colours that encode
+        // identically share a texel.
         let bytes = premultiplied_srgb_bytes(color);
         if let Some(cached) = self.0.tint.lock().get(&bytes) {
             return Some(cached.clone());
         }
 
-        // Written with `write_data` rather than a render pass: a pass scoped to
-        // a 1x1 viewport rasterises incorrectly (see `text::paint_tint_region`
-        // for the full history), and a raw byte copy is simpler anyway.
-        let region = match ctx.texture_atlas.allocate(ctx.device, ctx.queue, [1, 1]) {
-            Ok(region) => region,
-            Err(e) => {
-                log::error!("box tint allocation failed: {e}");
-                return None;
-            }
-        };
-        if let Err(e) = region.write_data(ctx.queue, &bytes) {
-            log::error!("box tint upload failed: {e}");
-            return None;
-        }
-
+        let region = crate::color::paint_tint_region(ctx, color, "box")?;
         self.0.tint.lock().insert(bytes, region.clone());
         Some(region)
     }
-}
-
-/// Gamma-encode a linear colour component into the sRGB space the colour atlas
-/// stores. `write_data` is a raw byte copy, so unlike a render pass targeting
-/// an `Rgba8UnormSrgb` texture it does no conversion of its own.
-fn linear_to_srgb_u8(c: f32) -> u8 {
-    let c = c.clamp(0.0, 1.0);
-    let encoded = if c <= 0.0031308 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    };
-    (encoded * 255.0).round() as u8
-}
-
-/// Encode `color` as the bytes to upload for a tint pixel.
-///
-/// **Premultiplied**, and multiplied in *linear* space before the sRGB encode.
-/// The pipeline blends with `PREMULTIPLIED_ALPHA_BLENDING`, so a translucent
-/// colour written straight would come out too bright — invisible for opaque
-/// fills (which is why `text::paint_tint_region` has never shown it) but very
-/// visible on a translucent scrollbar thumb or a box shadow.
-fn premultiplied_srgb_bytes(color: [f32; 4]) -> [u8; 4] {
-    let a = color[3].clamp(0.0, 1.0);
-    [
-        linear_to_srgb_u8(color[0] * a),
-        linear_to_srgb_u8(color[1] * a),
-        linear_to_srgb_u8(color[2] * a),
-        (a * 255.0).round() as u8,
-    ]
 }
 
 /// Signed distance to a rounded box centred at the origin with half-extents
@@ -373,6 +333,7 @@ fn transpose(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::linear_to_srgb_u8;
 
     fn at(bitmap: &[u8], w: u32, x: u32, y: u32) -> u8 {
         bitmap[(y as usize) * (w as usize) + (x as usize)]
