@@ -20,8 +20,19 @@ impl Default for WindowConfig {
                 width: 100,
                 height: 100,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                view_formats: Vec::new(),
+                // WebGPU accepts only `rgba8unorm`, `bgra8unorm` and
+                // `rgba16float` as canvas formats, and wgpu's WebGPU backend
+                // does no fallback — it passes the format straight to
+                // `configure()` and unwraps, so an sRGB format here throws.
+                //
+                // Drawing still happens through an `Rgba8UnormSrgb` *view*
+                // (requested below, honoured by `WindowSurface::format`), which
+                // preserves the automatic linear->sRGB encode that the render
+                // pipeline — and `linear_to_srgb_u8` on the upload side —
+                // depend on. Configuring non-sRGB *and* dropping the view format
+                // would silently change every colour in the app.
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                view_formats: vec![wgpu::TextureFormat::Rgba8UnormSrgb],
                 present_mode: wgpu::PresentMode::Fifo,
                 desired_maximum_frame_latency: 1,
                 alpha_mode: wgpu::CompositeAlphaMode::Auto,

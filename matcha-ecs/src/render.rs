@@ -188,9 +188,17 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
         );
     }
 
+    // Name the format explicitly rather than inheriting the texture's: on the
+    // web the canvas is configured non-sRGB (WebGPU allows no sRGB canvas
+    // format) and drawn through an sRGB view, which is what preserves the
+    // automatic linear->sRGB encode the builders' colours rely on. `format` is
+    // `WindowSurface::format()`, i.e. already the view format where they differ.
     let view = surface_texture
         .texture
-        .create_view(&wgpu::TextureViewDescriptor::default());
+        .create_view(&wgpu::TextureViewDescriptor {
+            format: Some(format),
+            ..Default::default()
+        });
 
     if let Err(e) = core.render_flat(
         &device,

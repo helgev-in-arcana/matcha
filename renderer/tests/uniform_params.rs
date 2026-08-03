@@ -68,6 +68,23 @@ fn harness() -> Option<Harness> {
 
 /// Render `items` into a fresh `W`x`H` target and read it back as RGBA8.
 fn render_to_pixels(h: &Harness, items: &[FlatItem], clear: wgpu::Color) -> Vec<u8> {
+    render_to_pixels_via(h, items, clear, FORMAT, None)
+}
+
+/// As [`render_to_pixels`], but with an explicit target format and an optional
+/// *view* format to draw through — the arrangement the web uses, where the
+/// canvas cannot be sRGB but the drawing must still be gamma-encoded.
+fn render_to_pixels_via(
+    h: &Harness,
+    items: &[FlatItem],
+    clear: wgpu::Color,
+    target_format: wgpu::TextureFormat,
+    view_format: Option<wgpu::TextureFormat>,
+) -> Vec<u8> {
+    let view_formats: &[wgpu::TextureFormat] = match &view_format {
+        Some(f) => std::slice::from_ref(f),
+        None => &[],
+    };
     let target = h.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("uniform_params target"),
         size: wgpu::Extent3d {
@@ -78,17 +95,21 @@ fn render_to_pixels(h: &Harness, items: &[FlatItem], clear: wgpu::Color) -> Vec<
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: FORMAT,
+        format: target_format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
+        view_formats,
     });
-    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let draw_format = view_format.unwrap_or(target_format);
+    let view = target.create_view(&wgpu::TextureViewDescriptor {
+        format: Some(draw_format),
+        ..Default::default()
+    });
 
     h.core
         .render_flat(
             &h.device,
             &h.queue,
-            FORMAT,
+            draw_format,
             &view,
             [W as f32, H as f32],
             items,
@@ -198,6 +219,77 @@ fn a_quad_draws_where_it_was_placed() {
     assert_eq!(pixel(&data, 17, 17), [255, 0, 0, 255], "top-left inside");
     assert_eq!(pixel(&data, 46, 46), [255, 0, 0, 255], "bottom-right inside");
     assert_eq!(pixel(&data, 14, 14), [0, 0, 0, 255], "just outside the quad");
+}
+
+/// An sRGB *view* of a non-sRGB target encodes exactly like a natively sRGB
+/// target.
+///
+/// This is the arrangement the web build is forced into: WebGPU accepts only
+/// non-sRGB canvas formats, so the canvas is configured `Rgba8Unorm` and drawn
+/// through an `Rgba8UnormSrgb` view (`window_config/web.rs`,
+/// `WindowSurface::format`). The whole point is to keep the automatic
+/// linear->sRGB encode that the pipeline — and `linear_to_srgb_u8` on the upload
+/// side — depend on; configuring non-sRGB and *dropping* the view format would
+/// silently change every colour in the app.
+///
+/// Assert equivalence rather than specific bytes: the claim is "the web path and
+/// the native path agree", which is exactly what a future maintainer would break.
+#[test]
+fn an_srgb_view_of_a_non_srgb_target_matches_a_native_srgb_target() {
+    let Some(h) = harness() else {
+        eprintln!("no GPU adapter available; skipping");
+        return;
+    };
+
+    // Mid-grey is the interesting value: 0.5 linear is nowhere near 0.5
+    // encoded, so a missing encode is glaring rather than subtle. It has to
+    // arrive as a *drawn* quad, not a clear colour — `render_flat` returns
+    // early when there are no instances, so an empty frame never touches the
+    // target at all.
+    let region = h
+        .texture_atlas
+        .allocate(&h.device, &h.queue, [1, 1])
+        .expect("atlas allocation failed");
+    // The atlas is non-sRGB, so this samples as 128/255 = 0.502 linear.
+    region
+        .write_data(&h.queue, &[128, 128, 128, 255])
+        .expect("atlas write failed");
+
+    let node = Arc::new(RenderNode::new().with_texture(
+        region,
+        [W as f32, H as f32],
+        nalgebra::Matrix4::identity(),
+    ));
+    let items = [FlatItem::new(node, nalgebra::Matrix4::identity())];
+
+    let native_srgb = render_to_pixels_via(
+        &h,
+        &items,
+        wgpu::Color::BLACK,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        None,
+    );
+    let via_view = render_to_pixels_via(
+        &h,
+        &items,
+        wgpu::Color::BLACK,
+        wgpu::TextureFormat::Rgba8Unorm,
+        Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+    );
+
+    assert_eq!(
+        pixel(&native_srgb, 32, 32),
+        pixel(&via_view, 32, 32),
+        "drawing through an sRGB view of a non-sRGB target must encode \
+         identically to a natively sRGB target"
+    );
+    // And the encode really did happen: 0.5 linear encodes to ~188, not ~128.
+    let [r, ..] = pixel(&via_view, 32, 32);
+    assert!(
+        r > 170,
+        "0.5 linear should encode to about 188 in sRGB; got {r}, which looks \
+         like no encode was applied at all"
+    );
 }
 
 /// Draw-time alpha reaches the shader, and composites against the clear colour.

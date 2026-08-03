@@ -142,6 +142,24 @@ where
     /// (accessed via `get_mut()` — no runtime locking occurs, same pattern as
     /// `model_receiver`).
     render_driver: parking_lot::Mutex<Box<dyn RenderDriver>>,
+
+    /// Config for the root window, applied in `resumed`. `None` uses
+    /// [`default_window_config`]. See [`UiEcs::with_window_config`].
+    window_config: Option<WindowConfig>,
+}
+
+/// The root window `resumed` creates when the app has not supplied its own.
+///
+/// Deliberately does **not** set an inner size on the web: winit's
+/// `request_inner_size` there sets the canvas's *CSS* size, which fights a
+/// stylesheet that sizes the canvas to the page. Leaving it alone lets CSS own
+/// the layout, and winit's `ResizeObserver` reports the result back as
+/// `Resized` in physical pixels.
+fn default_window_config() -> WindowConfig {
+    let config = WindowConfig::default().with_title("matcha-ecs");
+    #[cfg(not(web))]
+    let config = config.with_inner_size([800u32, 600u32]);
+    config
 }
 
 impl<M, Msg, F, R> UiEcs<M, Msg, F, R>
@@ -314,6 +332,7 @@ where
             // The web has one thread, and `std::thread::spawn` panics there.
             #[cfg(web)]
             render_driver: parking_lot::Mutex::new(Box::new(InlineDriver)),
+            window_config: None,
         }
     }
 
@@ -364,6 +383,17 @@ where
     /// [`InlineDriver`] on the web, which is the only one that works there).
     pub fn with_render_driver(mut self, driver: impl RenderDriver + 'static) -> Self {
         self.render_driver = parking_lot::Mutex::new(Box::new(driver));
+        self
+    }
+
+    /// Configure the root window `resumed` creates. Defaults to
+    /// [`default_window_config`].
+    ///
+    /// On the web this is how an app names the `<canvas>` to draw into
+    /// (`WindowConfig::with_canvas_id`); without one, winit creates a canvas and
+    /// appends it to the document body.
+    pub fn with_window_config(mut self, config: WindowConfig) -> Self {
+        self.window_config = Some(config);
         self
     }
 
@@ -681,9 +711,7 @@ where
             return;
         }
 
-        let config = WindowConfig::default()
-            .with_title("matcha-ecs")
-            .with_inner_size([800u32, 600u32]);
+        let config = self.window_config.clone().unwrap_or_else(default_window_config);
         let window = match OsWindow::new(&config, event_loop) {
             Ok(w) => w,
             Err(e) => {
