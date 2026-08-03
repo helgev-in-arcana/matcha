@@ -261,7 +261,9 @@ pub trait RenderDriver: Send {
 }
 
 /// Synchronous driver: builds and presents on the calling (main) thread. Never
-/// busy. Retained to isolate render-threading regressions from the M4 refactor.
+/// busy. Retained to isolate render-threading regressions from the M4 refactor,
+/// and the only driver available on the web — there is one thread there, and
+/// `std::thread::spawn` panics.
 #[derive(Default)]
 pub struct InlineDriver;
 
@@ -277,14 +279,19 @@ impl RenderDriver for InlineDriver {
     fn wait_idle(&self, _window: WindowId) {}
 }
 
-/// Per-window worker-thread driver (the M4 default). Each window gets one thread
-/// that owns nothing but the receiving end of a snapshot channel plus a shared
-/// busy flag.
+/// Per-window worker-thread driver (the M4 default, and the default natively).
+/// Each window gets one thread that owns nothing but the receiving end of a
+/// snapshot channel plus a shared busy flag.
+///
+/// Native only: `std::thread::spawn` and `parking_lot::Condvar::wait` both panic
+/// on `wasm32-unknown-unknown`. The web uses [`InlineDriver`].
+#[cfg(not(web))]
 #[derive(Default)]
 pub struct ThreadDriver {
     threads: HashMap<WindowId, WindowThread>,
 }
 
+#[cfg(not(web))]
 struct WindowThread {
     sender: mpsc::Sender<RenderSnapshot>,
     /// `true` between `dispatch` and the worker finishing that frame (i.e.
@@ -295,11 +302,13 @@ struct WindowThread {
     _handle: JoinHandle<()>,
 }
 
+#[cfg(not(web))]
 struct Busy {
     flag: Mutex<bool>,
     cvar: Condvar,
 }
 
+#[cfg(not(web))]
 impl Busy {
     fn new() -> Self {
         Self {
@@ -328,6 +337,7 @@ impl Busy {
     }
 }
 
+#[cfg(not(web))]
 impl RenderDriver for ThreadDriver {
     fn dispatch(&mut self, snapshot: RenderSnapshot) {
         let window_id = snapshot.window_id;
@@ -357,6 +367,7 @@ impl RenderDriver for ThreadDriver {
     }
 }
 
+#[cfg(not(web))]
 impl WindowThread {
     fn spawn(window_id: WindowId) -> Self {
         let (sender, receiver) = mpsc::channel::<RenderSnapshot>();

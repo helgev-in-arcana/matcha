@@ -52,12 +52,15 @@ use crate::{
     model::{ModelHandle, ModelResource},
     pick::{update_picker, PickQuery, Picker, PickerResource},
     pointer::{self, sync_cursor, sync_pointer_components},
-    render::{build_and_present, extract_items, RenderDriver, RenderSnapshot, ThreadDriver},
+    render::{build_and_present, extract_items, InlineDriver, RenderDriver, RenderSnapshot},
     resources::{
         ClipMask, FrameTime, GpuResource, RedrawRequest, RenderWindowRoot, RendererResource, ui_root,
     },
     view::{run_view, Scope},
 };
+
+#[cfg(not(web))]
+use crate::render::ThreadDriver;
 
 /// The render schedule's stages, run in this order every frame.
 ///
@@ -132,10 +135,12 @@ where
     /// `init()` self-heals by waking immediately if a mutation is pending.
     proxy_slot: Arc<OnceLock<Box<dyn EventLoopProxy<Self>>>>,
 
-    /// Turns per-frame snapshots into pixels. `ThreadDriver` by default (one
-    /// worker thread per window); wrapped in a `Mutex` only so the non-`Sync`
-    /// channel sender inside does not make `UiEcs` itself `!Sync` (accessed via
-    /// `get_mut()` — no runtime locking occurs, same pattern as `model_receiver`).
+    /// Turns per-frame snapshots into pixels. `ThreadDriver` by default
+    /// natively (one worker thread per window), `InlineDriver` on the web —
+    /// swap with [`UiEcs::with_render_driver`]. Wrapped in a `Mutex` only so the
+    /// non-`Sync` channel sender inside does not make `UiEcs` itself `!Sync`
+    /// (accessed via `get_mut()` — no runtime locking occurs, same pattern as
+    /// `model_receiver`).
     render_driver: parking_lot::Mutex<Box<dyn RenderDriver>>,
 }
 
@@ -151,16 +156,51 @@ where
     /// schedule. `reducer` applies a `Msg` dispatched by a click (`device_event`)
     /// to the model, the same way `ModelHandle::update` applies a queued
     /// mutation.
+    ///
+    /// Only available natively: adapter and device requests are genuinely
+    /// asynchronous, and blocking on a promise is not possible on the web —
+    /// there the browser's event loop has to run for it to resolve. Web callers
+    /// use [`Self::new_async`] and drive it with `wasm_bindgen_futures`.
+    #[cfg(not(web))]
     pub fn new(model: M, view_fn: F, reducer: R) -> Self {
-        Self::new_with_gpu(model, view_fn, reducer, GpuDescriptor::default())
+        futures::executor::block_on(Self::new_async(model, view_fn, reducer))
     }
 
     /// [`Self::new`] with an explicit GPU descriptor. Headless tests pass
     /// [`GpuDescriptor::noop`] to run the full driver without any GPU.
+    #[cfg(not(web))]
     pub fn new_with_gpu(model: M, view_fn: F, reducer: R, gpu_desc: GpuDescriptor) -> Self {
+        futures::executor::block_on(Self::new_with_gpu_async(model, view_fn, reducer, gpu_desc))
+    }
+
+    /// Build a `UiEcs`, awaiting GPU initialisation. The only constructor that
+    /// works on the web.
+    pub async fn new_async(model: M, view_fn: F, reducer: R) -> Self {
+        Self::new_with_gpu_async(model, view_fn, reducer, GpuDescriptor::default()).await
+    }
+
+    /// [`Self::new_async`] with an explicit GPU descriptor.
+    pub async fn new_with_gpu_async(
+        model: M,
+        view_fn: F,
+        reducer: R,
+        gpu_desc: GpuDescriptor,
+    ) -> Self {
+        let gpu = Gpu::new(gpu_desc).await.expect("GPU initialisation failed");
+        Self::from_gpu(model, view_fn, reducer, gpu)
+    }
+
+    /// Everything after GPU initialisation, which is entirely synchronous.
+    ///
+    /// Split out so the web can `await` the GPU on its own and then land here,
+    /// while native keeps a blocking constructor.
+    pub fn from_gpu(model: M, view_fn: F, reducer: R, gpu: Gpu) -> Self {
         // First-wins statics (T-1): initialise explicitly before any bevy_ecs
         // system (e.g. a future `par_iter`) has a chance to lazily default-init
         // `ComputeTaskPool` to an all-cores pool of its own choosing.
+        //
+        // No-ops on the web, where bevy_tasks' pools are single-threaded and
+        // `num_threads`/`thread_name` are documented as ignored.
         ComputeTaskPool::get_or_init(|| {
             TaskPoolBuilder::new()
                 .num_threads(2)
@@ -174,8 +214,6 @@ where
                 .build()
         });
 
-        let gpu =
-            futures::executor::block_on(Gpu::new(gpu_desc)).expect("GPU initialisation failed");
         let (device, _queue) = gpu
             .context()
             .expect("GPU device/queue available immediately after Gpu::new");
@@ -271,7 +309,11 @@ where
             model_receiver: parking_lot::Mutex::new(receiver),
             wake_pending,
             proxy_slot,
+            #[cfg(not(web))]
             render_driver: parking_lot::Mutex::new(Box::new(ThreadDriver::default())),
+            // The web has one thread, and `std::thread::spawn` panics there.
+            #[cfg(web)]
+            render_driver: parking_lot::Mutex::new(Box::new(InlineDriver)),
         }
     }
 
@@ -315,6 +357,13 @@ where
     /// which one is in use.
     pub fn with_picker(mut self, picker: impl Picker) -> Self {
         self.world.insert_resource(PickerResource(Box::new(picker)));
+        self
+    }
+
+    /// Swap the render driver (default: [`ThreadDriver`] natively,
+    /// [`InlineDriver`] on the web, which is the only one that works there).
+    pub fn with_render_driver(mut self, driver: impl RenderDriver + 'static) -> Self {
+        self.render_driver = parking_lot::Mutex::new(Box::new(driver));
         self
     }
 
