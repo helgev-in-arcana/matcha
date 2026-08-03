@@ -500,8 +500,13 @@ pub(crate) struct ParleyFontCtx(pub(crate) Arc<ParleyFontCtxInner>);
 
 impl ParleyFontCtx {
     pub(crate) fn new() -> Self {
+        #[allow(unused_mut)]
+        let mut font_cx = parley::FontContext::new();
+        #[cfg(web)]
+        crate::embedded_font::register_with_parley(&mut font_cx);
+
         Self(Arc::new(ParleyFontCtxInner {
-            font_cx: Mutex::new(parley::FontContext::new()),
+            font_cx: Mutex::new(font_cx),
             layout_cx: Mutex::new(parley::LayoutContext::new()),
             scale_cx: Mutex::new(swash::scale::ScaleContext::new()),
             stencil_cache: Mutex::new(glyph_cache::GlyphCache::new(

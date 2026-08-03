@@ -17,6 +17,9 @@ pub mod checkbox;
 pub mod color;
 pub mod color_rect;
 pub mod easing;
+/// The font web builds carry, because a browser exposes no system fonts.
+#[cfg(web)]
+pub(crate) mod embedded_font;
 pub mod image;
 pub mod interaction;
 pub mod layout;

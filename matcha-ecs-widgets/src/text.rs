@@ -109,6 +109,13 @@ pub(crate) struct FontCtx(Arc<FontCtxInner>);
 impl FontCtx {
     pub(crate) fn new() -> Self {
         let font_system = suzuri::FontSystem::new();
+        // A browser exposes no system fonts to enumerate: `load_system_fonts`
+        // is a no-op there, every query misses, and `Text` silently measures
+        // 0x0 and draws nothing. `Button` draws its label through this same
+        // context, so without the embedded font every button is blank too.
+        #[cfg(web)]
+        crate::embedded_font::register_with_suzuri(&font_system);
+        #[cfg(not(web))]
         font_system.load_system_fonts();
         Self(Arc::new(FontCtxInner {
             font_system,
