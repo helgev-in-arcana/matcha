@@ -1,6 +1,6 @@
 //! Headless verification of `Link` (Tier-1 HTML/CSS widgets batch): it
 //! delegates `Widget::bundle`/`patch`/`after_spawn` to a wrapped `RichText`
-//! while also carrying `OnClick`/`HitTestEnabled` — confirm both halves
+//! while also carrying `OnClick`/`Pickable` — confirm both halves
 //! (click dispatch membership and text-cache invalidation) actually work
 //! through the delegation, not just compile. Same GPU-free style as
 //! `tests/render_item_reuse.rs`; `Link`'s `RenderItem` is built in
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::components::{
-    input::{HitTestEnabled, OnClick},
+    input::{OnClick, Pickable},
     render::RenderItem,
     view::ViewChildren,
 };
@@ -53,8 +53,8 @@ fn carries_hit_test_membership_and_the_assigned_message() {
     });
     let child = first_child(&world, root);
 
-    assert!(world.get::<HitTestEnabled>(child).is_some());
-    assert_eq!(world.get::<OnClick<Msg>>(child).copied(), Some(OnClick(Some(Msg::Navigate))));
+    assert!(world.get::<Pickable>(child).is_some());
+    assert_eq!(world.get::<OnClick<Msg>>(child).cloned(), Some(OnClick(Some(Msg::Navigate))));
 }
 
 #[test]
@@ -106,7 +106,7 @@ fn changed_message_updates_on_click_without_requiring_a_content_change() {
     });
 
     assert_eq!(
-        world.get::<OnClick<Msg>>(child).copied(),
+        world.get::<OnClick<Msg>>(child).cloned(),
         Some(OnClick(None)),
         "OnClick must be re-patched to None even though the text content didn't change"
     );

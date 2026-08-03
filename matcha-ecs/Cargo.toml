@@ -20,28 +20,22 @@ parking_lot = { workspace = true }
 
 # graphics
 wgpu = { workspace = true }
-bytemuck = { features = ["derive"], workspace = true }
 
 # math
 nalgebra = { features = ["bytemuck"], workspace = true }
 
-# image
-image = { workspace = true }
-
 # other
-bitflags = { workspace = true }
-num = { workspace = true }
-fxhash = { workspace = true }
-dashmap = { workspace = true }
-smallvec = { workspace = true }
-thiserror = { workspace = true }
 log = { workspace = true }
-enum-map = "2.7.3"
 web-time = { workspace = true }
 
 [dev-dependencies]
 # Widget implementations are only needed by tests/examples. A dev-dependency
 # keeps the one-way crate rule (matcha-ecs-widgets -> matcha-ecs) intact.
+#
+# Tests *of* a widget live in that crate's own tests/ directory. What is left
+# here uses widgets only as material for building a tree to exercise a core
+# contract against — focus, picking, clipping, reconcile. Real widgets rather
+# than synthetic ones on purpose: they keep those tests readable as usage.
 matcha-ecs-widgets = { workspace = true }
 # Headless windows/event-loop for tests/headless_app.rs. `headless` is an
 # additive feature (rides on the winit backend), so unifying it into test

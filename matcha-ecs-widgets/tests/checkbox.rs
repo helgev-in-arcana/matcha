@@ -7,7 +7,7 @@ use std::sync::Arc;
 use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::components::{render::RenderItem, view::ViewChildren};
-use matcha_ecs_widgets::{color_rect::RectGeometry, Checkbox};
+use matcha_ecs_widgets::{Checkbox, RectGeometry};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Msg {

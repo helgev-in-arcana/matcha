@@ -22,11 +22,14 @@ use bevy_ecs::{bundle::Bundle, change_detection::DetectChangesMut, world::Entity
 
 use matcha_ecs::{
     components::{
-        input::{HitTestEnabled, Message, OnClick},
+        focus::FocusPolicy,
+        input::{Cursor, Message, OnClick, Pickable},
         view::Key,
     },
     view::Widget,
 };
+
+use matcha_window::window::CursorIcon;
 
 use crate::rich_text::RichText;
 
@@ -39,6 +42,7 @@ pub struct Link<Msg: Message> {
     key: Key,
     text: RichText,
     msg: Option<Msg>,
+    cursor: CursorIcon,
 }
 
 impl<Msg: Message> Link<Msg> {
@@ -47,6 +51,7 @@ impl<Msg: Message> Link<Msg> {
             key: Key::Auto,
             text: RichText::new(content).color(LINK_ACCENT).underline(true),
             msg: None,
+            cursor: CursorIcon::Pointer,
         }
     }
 
@@ -74,6 +79,13 @@ impl<Msg: Message> Link<Msg> {
         self
     }
 
+    /// What the pointer looks like over this link (CSS `cursor`). The default
+    /// is the hand every platform uses for a hyperlink.
+    pub fn cursor(mut self, cursor: CursorIcon) -> Self {
+        self.cursor = cursor;
+        self
+    }
+
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = key.into();
         self
@@ -86,7 +98,13 @@ impl<Msg: Message> Widget for Link<Msg> {
     }
 
     fn bundle(&self) -> impl Bundle {
-        (self.text.bundle(), OnClick(self.msg), HitTestEnabled)
+        (
+            self.text.bundle(),
+            OnClick(self.msg.clone()),
+            Pickable,
+            FocusPolicy::Normal,
+            Cursor(self.cursor),
+        )
     }
 
     fn after_spawn(&self, entity: &mut EntityWorldMut) {
@@ -96,7 +114,7 @@ impl<Msg: Message> Widget for Link<Msg> {
     fn patch(&self, entity: &mut EntityWorldMut) {
         Widget::patch(&self.text, entity);
         if let Some(mut on_click) = entity.get_mut::<OnClick<Msg>>() {
-            on_click.set_if_neq(OnClick(self.msg));
+            on_click.set_if_neq(OnClick(self.msg.clone()));
         }
     }
 }

@@ -8,9 +8,11 @@ use nalgebra::Matrix4;
 
 use matcha_ecs::{
     components::{layout::GlobalTransform, view::Key},
-    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch},
+    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, Measured},
     view::Widget,
 };
+
+use crate::sizing::Sizing;
 
 /// Fixed inset applied to a [`Padding`]'s single child.
 #[derive(Component, Clone, Copy, PartialEq, Debug)]
@@ -34,6 +36,7 @@ impl PaddingLayout {
 /// Insets its single child (declared via `Scope::node`) by fixed margins.
 pub struct Padding {
     key: Key,
+    sizing: Sizing,
     top: f32,
     right: f32,
     bottom: f32,
@@ -44,6 +47,7 @@ impl Padding {
     pub fn new() -> Self {
         Self {
             key: Key::Auto,
+            sizing: Sizing::default(),
             top: 0.0,
             right: 0.0,
             bottom: 0.0,
@@ -55,6 +59,7 @@ impl Padding {
     pub fn all(v: f32) -> Self {
         Self {
             key: Key::Auto,
+            sizing: Sizing::default(),
             top: v,
             right: v,
             bottom: v,
@@ -81,6 +86,8 @@ impl Padding {
         self.left = v;
         self
     }
+
+    crate::sizing_builders!();
 
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = key.into();
@@ -113,6 +120,7 @@ impl Widget for Padding {
     }
 
     fn patch(&self, entity: &mut EntityWorldMut) {
+        self.sync_sizing(entity);
         if let Some(mut layout) = entity.get_mut::<PaddingLayout>() {
             layout.set_if_neq(self.layout());
         }
@@ -120,21 +128,24 @@ impl Widget for Padding {
 }
 
 impl Layout for PaddingLayout {
-    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, c: Constraints) -> [f32; 2] {
+    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, c: Constraints) -> Measured {
         let h = self.horizontal();
         let v = self.vertical();
+        let sizing = Sizing::of(ctx, me);
+        let own = sizing.content_constraints(c);
         let inner_c = Constraints::new(
-            [0.0, (c.max_width() - h).max(0.0)],
-            [0.0, (c.max_height() - v).max(0.0)],
+            [0.0, (own.max_width() - h).max(0.0)],
+            [0.0, (own.max_height() - v).max(0.0)],
         );
 
-        match ctx.children(me).first() {
+        let content = match ctx.children(me).first() {
             Some(&child) => {
-                let s = ctx.measure_child(child, inner_c);
+                let s = ctx.measure_child_size(child, inner_c);
                 [s[0] + h, s[1] + v]
             }
             None => [h, v],
-        }
+        };
+        sizing.measured(c, Measured::exact(content))
     }
 
     fn arrange(&self, ctx: &mut LayoutCtx, me: Entity, size: [f32; 2]) {
@@ -149,7 +160,7 @@ impl Layout for PaddingLayout {
             let v = self.vertical();
             let inner_size = [(size[0] - h).max(0.0), (size[1] - v).max(0.0)];
             let child_c = Constraints::from_max_size(inner_size);
-            let child_size = ctx.measure_child(child, child_c);
+            let child_size = ctx.measure_child_size(child, child_c);
             ctx.arrange_child(child, [self.left, self.top], my_affine, child_size);
         }
     }

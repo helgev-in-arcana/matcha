@@ -7,7 +7,7 @@ use matcha_window::{
     adapter::{Adapter, EventLoop, EventLoopCommand, EventLoopProxy},
     application::Application,
     event::{
-        device_event::{DeviceEvent, DeviceEventData, ElementState, MouseInput},
+        device_event::{DeviceEvent, DeviceEventData, ElementState, ImeEvent, MouseInput},
         raw_device_event::{RawDeviceEvent, RawDeviceId},
         window_event::WindowEvent,
     },
@@ -23,6 +23,7 @@ use matcha_window::{
 #[derive(Default)]
 struct Recorder {
     clicks: Vec<[f32; 2]>,
+    ime: Vec<ImeEvent>,
     device_events: usize,
     commands: Vec<u32>,
 }
@@ -55,6 +56,9 @@ impl Application for Recorder {
         self.device_events += 1;
         if event.on_click(|_| ()).is_some() {
             self.clicks.push(event.mouse_viewport_position());
+        }
+        if let Some(ime) = event.on_ime(|ime| ime.clone()) {
+            self.ime.push(ime);
         }
     }
 
@@ -188,4 +192,62 @@ fn proxy_queues_commands_for_the_test_to_drain() {
         proxy.drain_loop_commands().as_slice(),
         [EventLoopCommand::Exit]
     ));
+}
+
+// ---------------------------------------------------------------------------
+// IME
+// ---------------------------------------------------------------------------
+
+fn ime(event: ImeEvent) -> DeviceEvent {
+    DeviceEvent::stateless(DeviceEventData::Ime(event))
+}
+
+/// A full composition session survives `DeviceEventState::process` intact.
+///
+/// IME has no state machine of its own — each event is self-contained and the
+/// platform IME already tracks the composition — so the state machine must pass
+/// them straight through rather than swallowing them the way it does for
+/// unmapped event kinds.
+#[test]
+fn ime_composition_reaches_the_application_through_the_state_machine() {
+    let event_loop = HeadlessEventLoop::new();
+    let mut adapter = Adapter::new(Recorder::default());
+    let window_id = event_loop
+        .create_window(&WindowConfig::default())
+        .expect("headless window creation cannot fail")
+        .id();
+
+    // Typing "にほん" in a Japanese IME: enable, a run of preedits, then commit.
+    let session = [
+        ImeEvent::Enabled,
+        ImeEvent::Preedit {
+            text: "に".into(),
+            cursor: Some((0, 3)),
+        },
+        ImeEvent::Preedit {
+            text: "にほん".into(),
+            cursor: Some((0, 9)),
+        },
+        ImeEvent::Commit {
+            text: "日本".into(),
+        },
+        ImeEvent::Disabled,
+    ];
+    for event in &session {
+        adapter.device_event(&event_loop, window_id, ime(event.clone()));
+    }
+
+    assert_eq!(adapter.app().ime, session, "every step arrives, in order");
+}
+
+/// The headless backend has no platform IME, but the control API must still be
+/// callable so the same UI code runs headlessly.
+#[test]
+fn headless_ime_control_api_is_a_no_op() {
+    let event_loop = HeadlessEventLoop::new();
+    let window = Window::new(&WindowConfig::default(), &event_loop).expect("headless window");
+
+    window.set_ime_allowed(true);
+    window.set_ime_cursor_area([10.0, 20.0], [2.0, 16.0]);
+    window.set_ime_allowed(false);
 }

@@ -21,17 +21,10 @@
 use std::{any::TypeId, collections::HashMap};
 
 use bevy_ecs::{
-    bundle::Bundle,
-    entity::Entity,
-    hierarchy::ChildOf,
-    query::{With, Without},
-    world::{EntityWorldMut, World},
+    bundle::Bundle, entity::Entity, hierarchy::ChildOf, world::{EntityWorldMut, World},
 };
 
-use crate::{
-    animation::{begin_or_continue_exit, Opacity, ToBeDespawn, Tween},
-    components::view::{Key, SlotKey, ViewChildren, WidgetType},
-};
+use crate::components::view::{Key, ManualDespawn, SlotKey, ViewChildren, WidgetType};
 
 /// A widget: a fixed component bundle (= one archetype) plus an in-place patch
 /// for the same-type re-visit. Behaviour lives in ECS systems, not here.
@@ -51,11 +44,10 @@ pub trait Widget: 'static {
     fn patch(&self, entity: &mut EntityWorldMut);
 
     /// Optional one-time setup that runs right after `bundle()` is spawned.
-    /// Default: no-op. Exists for conditionally attaching SparseSet
-    /// components (e.g. M7's `Tween<T>`/`ExitTransition<T>`) that can't be
-    /// expressed as part of `bundle()`'s fixed return type — `Option<T>`
-    /// does not itself implement `Bundle`, so a widget that only sometimes
-    /// wants such a component inserts it here instead.
+    /// Default: no-op. Exists for conditionally attaching components (e.g. an
+    /// exit animation's tween) that can't be expressed as part of `bundle()`'s
+    /// fixed return type — `Option<T>` does not itself implement `Bundle`, so
+    /// a widget that only sometimes wants such a component inserts it here.
     fn after_spawn(&self, _entity: &mut EntityWorldMut) {}
 }
 
@@ -120,11 +112,11 @@ impl<'a> Scope<'a> {
 
     /// Prune untouched children and write the new child ordering back.
     ///
-    /// A child carrying `ExitTransition<Opacity>` (M7) isn't despawned
-    /// immediately: `begin_or_continue_exit` defers it (`ToBeDespawn` +
-    /// an exit `Tween`) and its slot is kept in `next` so it stays reachable
-    /// (for layout/paint/hit-test) until `despawn_completed_exits` finishes
-    /// the job once the exit animation completes.
+    /// A child carrying [`ManualDespawn`] isn't despawned here: it is flagged
+    /// as pruned and its slot is kept in `next` so it stays reachable (for
+    /// layout/paint/hit-test) until whichever system owns its lifetime — an
+    /// exit animation, typically — calls [`despawn_ui_entity`]. Everything
+    /// else (the overwhelming majority) despawns on the spot.
     fn flush(&mut self) {
         for (slot, e) in self
             .cursor
@@ -133,7 +125,13 @@ impl<'a> Scope<'a> {
             .map(|(k, v)| (*k, *v))
             .collect::<Vec<_>>()
         {
-            if begin_or_continue_exit(self.world, e) {
+            if let Some(mut manual) = self.world.get_mut::<ManualDespawn>(e) {
+                // Write only on a real transition: a re-prune of an
+                // already-pruned entity must not re-fire `Changed`, or an
+                // exit animation would restart every view pass.
+                if !manual.is_pruned() {
+                    manual.set_pruned(true);
+                }
                 self.cursor.next.push((slot, e));
             } else {
                 despawn_recursive(self.world, e);
@@ -162,11 +160,15 @@ fn reconcile<W: Widget>(world: &mut World, cursor: &mut Cursor, parent: Entity, 
         // Same slot, same widget type -> in-place patch.
         Some(e) if world.get::<WidgetType>(e).map(|wt| wt.0) == Some(TypeId::of::<W>()) => {
             let mut em = world.entity_mut(e);
-            // `patch` runs while `ToBeDespawn` (if present) is still visible,
-            // so a widget mid-exit (M7) can see it and start a reversal tween
-            // before core clears the marker below.
+            // `patch` runs while `ManualDespawn::is_pruned()` is still `true`,
+            // so a widget mid-exit can see it and reverse its exit animation
+            // before core clears the flag below (a "revival").
             w.patch(&mut em);
-            em.remove::<ToBeDespawn>();
+            if let Some(mut manual) = em.get_mut::<ManualDespawn>() {
+                if manual.is_pruned() {
+                    manual.set_pruned(false);
+                }
+            }
             e
         }
         // Same slot, different type -> rebuild the entity from scratch.
@@ -215,23 +217,21 @@ pub fn run_view(world: &mut World, root: Entity, view: impl FnOnce(&mut Scope)) 
     view(&mut s);
 }
 
-/// Exclusive system (M7): despawn every entity whose exit animation has
-/// finished (`ToBeDespawn` present, its `Tween<Opacity>` already removed by
-/// `advance_tweens`) and remove its slot from the parent's `ViewChildren` so
-/// no future pass sees a dangling `prev` entry. Registered in
-/// `MatchaSet::Animation`, after `advance_tweens::<Opacity>`.
-pub fn despawn_completed_exits(world: &mut World) {
-    let finished: Vec<Entity> = world
-        .query_filtered::<Entity, (With<ToBeDespawn>, Without<Tween<Opacity>>)>()
-        .iter(world)
-        .collect();
-
-    for entity in finished {
-        if let Some(child_of) = world.get::<ChildOf>(entity).cloned() {
-            if let Some(mut siblings) = world.get_mut::<ViewChildren>(child_of.parent()) {
-                siblings.slots.retain(|(_, e)| *e != entity);
-            }
-        }
-        despawn_recursive(world, entity);
+/// Despawn a view-managed entity and its descendants, detaching it from its
+/// parent's [`ViewChildren`] so no future reconcile pass sees a dangling slot.
+///
+/// This is the sanctioned way for a system that owns a [`ManualDespawn`]
+/// entity's lifetime (an exit animation, say) to finally tear it down: the
+/// reconciler's slot bookkeeping is an internal invariant that such a system
+/// must not have to reproduce by hand. A no-op if the entity is already gone.
+pub fn despawn_ui_entity(world: &mut World, entity: Entity) {
+    if world.get_entity(entity).is_err() {
+        return;
     }
+    if let Some(child_of) = world.get::<ChildOf>(entity).cloned() {
+        if let Some(mut siblings) = world.get_mut::<ViewChildren>(child_of.parent()) {
+            siblings.slots.retain(|(_, e)| *e != entity);
+        }
+    }
+    despawn_recursive(world, entity);
 }

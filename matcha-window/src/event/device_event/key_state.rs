@@ -1,12 +1,12 @@
 use super::{DeviceEventData, KeyInput};
 use std::collections::VecDeque;
 
-pub use winit::keyboard::{Key, KeyCode, ModifiersState};
+pub use keyboard_types::{Code, Key, Modifiers};
 
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct KeyboardState {
-    press_order: VecDeque<(KeyCode, Key)>,
-    modifiers: ModifiersState,
+    press_order: VecDeque<(Code, Key)>,
+    modifiers: Modifiers,
 }
 
 impl KeyboardState {
@@ -14,21 +14,24 @@ impl KeyboardState {
         Self::default()
     }
 
-    pub fn modifiers_changed(&mut self, modifiers: ModifiersState) {
+    pub fn modifiers_changed(&mut self, modifiers: Modifiers) {
         self.modifiers = modifiers;
     }
 
     /// Update internal state from `key_input`, fill `key_input.snapshot`, and return
     /// the resulting `DeviceEventData`.
     ///
-    /// Returns `None` if `key_input.physical_key` is not a `PhysicalKey::Code` variant.
+    /// Returns `None` when the platform could not identify which physical key
+    /// was pressed ([`Code::Unidentified`]): there is nothing to track in
+    /// `press_order`, so the event is dropped rather than recorded under a key
+    /// that would collide with every other unidentified one.
     pub fn keyboard_input(&mut self, key_input: &mut KeyInput) -> Option<DeviceEventData> {
         use super::ElementState;
-        use super::key_input::PhysicalKey;
 
-        let PhysicalKey::Code(key_code) = key_input.physical_key else {
+        let key_code = key_input.physical_key;
+        if key_code == Code::Unidentified {
             return None;
-        };
+        }
 
         match key_input.state {
             ElementState::Pressed(_) => {
@@ -54,7 +57,7 @@ impl KeyboardState {
 }
 
 impl KeyboardState {
-    pub fn is_physical_pressed(&self, key: &KeyCode) -> bool {
+    pub fn is_physical_pressed(&self, key: &Code) -> bool {
         self.press_order.iter().any(|(code, _)| code == key)
     }
 
@@ -64,11 +67,11 @@ impl KeyboardState {
             .any(|(_, logical_key)| logical_key == key)
     }
 
-    pub fn modifiers(&self) -> ModifiersState {
+    pub fn modifiers(&self) -> Modifiers {
         self.modifiers
     }
 
-    pub fn press_order(&self) -> Vec<(KeyCode, Key)> {
+    pub fn press_order(&self) -> Vec<(Code, Key)> {
         self.press_order.iter().cloned().collect()
     }
 }

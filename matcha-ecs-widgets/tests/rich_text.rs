@@ -10,12 +10,11 @@ use std::sync::Arc;
 use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::{
-    animation::Easing,
     components::{layout::LayoutOutput, render::RenderItem, view::ViewChildren},
     layout::{layout_root, Constraints},
     view::run_view,
 };
-use matcha_ecs_widgets::{parley, RichText};
+use matcha_ecs_widgets::{parley, Easing, RichText};
 
 fn setup() -> (World, Entity) {
     let mut world = World::new();
@@ -772,13 +771,61 @@ fn normal_white_space_collapses_runs_to_a_narrower_block() {
 
 #[test]
 fn enter_fade_builder_starts_from_transparent() {
-    use matcha_ecs::animation::{Animated, Opacity};
+    use matcha_ecs::components::render::RenderOpacity;
 
     let (mut world, root) = setup();
     run_view(&mut world, root, |s| {
         s.leaf(RichText::new("hello").enter_fade(std::time::Duration::from_millis(200), Easing::Linear));
     });
     let child = first_child(&world, root);
-    let animated = world.get::<Animated<Opacity>>(child).expect("Animated<Opacity> present");
-    assert_eq!(animated.0, Opacity(0.0));
+    let opacity = world.get::<RenderOpacity>(child).expect("RenderOpacity present");
+    assert_eq!(*opacity, RenderOpacity(0.0));
+}
+
+#[test]
+fn the_measured_range_reports_min_and_max_content_widths() {
+    // CSS min-content (every soft break taken — the widest single word) and
+    // max-content (no break taken — the whole sentence on one line), which
+    // parley computes off the layout `measure` already built. Both are
+    // deliberately outside the width the text settled for.
+    let (mut world, root) = setup();
+    run_view(&mut world, root, |s| {
+        s.leaf(RichText::new(LONG_SENTENCE).font_size(16.0));
+    });
+    let child = first_child(&world, root);
+
+    let m = matcha_ecs::layout::measure_entity(
+        &mut world,
+        child,
+        Constraints::from_max_size([200.0, 600.0]),
+    );
+
+    assert!(
+        m.min[0] < m.preferred[0],
+        "the widest word must be narrower than the wrapped block: {m:?}"
+    );
+    assert!(
+        m.preferred[0] < m.max[0],
+        "an unwrapped single line must be wider than a block wrapped at 200: {m:?}"
+    );
+    // Height is a single value, not a range: it depends on the width chosen.
+    assert_eq!(m.min[1], m.preferred[1]);
+    assert_eq!(m.max[1], m.preferred[1]);
+}
+
+#[test]
+fn a_text_that_fits_reports_no_width_range_beyond_what_it_took() {
+    let (mut world, root) = setup();
+    run_view(&mut world, root, |s| {
+        s.leaf(RichText::new("hi").font_size(16.0));
+    });
+    let child = first_child(&world, root);
+
+    let m = matcha_ecs::layout::measure_entity(
+        &mut world,
+        child,
+        Constraints::from_max_size([800.0, 600.0]),
+    );
+    assert_eq!(m.min[0], m.preferred[0]);
+    assert_eq!(m.max[0], m.preferred[0]);
 }

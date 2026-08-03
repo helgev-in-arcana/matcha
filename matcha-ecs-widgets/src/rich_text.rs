@@ -45,10 +45,7 @@ use std::{
     collections::HashMap,
     num::NonZeroUsize,
     ops::Range,
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::Duration,
 };
 
@@ -66,14 +63,17 @@ use parking_lot::Mutex;
 use renderer::RenderNode;
 
 use matcha_ecs::{
-    animation::{Animated, Easing, ExitTransition, Opacity, Target, ToBeDespawn, Tween},
     components::{
-        render::{RenderCtx, RenderItem},
-        view::Key,
+        render::{RenderCtx, RenderItem, RenderOpacity},
+        view::{Key, ManualDespawn},
     },
-    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, SUB_PIXEL_QUANTIZE},
+    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, Measured, SUB_PIXEL_QUANTIZE},
     view::Widget,
 };
+
+use crate::live::LiveF32;
+use crate::sizing::Sizing;
+use crate::animation::{Easing, ExitFade, OpacityTween};
 
 /// The displayed content: a fully assembled string (base text + every span's
 /// text, in declaration order, each already transform/collapse-processed)
@@ -422,15 +422,15 @@ struct RichTextStyle {
 /// for the full rationale (not shared with it directly, to keep the two
 /// widgets fully independent while both exist).
 #[derive(Component)]
-struct RichTextWrapWidth(Arc<AtomicU32>);
+struct RichTextWrapWidth(Arc<LiveF32>);
 
 impl RichTextWrapWidth {
     fn new() -> Self {
-        Self(Arc::new(AtomicU32::new(f32::MAX.to_bits())))
+        Self(Arc::new(LiveF32::new(f32::MAX)))
     }
 
     fn store(&self, width: f32) {
-        self.0.store(width.to_bits(), Ordering::Relaxed);
+        self.0.set(width);
     }
 }
 
@@ -479,12 +479,12 @@ const GLYPH_CACHE_CAPACITY: usize = 1024;
 /// explicit colour pushed via `push_default`/`push` (widget default or span
 /// override), so a default-valued brush is never actually surfaced.
 #[derive(Clone, PartialEq, Debug, Default)]
-struct RichTextBrush([f32; 4]);
+pub(crate) struct RichTextBrush(pub(crate) [f32; 4]);
 
-struct ParleyFontCtxInner {
-    font_cx: Mutex<parley::FontContext>,
-    layout_cx: Mutex<parley::LayoutContext<RichTextBrush>>,
-    scale_cx: Mutex<swash::scale::ScaleContext>,
+pub(crate) struct ParleyFontCtxInner {
+    pub(crate) font_cx: Mutex<parley::FontContext>,
+    pub(crate) layout_cx: Mutex<parley::LayoutContext<RichTextBrush>>,
+    pub(crate) scale_cx: Mutex<swash::scale::ScaleContext>,
     /// Per-glyph rasterised coverage bitmap (or `None` for glyphs with no
     /// visible bitmap, e.g. space — caching that avoids re-rasterising them
     /// every frame), shared across every `RichText` entity/frame drawing the
@@ -496,10 +496,10 @@ struct ParleyFontCtxInner {
 /// `ScaleContext`, and the glyph stencil cache. Lazily inserted on first use,
 /// matching `Text`'s `FontCtx` pattern exactly.
 #[derive(Resource, Clone)]
-struct ParleyFontCtx(Arc<ParleyFontCtxInner>);
+pub(crate) struct ParleyFontCtx(pub(crate) Arc<ParleyFontCtxInner>);
 
 impl ParleyFontCtx {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(Arc::new(ParleyFontCtxInner {
             font_cx: Mutex::new(parley::FontContext::new()),
             layout_cx: Mutex::new(parley::LayoutContext::new()),
@@ -519,7 +519,7 @@ impl ParleyFontCtx {
     /// protects every glyph that pass touches from being evicted by a later
     /// glyph in the *same* pass, while still allowing eviction across
     /// different (unrelated, or later) rebuilds.
-    fn begin_glyph_batch(&self) {
+    pub(crate) fn begin_glyph_batch(&self) {
         self.0.stencil_cache.lock().new_batch();
     }
 
@@ -716,198 +716,193 @@ fn shape(
     layout
 }
 
-/// Gamma-encode a linear colour component into the sRGB space the atlas
-/// texture is stored in. See `Text`'s identical `linear_to_srgb_u8` for the
-/// full rationale (`write_data` is a raw byte copy with no automatic
-/// linear->sRGB conversion).
-fn linear_to_srgb_u8(c: f32) -> u8 {
-    let c = c.clamp(0.0, 1.0);
-    let encoded = if c <= 0.0031308 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    };
-    (encoded * 255.0).round() as u8
+/// Paint the 1x1 tint pixel a glyph's stencil — or a decoration rule — is
+/// masked against.
+pub(crate) fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<AtlasRegion> {
+    crate::color::paint_tint_region(ctx, color, "RichText")
 }
 
-/// Paint a 1x1 solid-colour region into `ctx.texture_atlas`, reused
-/// (UV-clamped to any on-screen size) as every glyph's stencil "tint". See
-/// `Text`'s identical `paint_tint_region` for why this is written directly
-/// via `write_data` rather than a `ColorRect`-style render pass.
-fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<AtlasRegion> {
-    let region = match ctx.texture_atlas.allocate(ctx.device, ctx.queue, [1, 1]) {
-        Ok(region) => region,
-        Err(e) => {
-            log::error!("RichText tint region allocation failed: {e}");
-            return None;
+/// Composite a shaped parley layout into a `RenderNode`: one stencil-masked
+/// quad per glyph, plus any underline/strikethrough the run carries.
+///
+/// Shared by [`RichText`] and [`crate::TextBox`]: parley hands both of them the
+/// same `Layout` type (`PlainEditor::layout()` returns one too), so the drawing
+/// pass is identical and there is no reason to grow a second copy of it.
+pub(crate) fn draw_parley_layout(
+    font_ctx: &ParleyFontCtx,
+    ctx: &RenderCtx,
+    layout: &parley::Layout<RichTextBrush>,
+) -> RenderNode {
+    let mut node = RenderNode::new();
+
+    // Per-span colour means a single build can need several distinct tint
+    // regions (one per distinct colour actually used) — deduped locally,
+    // scoped to this one build, no persistent cache/eviction needed
+    // (typically only a handful of colours).
+    let mut tint_regions: HashMap<[u32; 4], AtlasRegion> = HashMap::new();
+    let mut tint_for = |color: [f32; 4]| -> Option<AtlasRegion> {
+        let key = [color[0].to_bits(), color[1].to_bits(), color[2].to_bits(), color[3].to_bits()];
+        if let Some(region) = tint_regions.get(&key) {
+            return Some(region.clone());
         }
+        let region = paint_tint_region(ctx, color)?;
+        tint_regions.insert(key, region.clone());
+        Some(region)
     };
 
-    let alpha = (color[3] * ctx.opacity).clamp(0.0, 1.0);
-    let bytes = [
-        linear_to_srgb_u8(color[0]),
-        linear_to_srgb_u8(color[1]),
-        linear_to_srgb_u8(color[2]),
-        (alpha * 255.0).round() as u8,
-    ];
-    if let Err(e) = region.write_data(ctx.queue, &bytes) {
-        log::error!("RichText tint upload failed: {e}");
-        return None;
+    font_ctx.begin_glyph_batch();
+    let mut scale_cx = font_ctx.0.scale_cx.lock();
+
+    for line in layout.lines() {
+        for item in line.items() {
+            let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                continue;
+            };
+            let run = glyph_run.run();
+            let font = run.font();
+            let font_size_px = run.font_size();
+            let coords = run.normalized_coords();
+
+            let Some(font_ref) = swash::FontRef::from_index(font.data.as_ref(), font.index as usize) else {
+                continue;
+            };
+            let mut scaler = scale_cx
+                .builder(font_ref)
+                .size(font_size_px)
+                .hint(true)
+                .normalized_coords(coords)
+                .build();
+
+            let font_size_bits = (font_size_px * SUB_PIXEL_QUANTIZE).round() as u32;
+            let coords_hash = fxhash::hash64(coords);
+
+            // Each `GlyphRun` carries one resolved style (parley starts a
+            // new run wherever a style — including brush — changes), so
+            // the run's colour is already fully resolved: no manual
+            // span/byte-range lookup needed here.
+            let Some(tint_region) = tint_for(glyph_run.style().brush.0) else {
+                continue;
+            };
+
+            let mut pen_x = glyph_run.offset();
+            let baseline = glyph_run.baseline();
+
+            for glyph in glyph_run.glyphs() {
+                let gx = pen_x + glyph.x;
+                let gy = baseline + glyph.y;
+                pen_x += glyph.advance;
+
+                let key = GlyphKey {
+                    font_blob_id: font.data.id(),
+                    font_index: font.index,
+                    glyph_id: glyph.id,
+                    font_size_bits,
+                    coords_hash,
+                };
+
+                let Some((stencil_region, size, placement)) = font_ctx.stencil_region(
+                    key,
+                    glyph.id as swash::GlyphId,
+                    &mut scaler,
+                    ctx.device,
+                    ctx.queue,
+                    ctx.stencil_atlas,
+                ) else {
+                    continue;
+                };
+
+                let px = gx.floor() + placement[0] as f32;
+                let py = gy.floor() - placement[1] as f32;
+                let transform = Matrix4::new_translation(&Vector3::new(px, py, 0.0));
+                let glyph_node = RenderNode::new()
+                    .with_texture(tint_region.clone(), size, Matrix4::identity())
+                    .with_stencil(stencil_region, size, Matrix4::identity());
+                node.push_child(glyph_node, transform);
+            }
+
+            // Underline/strikethrough: a flat filled rectangle, not a
+            // glyph — no `.with_stencil(..)` coverage mask needed.
+            // `y = baseline - offset` matches parley's own reference
+            // renderers (e.g. `examples/swash_render` in the parley
+            // repo) exactly.
+            let run_metrics = run.metrics();
+            let run_style = glyph_run.style();
+            for (decoration, default_offset, default_size) in [
+                (&run_style.underline, run_metrics.underline_offset, run_metrics.underline_size),
+                (&run_style.strikethrough, run_metrics.strikethrough_offset, run_metrics.strikethrough_size),
+            ] {
+                let Some(decoration) = decoration else {
+                    continue;
+                };
+                let Some(deco_tint) = tint_for(decoration.brush.0) else {
+                    continue;
+                };
+                let offset = decoration.offset.unwrap_or(default_offset);
+                let size = decoration.size.unwrap_or(default_size).max(1.0);
+                let y = baseline - offset;
+                let deco_transform = Matrix4::new_translation(&Vector3::new(glyph_run.offset(), y, 0.0));
+                let deco_node = RenderNode::new().with_texture(deco_tint, [glyph_run.advance(), size], Matrix4::identity());
+                node.push_child(deco_node, deco_transform);
+            }
+        }
     }
 
-    Some(region)
+    node
 }
 
-/// Build a `RenderItem` that shapes `content` fresh every rebuild (reading
-/// the live wrap width from `wrap_width`) and draws each glyph as a
-/// tint-texture quad masked by its cached stencil coverage bitmap.
+/// Build a `RenderItem` that shapes `content` fresh every rebuild, reading the
+/// live wrap width from `wrap_width`.
 fn rich_text_render_item(
     font_ctx: ParleyFontCtx,
-    wrap_width: Arc<AtomicU32>,
+    wrap_width: Arc<LiveF32>,
     content: RichTextContent,
     style: RichTextStyle,
 ) -> RenderItem {
     RenderItem::new(move |ctx: &RenderCtx| {
-        let mut node = RenderNode::new();
         if content.text.is_empty() {
-            return node;
+            return RenderNode::new();
         }
 
-        let max_width = f32::from_bits(wrap_width.load(Ordering::Relaxed));
+        let max_width = wrap_width.get();
         let layout = shape(&font_ctx, &content, &style, max_width);
-
-        // Per-span colour means a single build can need several distinct
-        // tint regions (one per distinct colour actually used) — deduped
-        // locally, scoped to this one `RenderItem` rebuild, no persistent
-        // cache/eviction needed (typically only a handful of colours).
-        let mut tint_regions: HashMap<[u32; 4], AtlasRegion> = HashMap::new();
-        let mut tint_for = |color: [f32; 4]| -> Option<AtlasRegion> {
-            let key = [color[0].to_bits(), color[1].to_bits(), color[2].to_bits(), color[3].to_bits()];
-            if let Some(region) = tint_regions.get(&key) {
-                return Some(region.clone());
-            }
-            let region = paint_tint_region(ctx, color)?;
-            tint_regions.insert(key, region.clone());
-            Some(region)
-        };
-
-        font_ctx.begin_glyph_batch();
-        let mut scale_cx = font_ctx.0.scale_cx.lock();
-
-        for line in layout.lines() {
-            for item in line.items() {
-                let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
-                    continue;
-                };
-                let run = glyph_run.run();
-                let font = run.font();
-                let font_size_px = run.font_size();
-                let coords = run.normalized_coords();
-
-                let Some(font_ref) = swash::FontRef::from_index(font.data.as_ref(), font.index as usize) else {
-                    continue;
-                };
-                let mut scaler = scale_cx
-                    .builder(font_ref)
-                    .size(font_size_px)
-                    .hint(true)
-                    .normalized_coords(coords)
-                    .build();
-
-                let font_size_bits = (font_size_px * SUB_PIXEL_QUANTIZE).round() as u32;
-                let coords_hash = fxhash::hash64(coords);
-
-                // Each `GlyphRun` carries one resolved style (parley starts a
-                // new run wherever a style — including brush — changes), so
-                // the run's colour is already fully resolved: no manual
-                // span/byte-range lookup needed here.
-                let Some(tint_region) = tint_for(glyph_run.style().brush.0) else {
-                    continue;
-                };
-
-                let mut pen_x = glyph_run.offset();
-                let baseline = glyph_run.baseline();
-
-                for glyph in glyph_run.glyphs() {
-                    let gx = pen_x + glyph.x;
-                    let gy = baseline + glyph.y;
-                    pen_x += glyph.advance;
-
-                    let key = GlyphKey {
-                        font_blob_id: font.data.id(),
-                        font_index: font.index,
-                        glyph_id: glyph.id,
-                        font_size_bits,
-                        coords_hash,
-                    };
-
-                    let Some((stencil_region, size, placement)) = font_ctx.stencil_region(
-                        key,
-                        glyph.id as swash::GlyphId,
-                        &mut scaler,
-                        ctx.device,
-                        ctx.queue,
-                        ctx.stencil_atlas,
-                    ) else {
-                        continue;
-                    };
-
-                    let px = gx.floor() + placement[0] as f32;
-                    let py = gy.floor() - placement[1] as f32;
-                    let transform = Matrix4::new_translation(&Vector3::new(px, py, 0.0));
-                    let glyph_node = RenderNode::new()
-                        .with_texture(tint_region.clone(), size, Matrix4::identity())
-                        .with_stencil(stencil_region, size, Matrix4::identity());
-                    node.push_child(glyph_node, transform);
-                }
-
-                // Underline/strikethrough: a flat filled rectangle, not a
-                // glyph — no `.with_stencil(..)` coverage mask needed.
-                // `y = baseline - offset` matches parley's own reference
-                // renderers (e.g. `examples/swash_render` in the parley
-                // repo) exactly.
-                let run_metrics = run.metrics();
-                let run_style = glyph_run.style();
-                for (decoration, default_offset, default_size) in [
-                    (&run_style.underline, run_metrics.underline_offset, run_metrics.underline_size),
-                    (&run_style.strikethrough, run_metrics.strikethrough_offset, run_metrics.strikethrough_size),
-                ] {
-                    let Some(decoration) = decoration else {
-                        continue;
-                    };
-                    let Some(deco_tint) = tint_for(decoration.brush.0) else {
-                        continue;
-                    };
-                    let offset = decoration.offset.unwrap_or(default_offset);
-                    let size = decoration.size.unwrap_or(default_size).max(1.0);
-                    let y = baseline - offset;
-                    let deco_transform = Matrix4::new_translation(&Vector3::new(glyph_run.offset(), y, 0.0));
-                    let deco_node = RenderNode::new().with_texture(deco_tint, [glyph_run.advance(), size], Matrix4::identity());
-                    node.push_child(deco_node, deco_transform);
-                }
-            }
-        }
-
-        node
+        draw_parley_layout(&font_ctx, ctx, &layout)
     })
 }
 
 impl Layout for RichTextStyle {
-    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, constraints: Constraints) -> [f32; 2] {
+    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, constraints: Constraints) -> Measured {
+        let sizing = Sizing::of(ctx, me);
+        let inner = sizing.content_constraints(constraints);
+
         let Some(font_ctx) = ctx.world().get_resource::<ParleyFontCtx>() else {
-            return [0.0, 0.0];
+            return Measured::exact([0.0, 0.0]);
         };
         let Some(content) = ctx.world().get::<RichTextContent>(me) else {
-            return [0.0, 0.0];
+            return Measured::exact([0.0, 0.0]);
         };
         if content.text.is_empty() {
-            return [0.0, 0.0];
+            return Measured::exact([0.0, 0.0]);
         }
-        let layout = shape(font_ctx, content, self, constraints.max_width());
-        [
-            layout.width().clamp(constraints.min_width(), constraints.max_width()),
-            layout.height().clamp(constraints.min_height(), constraints.max_height()),
-        ]
+        let layout = shape(font_ctx, content, self, inner.max_width());
+
+        // CSS min-content / max-content, straight from the layout already
+        // built: every soft break taken, and none taken. Deliberately *not*
+        // clamped — a contribution is what this text would want, which is the
+        // whole point of reporting it apart from the size it settled for.
+        //
+        // The height is reported as a single value rather than a range: it
+        // depends on the width finally chosen, and neither content width is
+        // that width (see `Measured`'s docs).
+        let widths = layout.calculate_content_widths();
+        let shaped = [layout.width(), layout.height()];
+        sizing.measured(
+            constraints,
+            Measured::new(
+                [widths.min.min(shaped[0]), shaped[1]],
+                shaped,
+                [widths.max.max(shaped[0]), shaped[1]],
+            ),
+        )
     }
 
     fn arrange(&self, ctx: &mut LayoutCtx, me: Entity, size: [f32; 2]) {
@@ -921,6 +916,7 @@ impl Layout for RichTextStyle {
 /// shaped content. See module docs for how this relates to [`crate::Text`].
 pub struct RichText {
     key: Key,
+    sizing: Sizing,
     content: String,
     font_size: f32,
     color: [f32; 4],
@@ -951,6 +947,7 @@ impl RichText {
     pub fn new(content: impl Into<String>) -> Self {
         Self {
             key: Key::Auto,
+            sizing: Sizing::default(),
             content: content.into(),
             font_size: 16.0,
             color: [0.0, 0.0, 0.0, 1.0],
@@ -991,6 +988,8 @@ impl RichText {
         });
         self
     }
+
+    crate::sizing_builders!();
 
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = key.into();
@@ -1223,9 +1222,9 @@ impl Widget for RichText {
             self.resolved_content(),
             self.style(),
             RichTextWrapWidth::new(),
+            self.sizing,
             LayoutDispatch::of::<RichTextStyle>(),
-            Target(Opacity(1.0)),
-            Animated(Opacity(initial_opacity)),
+            RenderOpacity(initial_opacity),
         )
     }
 
@@ -1234,23 +1233,21 @@ impl Widget for RichText {
         entity.insert(item);
 
         if let Some((duration, easing)) = self.enter_fade {
-            entity.insert(Tween::<Opacity> {
-                from: Opacity(0.0),
+            entity.insert(OpacityTween {
+                from: 0.0,
+                to: 1.0,
                 start: web_time::Instant::now(),
                 duration,
                 easing,
             });
         }
         if let Some((duration, easing)) = self.exit_fade {
-            entity.insert(ExitTransition::<Opacity> {
-                to: Opacity(0.0),
-                duration,
-                easing,
-            });
+            entity.insert((ManualDespawn::new(), ExitFade { duration, easing }));
         }
     }
 
     fn patch(&self, entity: &mut EntityWorldMut) {
+        self.sync_sizing(entity);
         let mut changed = false;
         if let Some(mut c) = entity.get_mut::<RichTextContent>() {
             changed |= c.set_if_neq(self.resolved_content());
@@ -1265,23 +1262,18 @@ impl Widget for RichText {
             }
         }
 
-        // Revival (M7 pattern): see `Text::patch`/`ColorRect::patch` for the
-        // identical reasoning.
-        if entity.get::<ToBeDespawn>().is_some() {
-            if let Some(exit) = entity.get::<ExitTransition<Opacity>>().copied() {
-                let current = entity
-                    .get::<Animated<Opacity>>()
-                    .copied()
-                    .unwrap_or(Animated(Opacity(1.0)));
-                entity.insert((
-                    Target(Opacity(1.0)),
-                    Tween::<Opacity> {
-                        from: current.0,
-                        start: web_time::Instant::now(),
-                        duration: exit.duration,
-                        easing: exit.easing,
-                    },
-                ));
+        // Revival: see `Text::patch`/`ColorRect::patch` for the identical
+        // reasoning.
+        if entity.get::<ManualDespawn>().is_some_and(|m| m.is_pruned()) {
+            if let Some(exit) = entity.get::<ExitFade>().copied() {
+                let current = entity.get::<RenderOpacity>().copied().unwrap_or_default();
+                entity.insert(OpacityTween {
+                    from: current.0,
+                    to: 1.0,
+                    start: web_time::Instant::now(),
+                    duration: exit.duration,
+                    easing: exit.easing,
+                });
             }
         }
     }
@@ -1312,8 +1304,7 @@ mod tests {
         layout_root(&mut world, root, Constraints::from_max_size([123.0, 456.0]));
 
         let child = world.get::<ViewChildren>(root).unwrap().slots[0].1;
-        let stored_width = world.get::<RichTextWrapWidth>(child).unwrap().0.load(Ordering::Relaxed);
-        let stored_width = f32::from_bits(stored_width);
+        let stored_width = world.get::<RichTextWrapWidth>(child).unwrap().0.get();
 
         let out = world.get::<matcha_ecs::components::layout::LayoutOutput>(child).unwrap();
         assert_eq!(

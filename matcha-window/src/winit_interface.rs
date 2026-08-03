@@ -3,6 +3,7 @@
 //! [`Adapter`]: crate::adapter::Adapter
 
 mod common;
+mod keyboard;
 
 #[cfg(not(web))]
 #[path = "winit_interface/native.rs"]

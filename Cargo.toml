@@ -47,6 +47,9 @@ parking_lot = { version = "0.12.3" }
 
 # window
 winit = "0.30"
+# The W3C UI Events keyboard vocabulary. Not a windowing library: enums only,
+# bitflags its sole dependency. Both backends already speak it.
+keyboard-types = "0.8"
 baseview = { git = "https://github.com/RustAudio/baseview.git" }
 
 # accessibility

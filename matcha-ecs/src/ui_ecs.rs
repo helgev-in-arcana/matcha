@@ -7,15 +7,17 @@
 //! and rendering runs synchronously on the main thread. From M2 on, the model
 //! lives in the world as a resource and [`ModelHandle::update`] calls queue
 //! mutations that are drained and re-viewed on `ui_command`. From M5 on,
-//! `device_event` resolves clicks against the [`crate::input::HitTestCache`]
-//! and applies the matched `Msg` to the model via a user-supplied `reducer`,
-//! reusing the same Phase B (re-view) + redraw path as the model queue.
+//! `device_event` resolves a pointer press through [`crate::pick`] and applies
+//! the matched `Msg` to the model via a user-supplied `reducer`, reusing the
+//! same Phase B (re-view) + redraw path as the model queue; keyboard and IME
+//! events go to the focus path instead (see [`crate::keyboard`]).
 
 use std::sync::{atomic::AtomicBool, mpsc, Arc, OnceLock};
 
 use bevy_ecs::{
+    entity::Entity,
     schedule::{IntoScheduleConfigs, Schedule, SystemSet},
-    system::{Query, Res, ResMut},
+    system::{Query, Res, ResMut, ScheduleSystem},
     world::World,
 };
 use bevy_tasks::{AsyncComputeTaskPool, ComputeTaskPool, TaskPoolBuilder};
@@ -27,36 +29,60 @@ use matcha_window::{
     adapter::{EventLoop, EventLoopProxy},
     application::Application,
     event::{
-        device_event::DeviceEvent,
+        device_event::{DeviceEvent, DeviceEventData},
         raw_device_event::{RawDeviceEvent, RawDeviceId},
         window_event::WindowEvent,
     },
     window::{Window as OsWindow, WindowConfig, WindowId},
 };
-use renderer::CoreRenderer;
+use renderer::{CoreRenderer, MaskNode};
 
 use crate::{
-    animation::{advance_tweens, FrameTime, Opacity, Tween},
     components::{
-        input::{Message, OnClick},
+        input::Message,
         view::ViewChildren,
         window::{Window as WindowComp, WindowBelonging},
     },
-    input::{resolve_click_target, update_hit_test_cache, HitTestCache},
+    focus::{run_validate_focus, sync_focus_components, Focus, FocusConfig},
+    input::{
+        dispatch_pointer_drag, dispatch_pointer_scroll, resolve_pointer_press,
+        set_pointer_capture, MessageQueue,
+    },
+    keyboard::{dispatch_ime, dispatch_key, sync_ime_state},
     model::{ModelHandle, ModelResource},
+    pick::{update_picker, PickQuery, Picker, PickerResource},
+    pointer::{self, sync_cursor, sync_pointer_components},
     render::{build_and_present, extract_items, RenderDriver, RenderSnapshot, ThreadDriver},
-    resources::{GpuResource, RenderWindowRoot, RendererResource},
-    view::{despawn_completed_exits, run_view, Scope},
+    resources::{
+        ClipMask, FrameTime, GpuResource, RedrawRequest, RenderWindowRoot, RendererResource, ui_root,
+    },
+    view::{run_view, Scope},
 };
 
-/// Ordering buckets for the render schedule (Phase C). Bodies are empty for now;
-/// the `.chain()` only fixes their relative order so systems added to each set
-/// run in the documented sequence as later milestones fill them in.
+/// The render schedule's stages, run in this order every frame.
+///
+/// These are **timing contracts**, not feature buckets: each says what must be
+/// true of the world by the time it ends, not what kind of work belongs in it.
+/// [`PreLayout`](Self::PreLayout) and [`PreExtract`](Self::PreExtract) are open
+/// extension points — see [`UiEcs::with_pre_layout_systems`] /
+/// [`UiEcs::with_pre_extract_systems`] — and the core registers nothing in the
+/// former and only contract plumbing in the latter.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MatchaSet {
-    Animation,
+    /// Settle everything layout reads, and the shape of the entity tree, for
+    /// this frame: animated values, tree structure (including despawning
+    /// entities whose [`ManualDespawn`](crate::components::view::ManualDespawn)
+    /// owner is done with them). Open to registered systems; empty by default.
+    PreLayout,
+    /// Core: measure and arrange the tree, writing `LayoutOutput` /
+    /// `GlobalTransform`.
     Layout,
-    Flush,
+    /// Settle the extract contract now that layout is known: the components
+    /// extract reads (`RenderOpacity`, …) and the validity of each entity's
+    /// cached render node. Open to registered systems; the core registers the
+    /// invalidation, picking and focus plumbing here.
+    PreExtract,
+    /// Core: collect the frame's drawable entities into a snapshot.
     Extract,
 }
 
@@ -182,8 +208,12 @@ where
         });
         world.insert_resource(CanCreateSurface { flag: false });
         world.insert_resource(ModelResource(model));
-        world.insert_resource(HitTestCache::default());
+        world.insert_resource(PickerResource::default());
+        world.insert_resource(Focus::default());
+        world.insert_resource(MessageQueue::<Msg>::default());
+        world.insert_resource(FocusConfig::default());
         world.insert_resource(FrameTime(web_time::Instant::now()));
+        world.insert_resource(RedrawRequest::default());
 
         let (sender, receiver) = mpsc::channel::<Box<dyn FnOnce(&mut M) + Send>>();
         let wake_pending = Arc::new(AtomicBool::new(false));
@@ -201,25 +231,36 @@ where
         let mut render_schedule = Schedule::default();
         render_schedule.configure_sets(
             (
-                MatchaSet::Animation,
+                MatchaSet::PreLayout,
                 MatchaSet::Layout,
-                MatchaSet::Flush,
+                MatchaSet::PreExtract,
                 MatchaSet::Extract,
             )
                 .chain(),
         );
-        render_schedule.add_systems(
-            (advance_tweens::<Opacity>, despawn_completed_exits)
-                .chain()
-                .in_set(MatchaSet::Animation),
-        );
+        // PreLayout is deliberately empty: nothing the core itself needs to do
+        // belongs there. Animation lives in `matcha-ecs-widgets` and registers
+        // itself via `with_pre_layout_systems`.
         render_schedule.add_systems(crate::layout::run_layout.in_set(MatchaSet::Layout));
         render_schedule
-            .add_systems(crate::systems::invalidate_on_layout_change.in_set(MatchaSet::Flush));
+            .add_systems(crate::systems::invalidate_on_layout_change.in_set(MatchaSet::PreExtract));
+        render_schedule.add_systems(update_picker.in_set(MatchaSet::PreExtract));
+        // Focus must be re-derived against the current tree before its derived
+        // markers are synced: the focused entity may have been despawned or
+        // rebuilt by this frame's reconcile pass.
         render_schedule.add_systems(
-            crate::systems::invalidate_on_animated_opacity_change.in_set(MatchaSet::Flush),
+            (run_validate_focus, sync_focus_components, sync_ime_state)
+                .chain()
+                .in_set(MatchaSet::PreExtract),
         );
-        render_schedule.add_systems(update_hit_test_cache.in_set(MatchaSet::Flush));
+        // Hover is re-resolved here, after `update_picker`, so a widget that
+        // appears under a stationary cursor comes up already hovered.
+        render_schedule.add_systems(
+            (sync_pointer_components, sync_cursor)
+                .chain()
+                .after(update_picker)
+                .in_set(MatchaSet::PreExtract),
+        );
 
         Self {
             world,
@@ -232,6 +273,55 @@ where
             proxy_slot,
             render_driver: parking_lot::Mutex::new(Box::new(ThreadDriver::default())),
         }
+    }
+
+    /// Register systems into [`MatchaSet::PreLayout`] — the stage that settles
+    /// everything layout reads (animated values, tree structure) for the frame.
+    ///
+    /// Takes anything `add_systems` takes, so a plugin can express its own
+    /// internal ordering (`(a, b).chain()`) or relate itself to another system
+    /// (`.after(..)`). No ordering is imposed *between* separately-registered
+    /// systems: if two of them depend on each other, say so explicitly.
+    ///
+    /// ```ignore
+    /// UiEcs::new(model, view, reduce)
+    ///     .with_pre_layout_systems(matcha_ecs_widgets::animation::default_systems())
+    /// ```
+    pub fn with_pre_layout_systems<Marker>(
+        mut self,
+        systems: impl IntoScheduleConfigs<ScheduleSystem, Marker>,
+    ) -> Self {
+        self.render_schedule
+            .add_systems(systems.in_set(MatchaSet::PreLayout));
+        self
+    }
+
+    /// Register systems into [`MatchaSet::PreExtract`] — the stage that settles
+    /// the extract contract (the components extract reads, and the validity of
+    /// each entity's cached render node) once layout is known. Same semantics
+    /// as [`Self::with_pre_layout_systems`].
+    pub fn with_pre_extract_systems<Marker>(
+        mut self,
+        systems: impl IntoScheduleConfigs<ScheduleSystem, Marker>,
+    ) -> Self {
+        self.render_schedule
+            .add_systems(systems.in_set(MatchaSet::PreExtract));
+        self
+    }
+
+    /// Swap the picking backend (default: [`crate::pick::RectPicker`], the 2D
+    /// flat-rect implementation). A 3D application would install a BVH or
+    /// GPU ID-buffer picker here instead; nothing downstream of picking cares
+    /// which one is in use.
+    pub fn with_picker(mut self, picker: impl Picker) -> Self {
+        self.world.insert_resource(PickerResource(Box::new(picker)));
+        self
+    }
+
+    /// The current focus state. Focus lives in the ECS world rather than in
+    /// the app model, so this is how an embedder reads it from outside.
+    pub fn focus(&self) -> &Focus {
+        self.world.resource::<Focus>()
     }
 
     /// Clone a handle for mutating the model from any thread. Safe to call
@@ -263,48 +353,105 @@ where
     /// redraw on every window. Shared by [`Self::process_model_update`] (model
     /// queue drain) and [`Self::dispatch_click`] (click -> reducer).
     fn rerun_view_and_redraw(&mut self) {
-        let Some(root) = self.world.get_resource::<RenderWindowRoot>() else {
+        let Some(root_entity) = ui_root(&self.world) else {
             return;
         };
-        let root_entity = root.entity;
         let view_fn = &self.view_fn;
         self.world
             .resource_scope::<ModelResource<M>, _>(|world, model| {
                 run_view(world, root_entity, |s| view_fn(&model.0, s));
             });
 
+        self.request_redraw_all();
+    }
+
+    /// Handle a pointer press at `pos` (window space): one pick serves both
+    /// focus and click routing (see [`resolve_pointer_press`]).
+    ///
+    /// A click message goes through the reducer and needs the view re-run.
+    /// A focus-only change does not: focus lives in the ECS world, not in the
+    /// app model, so widgets read it straight from their entity — a redraw is
+    /// enough, and re-running the view would be wasted work.
+    fn on_pointer_press(&mut self, pos: [f32; 2], count: u32) {
+        let query = PickQuery { viewport_pos: pos };
+        let press = resolve_pointer_press::<Msg>(&mut self.world, &query, count);
+
+        if let Some(msg) = press.click_msg {
+            let mut model = self.world.resource_mut::<ModelResource<M>>();
+            (self.reducer)(&mut model.0, msg);
+            drop(model);
+            self.rerun_view_and_redraw();
+        } else if !self.drain_message_queue() && (press.focus_changed || press.pointer_changed) {
+            self.request_redraw_all();
+        }
+    }
+
+    /// Apply everything queued in [`MessageQueue`] through the reducer, then
+    /// re-view once. Returns whether anything was applied.
+    ///
+    /// Keyboard/IME handlers and widget systems cannot reach the model or the
+    /// reducer from where they run, so they queue instead; this is where the
+    /// queue is redeemed.
+    fn drain_message_queue(&mut self) -> bool {
+        let messages = self.world.resource_mut::<MessageQueue<Msg>>().drain();
+        if messages.is_empty() {
+            return false;
+        }
+        {
+            let mut model = self.world.resource_mut::<ModelResource<M>>();
+            for msg in messages {
+                (self.reducer)(&mut model.0, msg);
+            }
+        }
+        self.rerun_view_and_redraw();
+        true
+    }
+
+    /// Close out an input event: redeem anything it queued, and redraw if it
+    /// changed something without producing a message.
+    ///
+    /// Every input arm ends the same way, because the two ways an event can
+    /// matter are exhaustive. A message means app state moved, so the view is
+    /// re-run (inside [`Self::drain_message_queue`]). No message but consumed
+    /// means only ECS-side state moved — a caret, a scroll offset, a hover —
+    /// which widgets read off their own entity, so a redraw suffices and
+    /// re-running the view would be wasted. Unconsumed means nothing happened.
+    ///
+    /// Having this in one place is also what keeps adding an input kind to
+    /// [`Application::device_event`] a one-line change.
+    fn settle(&mut self, consumed: bool) {
+        if consumed && !self.drain_message_queue() {
+            self.request_redraw_all();
+        }
+    }
+
+    /// The root entity of `window_id`'s view tree, if that is the window this
+    /// app is driving.
+    ///
+    /// The window-id check is what the plain [`ui_root`] accessor cannot do:
+    /// these callers are answering "is the window the event names *mine*?",
+    /// which is a question that survives there being more than one root.
+    fn root_of(&self, window_id: WindowId) -> Option<Entity> {
+        let root = self.world.get_resource::<RenderWindowRoot>()?;
+        (root.window_id == window_id).then_some(root.entity)
+    }
+
+    /// Ask one window to redraw, ignoring an id that is not ours.
+    fn request_redraw_of(&self, window_id: WindowId) {
+        if let Some(root) = self.root_of(window_id)
+            && let Some(window_comp) = self.world.get::<WindowComp>(root)
+        {
+            window_comp.window.request_redraw();
+        }
+    }
+
+    /// Ask every window for a redraw, without re-running the view.
+    fn request_redraw_all(&mut self) {
         let _ = self.world.run_system_cached(|q: Query<&WindowComp>| {
             for window in q.iter() {
                 window.window.request_redraw();
             }
         });
-    }
-
-    /// Resolve a click at `pos` (window space) against the `HitTestCache`,
-    /// apply the matched `Msg` to the model via `reducer`, and re-view +
-    /// redraw. A no-op if nothing hit-testable with an assigned message was
-    /// under the pointer.
-    fn dispatch_click(&mut self, pos: [f32; 2]) {
-        let Some(entity) = ({
-            let cache = self.world.resource::<HitTestCache>();
-            resolve_click_target::<Msg>(&self.world, cache, pos)
-        }) else {
-            return;
-        };
-        let Some(msg) = self
-            .world
-            .get::<OnClick<Msg>>(entity)
-            .and_then(|on_click| on_click.0)
-        else {
-            return;
-        };
-
-        {
-            let mut model = self.world.resource_mut::<ModelResource<M>>();
-            (self.reducer)(&mut model.0, msg);
-        }
-
-        self.rerun_view_and_redraw();
     }
 }
 
@@ -323,12 +470,7 @@ where
     /// if the frame should be skipped (wrong window, no GPU/root, or the
     /// surface has no texture to give this frame).
     fn build_snapshot(&mut self, window_id: WindowId) -> Option<RenderSnapshot> {
-        let root = self.world.get_resource::<RenderWindowRoot>()?;
-        // Only one window is supported currently.
-        if root.window_id != window_id {
-            return None;
-        }
-        let root_entity = root.entity;
+        let root_entity = self.root_of(window_id)?;
 
         let (device, queue) = self.world.resource::<GpuResource>().gpu.context()?;
         let (core, texture_atlas, stencil_atlas) = {
@@ -355,7 +497,8 @@ where
             }
         };
 
-        let items = extract_items(&self.world, root_entity);
+        let frame = extract_items(&self.world, root_entity);
+        let clips = self.resolve_clips(&frame.clips, &device, &queue, &stencil_atlas);
 
         Some(RenderSnapshot {
             window_id,
@@ -368,7 +511,8 @@ where
                 b: 0.1,
                 a: 1.0,
             },
-            items,
+            items: frame.items,
+            clips,
             device,
             queue,
             core,
@@ -377,37 +521,73 @@ where
         })
     }
 
+    /// Pair each extracted clip rectangle with the shared coverage texel,
+    /// allocating that texel on first use.
+    ///
+    /// Extraction is deliberately GPU-free (which is what makes clipping
+    /// headlessly testable), so attaching the image happens here — this is the
+    /// only place holding the device, queue and atlas. Same lazy-insert pattern
+    /// the text and image widgets use for their own caches.
+    fn resolve_clips(
+        &mut self,
+        clips: &crate::clip::ClipArena,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stencil_atlas: &TextureAtlas,
+    ) -> Vec<MaskNode> {
+        if clips.is_empty() {
+            return Vec::new();
+        }
+
+        if self.world.get_resource::<ClipMask>().is_none() {
+            match stencil_atlas.allocate(device, queue, [1, 1]) {
+                Ok(region) => {
+                    if let Err(e) = region.write_data(queue, &[0xff]) {
+                        log::error!("failed to write the shared clip coverage texel: {e}");
+                        return Vec::new();
+                    }
+                    self.world.insert_resource(ClipMask { region });
+                }
+                Err(e) => {
+                    log::error!("failed to allocate the shared clip coverage texel: {e}");
+                    return Vec::new();
+                }
+            }
+        }
+
+        let region = self.world.resource::<ClipMask>().region.clone();
+        clips
+            .as_slice()
+            .iter()
+            .map(|rect| MaskNode {
+                parent: rect.parent,
+                transform: rect.transform,
+                region: region.clone(),
+            })
+            .collect()
+    }
+
     /// Advance animation/layout and build this frame's snapshot for
     /// `window_id`. Shared by [`Application::render`] and [`Self::render_sync`],
     /// which differ only in how they hand the result off.
     fn advance_and_snapshot(&mut self, window_id: WindowId) -> Option<RenderSnapshot> {
         self.world
             .insert_resource(FrameTime(web_time::Instant::now()));
+        // Systems that need a follow-up frame (an in-flight animation, say)
+        // re-request it during the run; start from a clean slate each frame.
+        self.world.resource_mut::<RedrawRequest>().reset();
         self.render_schedule.run(&mut self.world);
         self.build_snapshot(window_id)
     }
 
-    /// Request another redraw while any `Tween<Opacity>` is in flight, so an
-    /// in-progress fade keeps animating. Shared by [`Application::render`] and
-    /// [`Self::render_sync`].
-    fn request_redraw_if_tweening(&mut self, window_id: WindowId) {
-        if self
-            .world
-            .query::<&Tween<Opacity>>()
-            .iter(&self.world)
-            .next()
-            .is_none()
-        {
+    /// Request another redraw if any system asked for one during this frame
+    /// (via [`RedrawRequest::request`]), so e.g. an in-progress fade keeps
+    /// animating. Shared by [`Application::render`] and [`Self::render_sync`].
+    fn request_redraw_if_requested(&mut self, window_id: WindowId) {
+        if !self.world.resource::<RedrawRequest>().is_requested() {
             return;
         }
-        if let Some(root) = self.world.get_resource::<RenderWindowRoot>() {
-            if root.window_id == window_id {
-                let root_entity = root.entity;
-                if let Some(window_comp) = self.world.get::<WindowComp>(root_entity) {
-                    window_comp.window.request_redraw();
-                }
-            }
-        }
+        self.request_redraw_of(window_id);
     }
 
     /// Render and present `window_id` synchronously on the calling thread,
@@ -418,7 +598,7 @@ where
         if let Some(snapshot) = self.advance_and_snapshot(window_id) {
             build_and_present(snapshot);
         }
-        self.request_redraw_if_tweening(window_id);
+        self.request_redraw_if_requested(window_id);
     }
 }
 
@@ -537,17 +717,15 @@ where
     }
 
     fn render(&mut self, window_id: WindowId) {
+        // Messages queued by systems during the previous frame's schedule (a
+        // widget reacting to focus loss, say) are redeemed here, before this
+        // frame's layout, so the view reflects them.
+        self.drain_message_queue();
+
         // Coalesce: if the previous frame for this window is still encoding on its
         // render thread, request another redraw and drop this one.
         if self.render_driver.get_mut().is_busy(window_id) {
-            if let Some(root) = self.world.get_resource::<RenderWindowRoot>() {
-                if root.window_id == window_id {
-                    let root_entity = root.entity;
-                    if let Some(window_comp) = self.world.get::<WindowComp>(root_entity) {
-                        window_comp.window.request_redraw();
-                    }
-                }
-            }
+            self.request_redraw_of(window_id);
             return;
         }
 
@@ -555,7 +733,7 @@ where
             self.render_driver.get_mut().dispatch(snapshot);
         }
 
-        self.request_redraw_if_tweening(window_id);
+        self.request_redraw_if_requested(window_id);
     }
 
     fn window_event(
@@ -610,10 +788,70 @@ where
         _window_id: WindowId,
         event: DeviceEvent,
     ) {
+        // Hover first, so a press is resolved against an up-to-date chain.
+        //
+        // There is no move-specific arm because a plain cursor move produces no
+        // `MouseInput` of its own once `matcha-window`'s state machine has
+        // processed it — its whole payload is the updated position, which every
+        // mouse event carries. Keyboard events are excluded so an early
+        // keystroke cannot claim the pointer is at the origin.
+        if let DeviceEventData::MouseInput { event: mouse, .. } = event.event() {
+            let left = matches!(mouse, Some(matcha_window::event::device_event::MouseInput::Left));
+            let position = (!left).then(|| event.mouse_viewport_position());
+            let moved = pointer::set_position(&mut self.world, position);
+            self.settle(moved);
+        }
+
+        let at_pointer = PickQuery {
+            viewport_pos: event.mouse_viewport_position(),
+        };
+
         // `on_click` only fires on the primary-button press edge (not every
-        // move/release), so a hit is always a genuine new click.
-        if event.on_click(|_count| ()).is_some() {
-            self.dispatch_click(event.mouse_viewport_position());
+        // move/release), so a hit is always a genuine new click. This one arm
+        // does not go through `settle`: a click can produce a message *and*
+        // change focus, and the reducer has to run before the view is re-run.
+        if let Some(count) = event.on_click(|count| count) {
+            self.on_pointer_press(at_pointer.viewport_pos, count);
+        }
+
+        // Releasing the button ends the drag the press had captured, so the
+        // next one starts from whatever the next press lands on.
+        if event.on_click_released(|_count| ()).is_some() {
+            set_pointer_capture(&mut self.world, None);
+            let released = pointer::set_pressed(&mut self.world, None);
+            self.settle(released);
+        }
+
+        // A drag continues an interaction a press already started (dragging out
+        // a text selection, say), so it goes straight to positioned delivery
+        // without touching focus or click routing.
+        if event.on_drag(|_from, _button| ()).is_some() {
+            let consumed = dispatch_pointer_drag(&mut self.world, &at_pointer);
+            self.settle(consumed);
+        }
+
+        // Scrolling is positioned like a drag but starts no interaction, so it
+        // likewise bypasses focus and click routing. An unconsumed scroll means
+        // nothing under the pointer could move.
+        if let Some(delta) = event.on_scroll(|delta| delta) {
+            let consumed = dispatch_pointer_scroll(&mut self.world, &at_pointer, delta);
+            self.settle(consumed);
+        }
+
+        // Keyboard and IME have no spatial origin: they go to whatever holds
+        // focus. Both walk the focus path root->leaf; see `keyboard.rs`.
+        if let Some(key_input) = event.on_key_down(|input| input.clone()) {
+            // Tab moves focus before the focused widget is offered the key: no
+            // widget in this workspace wants a literal tab character, and a
+            // `Tab` that fell through would be typed instead of navigating.
+            let consumed = crate::tab_order::handle_tab_key(&mut self.world, &key_input)
+                || dispatch_key(&mut self.world, &key_input);
+            self.settle(consumed);
+        }
+
+        if let Some(ime_event) = event.on_ime(|ime| ime.clone()) {
+            let consumed = dispatch_ime(&mut self.world, &ime_event);
+            self.settle(consumed);
         }
     }
 

@@ -245,14 +245,24 @@ impl<App: Application> winit::application::ApplicationHandler<WinitUserMessage<A
             winit::event::WindowEvent::ModifiersChanged(modifiers) => {
                 let e = crate::event::device_event::DeviceEvent::stateless(
                     crate::event::device_event::DeviceEventData::ModifiersChanged(
-                        modifiers.state(),
+                        super::keyboard::map_modifiers(modifiers.state()),
                     ),
                 );
                 self.adapter.device_event(event_loop, window_id, e);
             }
 
-            winit::event::WindowEvent::Ime(_) => {
-                // Not mapped yet.
+            winit::event::WindowEvent::Ime(ime) => {
+                use crate::event::device_event::ImeEvent;
+                let ime_event = match ime {
+                    winit::event::Ime::Enabled => ImeEvent::Enabled,
+                    winit::event::Ime::Preedit(text, cursor) => ImeEvent::Preedit { text, cursor },
+                    winit::event::Ime::Commit(text) => ImeEvent::Commit { text },
+                    winit::event::Ime::Disabled => ImeEvent::Disabled,
+                };
+                let e = crate::event::device_event::DeviceEvent::stateless(
+                    crate::event::device_event::DeviceEventData::Ime(ime_event),
+                );
+                self.adapter.device_event(event_loop, window_id, e);
             }
 
             // --------------
@@ -414,10 +424,10 @@ fn map_key_input(key_event: winit::event::KeyEvent) -> KeyInput {
         winit::event::ElementState::Released => ElementState::Released(0),
     };
     KeyInput {
-        physical_key: key_event.physical_key,
-        logical_key: key_event.logical_key,
+        physical_key: super::keyboard::map_code(key_event.physical_key),
+        logical_key: super::keyboard::map_key(key_event.logical_key),
         text: key_event.text.map(|s| s.to_string()),
-        location: key_event.location,
+        location: super::keyboard::map_location(key_event.location),
         state,
         repeat: key_event.repeat,
         snapshot: KeyboardState::default(),

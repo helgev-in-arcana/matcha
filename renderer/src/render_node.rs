@@ -14,6 +14,8 @@ const SMALLVEC_INLINE_CAPACITY: usize = 16;
 /// The RenderNode stores textures, stencil information, and child elements along with
 /// per-node transform matrices. Transforms are applied by the renderer when generating GPU
 /// draw calls.
+///
+/// A node's stencil masks that node alone — see [`RenderNode::with_stencil`].
 #[derive(Debug, Clone)]
 pub struct RenderNode {
     texture_and_position: Option<(texture_atlas::AtlasRegion, nalgebra::Matrix4<f32>)>,
@@ -64,6 +66,16 @@ impl RenderNode {
         self
     }
 
+    /// Attach a coverage mask that applies to **this node only**, not to its
+    /// children.
+    ///
+    /// This is the per-object mask: a glyph's coverage bitmap, not a clip.
+    /// Masks that should also apply to a subtree are declared outside the tree
+    /// instead, as `MaskNode`s passed alongside the nodes to
+    /// [`CoreRenderer::render_flat`](crate::core_renderer::CoreRenderer::render_flat)
+    /// — a render tree is flattened per widget entity, so it cannot express
+    /// nesting *between* entities in the first place, which is exactly where
+    /// clipping lives.
     pub fn with_stencil(
         mut self,
         stencil: texture_atlas::AtlasRegion,

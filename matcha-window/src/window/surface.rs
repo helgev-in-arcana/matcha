@@ -56,6 +56,13 @@ pub(crate) trait NativeWindow: utils::MaybeSendSync {
     fn dpi(&self) -> f64;
     fn request_redraw(&self);
 
+    // --- Cursor ---
+    fn set_cursor_icon(&self, icon: super::CursorIcon);
+
+    // --- IME ---
+    fn set_ime_allowed(&self, allowed: bool);
+    fn set_ime_cursor_area(&self, position: [f32; 2], size: [f32; 2]);
+
     /// Creates a wgpu surface targeting this window, or `Ok(None)` for
     /// backends that cannot present (headless). Raw-window-handle details stay
     /// inside each backend.
@@ -324,6 +331,18 @@ impl WindowSurface {
     pub fn request_redraw(&self) {
         self.window.request_redraw();
     }
+
+    pub fn set_cursor_icon(&self, icon: super::CursorIcon) {
+        self.window.set_cursor_icon(icon);
+    }
+
+    pub fn set_ime_allowed(&self, allowed: bool) {
+        self.window.set_ime_allowed(allowed);
+    }
+
+    pub fn set_ime_cursor_area(&self, position: [f32; 2], size: [f32; 2]) {
+        self.window.set_ime_cursor_area(position, size);
+    }
 }
 
 /// Rendering
@@ -441,9 +460,14 @@ pub enum SurfaceTextureError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum WindowSurfaceError {
-    #[cfg(feature = "winit")]
-    #[error("Failed to create window")]
-    CreateWindow(winit::error::OsError),
+    /// The OS refused to create the window.
+    ///
+    /// Carries the backend's message rather than its error type: winit's
+    /// `OsError` has no public fields, so formatting it is already the only
+    /// thing a caller could do with it, and a backend-specific payload here
+    /// would put a windowing library back into this crate's public API.
+    #[error("failed to create window: {0}")]
+    CreateWindow(String),
     #[error("Failed to create window surface")]
     CreateWindowSurface(wgpu::CreateSurfaceError),
 }

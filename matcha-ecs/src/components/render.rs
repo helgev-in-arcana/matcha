@@ -21,11 +21,62 @@ pub struct RenderCtx<'a> {
     pub queue: &'a wgpu::Queue,
     pub texture_atlas: &'a TextureAtlas,
     pub stencil_atlas: &'a TextureAtlas,
-    /// The entity's current `Animated<Opacity>` (M7), or `1.0` if it doesn't
-    /// carry one. Colours are baked into the atlas at build time (there is no
-    /// per-instance alpha uniform at draw time), so a builder that wants to
-    /// fade must multiply this into its vertex colours itself.
-    pub opacity: f32,
+    /// The size layout allocated to this entity (`LayoutOutput::size`).
+    /// Builders must draw at *this* size, not a constructor-declared one: a
+    /// parent layout may allocate more than the widget asked for (e.g.
+    /// `AlignItems::Stretch`, or a min-size constraint), and the entity's
+    /// hit-test rect and child arrangement already use the allocated size —
+    /// drawing at any other size desynchronises paint from layout.
+    /// `[0.0, 0.0]` if the entity has never been laid out.
+    pub size: [f32; 2],
+    /// Whether this entity is the focus vertex (CSS `:focus`).
+    ///
+    /// Focus has to arrive through the context rather than being read from the
+    /// world, for the same reason `size` does: a builder is a
+    /// closure captured back at `bundle()`/`patch()` time and has no world
+    /// access when it runs (on the render thread, no less). The rebuild is
+    /// triggered by `focus::sync_focus_components`, which invalidates the
+    /// cached node of every entity whose focus state changed.
+    pub focused: bool,
+    /// Whether the focus vertex is this entity or one of its descendants
+    /// (CSS `:focus-within`). Always `true` when [`focused`](Self::focused) is.
+    pub focus_within: bool,
+    /// Whether the pointer is inside this entity's box (CSS `:hover`), whether
+    /// directly or via a descendant. Arrives through the context for the same
+    /// reason `focused` does; `pointer::sync_pointer_components` invalidates
+    /// the cached node on every transition.
+    pub hovered: bool,
+    /// Whether a held press landed inside this entity and the pointer has not
+    /// left it since (CSS `:active`).
+    pub active: bool,
+}
+
+/// A widget's current opacity, `0.0` (invisible) to `1.0` (fully visible).
+///
+/// One of the two components the extract stage reads off a drawable entity
+/// (the other being `GlobalTransform`). The core only ever *reads* it: whoever
+/// wants to animate opacity writes it from a registered PreLayout system. An
+/// entity without this component renders at full opacity.
+///
+/// Applied at draw time, so changing it costs nothing beyond a redraw — a fade
+/// does not re-rasterise anything, and a builder never sees it.
+#[derive(Component, Clone, Copy, PartialEq, Debug)]
+pub struct RenderOpacity(pub f32);
+
+/// Where this entity sits among its siblings, low to high; declaration order
+/// breaks ties. Absent means `0`.
+///
+/// Reorders **painting and picking together** — see [`crate::traversal`],
+/// which is the only thing that reads it, and whose docs give the two
+/// restrictions that keep stacking to a single stable sort. A subtree moves as
+/// a unit, and a child never goes behind its parent however negative this is.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ZIndex(pub i32);
+
+impl Default for RenderOpacity {
+    fn default() -> Self {
+        RenderOpacity(1.0)
+    }
 }
 
 /// A cached, deferred render-tree source for one widget entity.

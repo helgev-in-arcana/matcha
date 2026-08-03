@@ -25,6 +25,7 @@ nalgebra = { features = ["bytemuck"], workspace = true }
 
 # other
 bitflags = { workspace = true }
+keyboard-types = { workspace = true }
 num = { workspace = true }
 fxhash = { workspace = true }
 dashmap = { workspace = true }
@@ -33,6 +34,7 @@ thiserror = { workspace = true }
 log = { workspace = true }
 enum-map = "2.7.3"
 web-time = { workspace = true }
+arboard = { version = "3.6", default-features = false }
 
 # NOTE: the `cfg` expressions below must stay in sync with the `web` alias
 # defined in build.rs (`all(target_arch = "wasm32", target_os = "unknown")`).
@@ -49,10 +51,9 @@ default = ["winit"]
 winit = ["dep:winit"]
 baseview = ["dep:baseview"]
 # Additive (NOT a third exclusive backend): in-memory windows + a test-driven
-# event loop for headless tests. Implies `winit` because the crate's common
-# event types re-export winit keyboard types. Enabled by downstream
-# dev-dependencies only, so normal builds are unaffected.
-headless = ["winit"]
+# event loop for headless tests. Does not require `winit` -- builds and passes
+# its own test suite with `winit` fully disabled.
+headless = []
 
 [[test]]
 name = "headless"

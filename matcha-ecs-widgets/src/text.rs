@@ -20,15 +20,12 @@
 //! `measure()`, `arrange()`, and the `RenderItem` builder each independently
 //! (re)run `FontSystem::layout_text` from scratch. The only value threaded
 //! between layout and render is the resolved wrap width (a single `f32`,
-//! shared via `TextWrapWidth`'s `Arc<AtomicU32>`) — passing the actual shaped
+//! shared via `TextWrapWidth`'s `Arc<LiveF32>`) — passing the actual shaped
 //! glyph list between stages is left as a future optimisation.
 
 use std::{
     collections::HashMap,
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::Duration,
 };
 
@@ -46,14 +43,17 @@ use parking_lot::Mutex;
 use renderer::RenderNode;
 
 use matcha_ecs::{
-    animation::{Animated, Easing, ExitTransition, Opacity, Target, ToBeDespawn, Tween},
     components::{
-        render::{RenderCtx, RenderItem},
-        view::Key,
+        render::{RenderCtx, RenderItem, RenderOpacity},
+        view::{Key, ManualDespawn},
     },
-    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch},
+    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, Measured},
     view::Widget,
 };
+
+use crate::live::LiveF32;
+use crate::sizing::Sizing;
+use crate::animation::{Easing, ExitFade, OpacityTween};
 
 /// The displayed string.
 #[derive(Component, Clone, PartialEq, Eq, Debug)]
@@ -69,7 +69,7 @@ struct TextStyle {
 /// Shares the most recently resolved wrap width between `TextStyle::arrange`
 /// (writer, every layout pass) and the `RenderItem` builder (reader, every
 /// rebuild). Deliberately not part of `TextStyle`'s `PartialEq`/`Clone`-based
-/// change comparison in `patch` — `AtomicU32` has no meaningful `PartialEq`,
+/// change comparison in `patch` — `LiveF32` has no meaningful `PartialEq`,
 /// and this cell must survive being read from a system that never replaces
 /// it, only the entity's `TextStyle`/`RenderItem` are replaced on patch.
 ///
@@ -77,15 +77,15 @@ struct TextStyle {
 /// runs before this entity's first `arrange()` still degrades safely to
 /// "effectively no wrap" rather than wrapping after every glyph.
 #[derive(Component)]
-struct TextWrapWidth(Arc<AtomicU32>);
+struct TextWrapWidth(Arc<LiveF32>);
 
 impl TextWrapWidth {
     fn new() -> Self {
-        Self(Arc::new(AtomicU32::new(f32::MAX.to_bits())))
+        Self(Arc::new(LiveF32::new(f32::MAX)))
     }
 
     fn store(&self, width: f32) {
-        self.0.store(width.to_bits(), Ordering::Relaxed);
+        self.0.set(width);
     }
 }
 
@@ -183,56 +183,9 @@ pub(crate) fn shape(font_ctx: &FontCtx, content: &str, font_size: f32, max_width
     font_ctx.0.font_system.layout_text(&data, &config)
 }
 
-/// Gamma-encode a linear colour component into the sRGB space the atlas
-/// texture is stored in (matches what a render pass writing to an
-/// `Rgba8UnormSrgb` target does automatically; `write_data` is a raw byte
-/// copy with no such conversion, so it must be done by hand here).
-fn linear_to_srgb_u8(c: f32) -> u8 {
-    let c = c.clamp(0.0, 1.0);
-    let encoded = if c <= 0.0031308 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    };
-    (encoded * 255.0).round() as u8
-}
-
-/// Paint a 1x1 solid-colour region into `ctx.texture_atlas`, reused
-/// (UV-clamped to any on-screen size) as every glyph's stencil "tint".
-///
-/// Written directly via `write_data` rather than `ColorRect`'s render-pass +
-/// `VertexColor` approach: a real GPU render pass whose viewport is scoped to
-/// a 1x1 (or otherwise very small, single-digit-pixel) atlas region was found
-/// to rasterise incorrectly (a soft, mispositioned blob instead of a flat
-/// fill — reproduced in isolation with a hand-built 4x4 case, unrelated to
-/// glyphs/stencils). `ColorRect` never hits this because it always sizes
-/// regions to its own (typically much larger) rect, so the bug went
-/// unnoticed; text's single shared tint pixel triggers it directly. Root
-/// cause not identified (deferred — see `ECS_IMPLEMENTATION_PLAN.md` §8);
-/// `write_data` sidesteps it entirely and is a strictly simpler upload for a
-/// flat fill anyway.
+/// Paint the 1x1 tint pixel every glyph's stencil is masked against.
 pub(crate) fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<AtlasRegion> {
-    let region = match ctx.texture_atlas.allocate(ctx.device, ctx.queue, [1, 1]) {
-        Ok(region) => region,
-        Err(e) => {
-            log::error!("Text tint region allocation failed: {e}");
-            return None;
-        }
-    };
-
-    let alpha = (color[3] * ctx.opacity).clamp(0.0, 1.0);
-    let bytes = [
-        linear_to_srgb_u8(color[0]),
-        linear_to_srgb_u8(color[1]),
-        linear_to_srgb_u8(color[2]),
-        (alpha * 255.0).round() as u8,
-    ];
-    if let Err(e) = region.write_data(ctx.queue, &bytes) {
-        log::error!("Text tint upload failed: {e}");
-        return None;
-    }
-
-    Some(region)
+    crate::color::paint_tint_region(ctx, color, "Text")
 }
 
 /// Composite `layout`'s glyphs into `(node, local_translation)` pairs, each a
@@ -270,7 +223,7 @@ pub(crate) fn glyph_run_nodes(
 /// tint-texture quad masked by its cached stencil coverage bitmap.
 fn text_render_item(
     font_ctx: FontCtx,
-    wrap_width: Arc<AtomicU32>,
+    wrap_width: Arc<LiveF32>,
     content: String,
     font_size: f32,
     color: [f32; 4],
@@ -278,7 +231,7 @@ fn text_render_item(
     RenderItem::new(move |ctx: &RenderCtx| {
         let mut node = RenderNode::new();
 
-        let max_width = f32::from_bits(wrap_width.load(Ordering::Relaxed));
+        let max_width = wrap_width.get();
         let layout = shape(&font_ctx, &content, font_size, max_width);
 
         let Some(tint_region) = paint_tint_region(ctx, color) else {
@@ -294,18 +247,27 @@ fn text_render_item(
 }
 
 impl Layout for TextStyle {
-    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, constraints: Constraints) -> [f32; 2] {
+    fn measure(&self, ctx: &mut LayoutCtx, me: Entity, constraints: Constraints) -> Measured {
+        let sizing = Sizing::of(ctx, me);
+        let inner = sizing.content_constraints(constraints);
+
         let Some(font_ctx) = ctx.world().get_resource::<FontCtx>() else {
-            return [0.0, 0.0];
+            return Measured::exact([0.0, 0.0]);
         };
         let Some(content) = ctx.world().get::<TextContent>(me) else {
-            return [0.0, 0.0];
+            return Measured::exact([0.0, 0.0]);
         };
-        let layout = shape(font_ctx, &content.0, self.font_size, constraints.max_width());
-        [
-            layout.total_width.clamp(constraints.min_width(), constraints.max_width()),
-            layout.total_height.clamp(constraints.min_height(), constraints.max_height()),
-        ]
+        let layout = shape(font_ctx, &content.0, self.font_size, inner.max_width());
+
+        // Reports no width range, unlike `RichText`. parley hands that widget
+        // its min/max-content widths off the layout it already built, whereas
+        // suzuri/fontdue has no such API: deriving the pair here would mean
+        // two extra full shaping passes per measure, on the widget that has
+        // no shape cache at all and is kept as the reference/fallback
+        // implementation. A `Text` in a shrinking row therefore will not go
+        // below the width it wrapped to; `RichText` will.
+        let shaped = [layout.total_width, layout.total_height];
+        sizing.measured(constraints, Measured::exact(shaped))
     }
 
     fn arrange(&self, ctx: &mut LayoutCtx, me: Entity, size: [f32; 2]) {
@@ -320,6 +282,7 @@ impl Layout for TextStyle {
 /// A word-wrapped text block of fixed style, sized to its shaped content.
 pub struct Text {
     key: Key,
+    sizing: Sizing,
     content: String,
     font_size: f32,
     color: [f32; 4],
@@ -332,6 +295,7 @@ impl Text {
     pub fn new(content: impl Into<String>) -> Self {
         Self {
             key: Key::Auto,
+            sizing: Sizing::default(),
             content: content.into(),
             font_size: 16.0,
             color: [0.0, 0.0, 0.0, 1.0],
@@ -339,6 +303,8 @@ impl Text {
             exit_fade: None,
         }
     }
+
+    crate::sizing_builders!();
 
     pub fn key(mut self, key: impl Into<Key>) -> Self {
         self.key = key.into();
@@ -402,9 +368,9 @@ impl Widget for Text {
             TextContent(self.content.clone()),
             self.style(),
             TextWrapWidth::new(),
+            self.sizing,
             LayoutDispatch::of::<TextStyle>(),
-            Target(Opacity(1.0)),
-            Animated(Opacity(initial_opacity)),
+            RenderOpacity(initial_opacity),
         )
     }
 
@@ -413,23 +379,21 @@ impl Widget for Text {
         entity.insert(item);
 
         if let Some((duration, easing)) = self.enter_fade {
-            entity.insert(Tween::<Opacity> {
-                from: Opacity(0.0),
+            entity.insert(OpacityTween {
+                from: 0.0,
+                to: 1.0,
                 start: web_time::Instant::now(),
                 duration,
                 easing,
             });
         }
         if let Some((duration, easing)) = self.exit_fade {
-            entity.insert(ExitTransition::<Opacity> {
-                to: Opacity(0.0),
-                duration,
-                easing,
-            });
+            entity.insert((ManualDespawn::new(), ExitFade { duration, easing }));
         }
     }
 
     fn patch(&self, entity: &mut EntityWorldMut) {
+        self.sync_sizing(entity);
         let mut changed = false;
         if let Some(mut c) = entity.get_mut::<TextContent>() {
             changed |= c.set_if_neq(TextContent(self.content.clone()));
@@ -444,22 +408,17 @@ impl Widget for Text {
             }
         }
 
-        // Revival (M7): see `ColorRect::patch` for the identical reasoning.
-        if entity.get::<ToBeDespawn>().is_some() {
-            if let Some(exit) = entity.get::<ExitTransition<Opacity>>().copied() {
-                let current = entity
-                    .get::<Animated<Opacity>>()
-                    .copied()
-                    .unwrap_or(Animated(Opacity(1.0)));
-                entity.insert((
-                    Target(Opacity(1.0)),
-                    Tween::<Opacity> {
-                        from: current.0,
-                        start: web_time::Instant::now(),
-                        duration: exit.duration,
-                        easing: exit.easing,
-                    },
-                ));
+        // Revival: see `ColorRect::patch` for the identical reasoning.
+        if entity.get::<ManualDespawn>().is_some_and(|m| m.is_pruned()) {
+            if let Some(exit) = entity.get::<ExitFade>().copied() {
+                let current = entity.get::<RenderOpacity>().copied().unwrap_or_default();
+                entity.insert(OpacityTween {
+                    from: current.0,
+                    to: 1.0,
+                    start: web_time::Instant::now(),
+                    duration: exit.duration,
+                    easing: exit.easing,
+                });
             }
         }
     }
@@ -491,8 +450,7 @@ mod tests {
         layout_root(&mut world, root, Constraints::from_max_size([123.0, 456.0]));
 
         let child = world.get::<ViewChildren>(root).unwrap().slots[0].1;
-        let stored_width = world.get::<TextWrapWidth>(child).unwrap().0.load(Ordering::Relaxed);
-        let stored_width = f32::from_bits(stored_width);
+        let stored_width = world.get::<TextWrapWidth>(child).unwrap().0.get();
 
         let out = world.get::<matcha_ecs::components::layout::LayoutOutput>(child).unwrap();
         assert_eq!(

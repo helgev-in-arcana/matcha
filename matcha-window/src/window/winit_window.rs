@@ -33,7 +33,7 @@ impl WindowSurface {
     ) -> Result<Self, WindowSurfaceError> {
         let window = event_loop
             .create_window(config.to_winit_attributes())
-            .map_err(WindowSurfaceError::CreateWindow)?;
+            .map_err(|e| WindowSurfaceError::CreateWindow(e.to_string()))?;
 
         Ok(Self::from_native(
             Box::new(WinitWindow(Arc::new(window))),
@@ -183,6 +183,44 @@ impl NativeWindow for WinitWindow {
 
     fn request_redraw(&self) {
         self.0.request_redraw();
+    }
+
+    fn set_cursor_icon(&self, icon: super::CursorIcon) {
+        use super::CursorIcon as C;
+        use winit::window::CursorIcon as W;
+        match icon {
+            C::Hidden => self.0.set_cursor_visible(false),
+            other => {
+                self.0.set_cursor_visible(true);
+                self.0.set_cursor(match other {
+                    C::Default | C::Hidden => W::Default,
+                    C::Pointer => W::Pointer,
+                    C::Text => W::Text,
+                    C::Progress => W::Progress,
+                    C::Wait => W::Wait,
+                    C::Crosshair => W::Crosshair,
+                    C::Move => W::Move,
+                    C::Grab => W::Grab,
+                    C::Grabbing => W::Grabbing,
+                    C::NotAllowed => W::NotAllowed,
+                    C::ResizeHorizontal => W::EwResize,
+                    C::ResizeVertical => W::NsResize,
+                    C::ResizeNeSw => W::NeswResize,
+                    C::ResizeNwSe => W::NwseResize,
+                });
+            }
+        }
+    }
+
+    fn set_ime_allowed(&self, allowed: bool) {
+        self.0.set_ime_allowed(allowed);
+    }
+
+    fn set_ime_cursor_area(&self, position: [f32; 2], size: [f32; 2]) {
+        self.0.set_ime_cursor_area(
+            winit::dpi::PhysicalPosition::new(position[0], position[1]),
+            winit::dpi::PhysicalSize::new(size[0], size[1]),
+        );
     }
 
     fn create_wgpu_surface(
