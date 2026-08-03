@@ -51,10 +51,9 @@ default = ["winit"]
 winit = ["dep:winit"]
 baseview = ["dep:baseview"]
 # Additive (NOT a third exclusive backend): in-memory windows + a test-driven
-# event loop for headless tests. Implies `winit` because the crate's common
-# event types re-export winit keyboard types. Enabled by downstream
-# dev-dependencies only, so normal builds are unaffected.
-headless = ["winit"]
+# event loop for headless tests. Does not require `winit` -- builds and passes
+# its own test suite with `winit` fully disabled.
+headless = []
 
 [[test]]
 name = "headless"
