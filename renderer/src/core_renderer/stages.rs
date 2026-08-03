@@ -21,6 +21,7 @@
 use log::warn;
 
 use super::FrameParams;
+use super::frame_params::{FrameParamsBinding, prepare_wgsl};
 
 /// Threads per workgroup for the simple one-thread-per-instance stages
 /// (visibility test, scatter). Must match `@workgroup_size` in
@@ -43,11 +44,17 @@ const WGSL_COMMAND: &str = include_str!("renderer_command.wgsl");
 /// Every stage receives the whole [`FrameParams`] block and reads the fields it
 /// cares about — see that type for why there is one shared block rather than a
 /// tailored struct per stage.
-pub(crate) trait ComputeStage: Send + Sync {
+///
+/// The bound is `MaybeSendSync` rather than `Send + Sync` because wgpu's types
+/// are neither on wasm, where there is only the one thread to begin with. It
+/// still means `Send + Sync` natively, where the renderer really is shared
+/// across the render thread.
+pub(crate) trait ComputeStage: utils::MaybeSendSync {
     fn encode(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         data_bind_group: &wgpu::BindGroup,
+        params_binding: &FrameParamsBinding,
         params: &FrameParams,
     );
 }
@@ -58,12 +65,13 @@ fn create_compute_pipeline(
     module: &wgpu::ShaderModule,
     entry_point: &str,
     bind_group_layouts: &[Option<&wgpu::BindGroupLayout>],
-    immediate_size: u32,
+    params_binding: &FrameParamsBinding,
 ) -> wgpu::ComputePipeline {
+    let layouts = params_binding.extend_layouts(bind_group_layouts);
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(&format!("{label} Layout")),
-        bind_group_layouts,
-        immediate_size,
+        bind_group_layouts: &layouts,
+        immediate_size: params_binding.immediate_size(),
     });
     device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some(label),
@@ -92,10 +100,14 @@ pub(crate) struct VisibilityStage {
 }
 
 impl VisibilityStage {
-    pub fn new(device: &wgpu::Device, data_bind_group_layout: &wgpu::BindGroupLayout) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        data_bind_group_layout: &wgpu::BindGroupLayout,
+        params_binding: &FrameParamsBinding,
+    ) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Visibility Shader"),
-            source: wgpu::ShaderSource::Wgsl(WGSL_CULL.into()),
+            source: wgpu::ShaderSource::Wgsl(prepare_wgsl(WGSL_CULL)),
         });
         let pipeline = create_compute_pipeline(
             device,
@@ -103,7 +115,7 @@ impl VisibilityStage {
             &module,
             "culling_main",
             &[Some(data_bind_group_layout)],
-            std::mem::size_of::<FrameParams>() as u32,
+            params_binding,
         );
         Self { pipeline }
     }
@@ -114,6 +126,7 @@ impl ComputeStage for VisibilityStage {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         data_bind_group: &wgpu::BindGroup,
+        params_binding: &FrameParamsBinding,
         params: &FrameParams,
     ) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -122,7 +135,7 @@ impl ComputeStage for VisibilityStage {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, data_bind_group, &[]);
-        pass.set_immediates(0, bytemuck::bytes_of(params));
+        params_binding.set_compute(&mut pass, params);
         pass.dispatch_workgroups(
             params.instance_count.div_ceil(COMPUTE_WORKGROUP_SIZE),
             1,
@@ -144,10 +157,14 @@ pub(crate) struct SingleThreadPrefixSumStage {
 }
 
 impl SingleThreadPrefixSumStage {
-    pub fn new(device: &wgpu::Device, data_bind_group_layout: &wgpu::BindGroupLayout) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        data_bind_group_layout: &wgpu::BindGroupLayout,
+        params_binding: &FrameParamsBinding,
+    ) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Prefix Sum Shader (single thread)"),
-            source: wgpu::ShaderSource::Wgsl(WGSL_PREFIX_SUM_SINGLE_THREAD.into()),
+            source: wgpu::ShaderSource::Wgsl(prepare_wgsl(WGSL_PREFIX_SUM_SINGLE_THREAD)),
         });
         let pipeline = create_compute_pipeline(
             device,
@@ -155,7 +172,7 @@ impl SingleThreadPrefixSumStage {
             &module,
             "prefix_sum_main",
             &[Some(data_bind_group_layout)],
-            std::mem::size_of::<FrameParams>() as u32,
+            params_binding,
         );
         Self { pipeline }
     }
@@ -166,6 +183,7 @@ impl ComputeStage for SingleThreadPrefixSumStage {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         data_bind_group: &wgpu::BindGroup,
+        params_binding: &FrameParamsBinding,
         params: &FrameParams,
     ) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -174,7 +192,7 @@ impl ComputeStage for SingleThreadPrefixSumStage {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, data_bind_group, &[]);
-        pass.set_immediates(0, bytemuck::bytes_of(params));
+        params_binding.set_compute(&mut pass, params);
         pass.dispatch_workgroups(1, 1, 1);
     }
 }
@@ -202,7 +220,11 @@ pub(crate) struct BlellochPrefixSumStage {
 }
 
 impl BlellochPrefixSumStage {
-    pub fn new(device: &wgpu::Device, data_bind_group_layout: &wgpu::BindGroupLayout) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        data_bind_group_layout: &wgpu::BindGroupLayout,
+        params_binding: &FrameParamsBinding,
+    ) -> Self {
         let block_sums_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Blelloch Block Sums Bind Group Layout"),
@@ -236,20 +258,19 @@ impl BlellochPrefixSumStage {
 
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Prefix Sum Shader (Blelloch)"),
-            source: wgpu::ShaderSource::Wgsl(WGSL_PREFIX_SUM_BLELLOCH.into()),
+            source: wgpu::ShaderSource::Wgsl(prepare_wgsl(WGSL_PREFIX_SUM_BLELLOCH)),
         });
         let layouts = [
             Some(data_bind_group_layout),
             Some(&block_sums_bind_group_layout),
         ];
-        let immediate_size = std::mem::size_of::<FrameParams>() as u32;
         let scan_blocks_pipeline = create_compute_pipeline(
             device,
             "Blelloch Scan Blocks Pipeline",
             &module,
             "scan_blocks",
             &layouts,
-            immediate_size,
+            params_binding,
         );
         let scan_block_sums_pipeline = create_compute_pipeline(
             device,
@@ -257,7 +278,7 @@ impl BlellochPrefixSumStage {
             &module,
             "scan_block_sums",
             &layouts,
-            immediate_size,
+            params_binding,
         );
         let add_block_offsets_pipeline = create_compute_pipeline(
             device,
@@ -265,7 +286,7 @@ impl BlellochPrefixSumStage {
             &module,
             "add_block_offsets",
             &layouts,
-            immediate_size,
+            params_binding,
         );
 
         Self {
@@ -273,7 +294,11 @@ impl BlellochPrefixSumStage {
             scan_block_sums_pipeline,
             add_block_offsets_pipeline,
             block_sums_bind_group,
-            fallback: SingleThreadPrefixSumStage::new(device, data_bind_group_layout),
+            fallback: SingleThreadPrefixSumStage::new(
+                device,
+                data_bind_group_layout,
+                params_binding,
+            ),
         }
     }
 }
@@ -283,6 +308,7 @@ impl ComputeStage for BlellochPrefixSumStage {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         data_bind_group: &wgpu::BindGroup,
+        params_binding: &FrameParamsBinding,
         params: &FrameParams,
     ) {
         if params.instance_count > BLELLOCH_MAX_ELEMENTS {
@@ -291,7 +317,8 @@ impl ComputeStage for BlellochPrefixSumStage {
                  falling back to the single-thread scan",
                 params.instance_count, BLELLOCH_MAX_ELEMENTS
             );
-            self.fallback.encode(encoder, data_bind_group, params);
+            self.fallback
+                .encode(encoder, data_bind_group, params_binding, params);
             return;
         }
 
@@ -307,15 +334,15 @@ impl ComputeStage for BlellochPrefixSumStage {
         // All three dispatches read the same block, so the web path can back
         // this with a single uniform buffer written once per frame.
         pass.set_pipeline(&self.scan_blocks_pipeline);
-        pass.set_immediates(0, bytemuck::bytes_of(params));
+        params_binding.set_compute(&mut pass, params);
         pass.dispatch_workgroups(num_blocks, 1, 1);
 
         pass.set_pipeline(&self.scan_block_sums_pipeline);
-        pass.set_immediates(0, bytemuck::bytes_of(params));
+        params_binding.set_compute(&mut pass, params);
         pass.dispatch_workgroups(1, 1, 1);
 
         pass.set_pipeline(&self.add_block_offsets_pipeline);
-        pass.set_immediates(0, bytemuck::bytes_of(params));
+        params_binding.set_compute(&mut pass, params);
         // One thread per element here (unlike scan_blocks' two per thread).
         pass.dispatch_workgroups(params.instance_count.div_ceil(256), 1, 1);
     }
@@ -333,10 +360,14 @@ pub(crate) struct ScatterStage {
 }
 
 impl ScatterStage {
-    pub fn new(device: &wgpu::Device, data_bind_group_layout: &wgpu::BindGroupLayout) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        data_bind_group_layout: &wgpu::BindGroupLayout,
+        params_binding: &FrameParamsBinding,
+    ) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Scatter Shader"),
-            source: wgpu::ShaderSource::Wgsl(WGSL_SCATTER.into()),
+            source: wgpu::ShaderSource::Wgsl(prepare_wgsl(WGSL_SCATTER)),
         });
         let pipeline = create_compute_pipeline(
             device,
@@ -344,7 +375,7 @@ impl ScatterStage {
             &module,
             "scatter_main",
             &[Some(data_bind_group_layout)],
-            std::mem::size_of::<FrameParams>() as u32,
+            params_binding,
         );
         Self { pipeline }
     }
@@ -355,6 +386,7 @@ impl ComputeStage for ScatterStage {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         data_bind_group: &wgpu::BindGroup,
+        params_binding: &FrameParamsBinding,
         params: &FrameParams,
     ) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -363,7 +395,7 @@ impl ComputeStage for ScatterStage {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, data_bind_group, &[]);
-        pass.set_immediates(0, bytemuck::bytes_of(params));
+        params_binding.set_compute(&mut pass, params);
         pass.dispatch_workgroups(
             params.instance_count.div_ceil(COMPUTE_WORKGROUP_SIZE),
             1,
@@ -383,10 +415,14 @@ pub(crate) struct CommandStage {
 }
 
 impl CommandStage {
-    pub fn new(device: &wgpu::Device, data_bind_group_layout: &wgpu::BindGroupLayout) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        data_bind_group_layout: &wgpu::BindGroupLayout,
+        params_binding: &FrameParamsBinding,
+    ) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Command Shader"),
-            source: wgpu::ShaderSource::Wgsl(WGSL_COMMAND.into()),
+            source: wgpu::ShaderSource::Wgsl(prepare_wgsl(WGSL_COMMAND)),
         });
         let pipeline = create_compute_pipeline(
             device,
@@ -394,7 +430,10 @@ impl CommandStage {
             &module,
             "command_main",
             &[Some(data_bind_group_layout)],
-            0,
+            // `renderer_command.wgsl` reads no parameters, but the binding is
+            // still declared and bound: on the uniform path every group in a
+            // pipeline layout must have a bind group set before dispatch.
+            params_binding,
         );
         Self { pipeline }
     }
@@ -405,7 +444,8 @@ impl ComputeStage for CommandStage {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         data_bind_group: &wgpu::BindGroup,
-        _params: &FrameParams,
+        params_binding: &FrameParamsBinding,
+        params: &FrameParams,
     ) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("ObjectRenderer: Command Pass"),
@@ -413,6 +453,7 @@ impl ComputeStage for CommandStage {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, data_bind_group, &[]);
+        params_binding.set_compute(&mut pass, params);
         pass.dispatch_workgroups(1, 1, 1);
     }
 }
@@ -440,6 +481,7 @@ mod tests {
         device: wgpu::Device,
         queue: wgpu::Queue,
         data_bind_group_layout: wgpu::BindGroupLayout,
+        params_binding: FrameParamsBinding,
     }
 
     fn test_gpu() -> Option<TestGpu> {
@@ -449,10 +491,12 @@ mod tests {
         .ok()?;
         let (device, queue) = gpu.context()?;
         let data_bind_group_layout = crate::core_renderer::create_data_bind_group_layout(&device);
+        let params_binding = FrameParamsBinding::new(&device);
         Some(TestGpu {
             device,
             queue,
             data_bind_group_layout,
+            params_binding,
         })
     }
 
@@ -591,8 +635,11 @@ mod tests {
             instance_count: n as u32,
             ..Default::default()
         };
+        // Mirrors what `render_instances` does once per frame. Required on the
+        // uniform path, a no-op on the immediate path.
+        gpu.params_binding.write(&gpu.queue, &params);
         for stage in stages {
-            stage.encode(&mut encoder, &data_bind_group, &params);
+            stage.encode(&mut encoder, &data_bind_group, &gpu.params_binding, &params);
         }
         encoder.copy_buffer_to_buffer(&offsets_buffer, 0, &readback_offsets, 0, flags_bytes);
         encoder.copy_buffer_to_buffer(&counter, 0, &readback_count, 0, u32_size);
@@ -662,7 +709,7 @@ mod tests {
             eprintln!("skipping: no real GPU adapter available");
             return;
         };
-        let stage = SingleThreadPrefixSumStage::new(&gpu.device, &gpu.data_bind_group_layout);
+        let stage = SingleThreadPrefixSumStage::new(&gpu.device, &gpu.data_bind_group_layout, &gpu.params_binding);
         check_stage_against_cpu(&gpu, &stage, "single-thread scan");
     }
 
@@ -672,7 +719,7 @@ mod tests {
             eprintln!("skipping: no real GPU adapter available");
             return;
         };
-        let stage = BlellochPrefixSumStage::new(&gpu.device, &gpu.data_bind_group_layout);
+        let stage = BlellochPrefixSumStage::new(&gpu.device, &gpu.data_bind_group_layout, &gpu.params_binding);
         check_stage_against_cpu(&gpu, &stage, "Blelloch scan");
     }
 
@@ -686,8 +733,8 @@ mod tests {
             eprintln!("skipping: no real GPU adapter available");
             return;
         };
-        let scan = BlellochPrefixSumStage::new(&gpu.device, &gpu.data_bind_group_layout);
-        let scatter = ScatterStage::new(&gpu.device, &gpu.data_bind_group_layout);
+        let scan = BlellochPrefixSumStage::new(&gpu.device, &gpu.data_bind_group_layout, &gpu.params_binding);
+        let scatter = ScatterStage::new(&gpu.device, &gpu.data_bind_group_layout, &gpu.params_binding);
         for n in [1usize, 64, 511, 513, 1000, 70_000] {
             let flags = random_flags(n, n as u32 | 1);
             let (_, count, visible) = run_stages(&gpu, &[&scan, &scatter], &flags);
@@ -856,7 +903,7 @@ mod tests {
             mapped_at_creation: false,
         });
 
-        let stage = VisibilityStage::new(device, &gpu.data_bind_group_layout);
+        let stage = VisibilityStage::new(device, &gpu.data_bind_group_layout, &gpu.params_binding);
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         let params = FrameParams {
@@ -864,7 +911,8 @@ mod tests {
             instance_count: n as u32,
             ..Default::default()
         };
-        stage.encode(&mut encoder, &data_bind_group, &params);
+        gpu.params_binding.write(&gpu.queue, &params);
+        stage.encode(&mut encoder, &data_bind_group, &gpu.params_binding, &params);
         encoder.copy_buffer_to_buffer(&flags_buffer, 0, &readback, 0, flags_bytes);
         gpu.queue.submit(std::iter::once(encoder.finish()));
 

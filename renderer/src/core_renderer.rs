@@ -7,6 +7,9 @@ use gpu_utils::texture_atlas;
 use texture_atlas::RegionError;
 use thiserror::Error;
 
+mod frame_params;
+use frame_params::{FrameParamsBinding, prepare_wgsl};
+
 mod stages;
 use stages::{
     BlellochPrefixSumStage, CommandStage, ComputeStage, ScatterStage,
@@ -330,6 +333,10 @@ pub struct CoreRendererInner {
     /// [`create_render_data_bind_group_layout`].
     render_data_bind_group_layout: wgpu::BindGroupLayout,
 
+    /// How [`FrameParams`] reaches the shaders — immediates natively, a uniform
+    /// buffer on the web. See `frame_params.rs`.
+    params_binding: FrameParamsBinding,
+
     // Pipeline Layouts
     render_pipeline_layout: wgpu::PipelineLayout,
     render_pipeline_shader_module: wgpu::ShaderModule,
@@ -552,14 +559,31 @@ impl CoreRendererInner {
 
         let data_bind_group_layout = create_data_bind_group_layout(device);
         let render_data_bind_group_layout = create_render_data_bind_group_layout(device);
+        let params_binding = FrameParamsBinding::new(device);
 
         let compaction_stages: Vec<Box<dyn ComputeStage>> = vec![
-            Box::new(VisibilityStage::new(device, &data_bind_group_layout)),
+            Box::new(VisibilityStage::new(
+                device,
+                &data_bind_group_layout,
+                &params_binding,
+            )),
             // Swap the scan algorithm by constructing a different stage here
             // (e.g. `SingleThreadPrefixSumStage` as the naive reference).
-            Box::new(BlellochPrefixSumStage::new(device, &data_bind_group_layout)),
-            Box::new(ScatterStage::new(device, &data_bind_group_layout)),
-            Box::new(CommandStage::new(device, &data_bind_group_layout)),
+            Box::new(BlellochPrefixSumStage::new(
+                device,
+                &data_bind_group_layout,
+                &params_binding,
+            )),
+            Box::new(ScatterStage::new(
+                device,
+                &data_bind_group_layout,
+                &params_binding,
+            )),
+            Box::new(CommandStage::new(
+                device,
+                &data_bind_group_layout,
+                &params_binding,
+            )),
         ];
 
         let (render_pipeline_layout, render_pipeline_shader_module) =
@@ -567,6 +591,7 @@ impl CoreRendererInner {
                 device,
                 &texture_bind_group_layout,
                 &render_data_bind_group_layout,
+                &params_binding,
             );
         trace!("CoreRenderer::new: pipeline layouts created");
 
@@ -600,6 +625,7 @@ impl CoreRendererInner {
             texture_bind_group_layout,
             data_bind_group_layout,
             render_data_bind_group_layout,
+            params_binding,
             render_pipeline_layout,
             render_pipeline_shader_module,
             compaction_stages,
@@ -614,20 +640,22 @@ impl CoreRendererInner {
         device: &wgpu::Device,
         texture_bind_group_layout: &wgpu::BindGroupLayout,
         data_bind_group_layout: &wgpu::BindGroupLayout,
+        params_binding: &FrameParamsBinding,
     ) -> (wgpu::PipelineLayout, wgpu::ShaderModule) {
         trace!("CoreRenderer::create_render_pipeline_layout: creating pipeline layout");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Render Shader"),
-            source: wgpu::ShaderSource::Wgsl(WGSL_RENDER.into()),
+            source: wgpu::ShaderSource::Wgsl(prepare_wgsl(WGSL_RENDER)),
         });
 
+        let layouts = params_binding.extend_layouts(&[
+            Some(texture_bind_group_layout),
+            Some(data_bind_group_layout),
+        ]);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[
-                Some(texture_bind_group_layout),
-                Some(data_bind_group_layout),
-            ],
-            immediate_size: std::mem::size_of::<FrameParams>() as u32,
+            bind_group_layouts: &layouts,
+            immediate_size: params_binding.immediate_size(),
         });
 
         (pipeline_layout, module)
@@ -1006,12 +1034,21 @@ impl CoreRendererInner {
                 0.5 / stencil_atlas_size.height as f32,
             ],
         };
+        // Once per frame, before any encoding: on the uniform path every pass
+        // below reads this one buffer, so there is nothing to alias within the
+        // submit. A no-op on the immediate path.
+        self.params_binding.write(queue, &frame_params);
 
         // Compaction pipeline: visibility -> prefix sum -> scatter -> command.
         // The stages together produce an order-preserving compaction of the
         // instance indices in `visible_instances` plus the indirect draw args.
         for stage in &self.compaction_stages {
-            stage.encode(&mut command_encoder, &data_bind_group, &frame_params);
+            stage.encode(
+                &mut command_encoder,
+                &data_bind_group,
+                &self.params_binding,
+                &frame_params,
+            );
         }
         trace!("CoreRenderer::render: compaction stages dispatched");
 
@@ -1045,7 +1082,8 @@ impl CoreRendererInner {
             render_pass.set_pipeline(render_pipeline.as_ref());
             render_pass.set_bind_group(0, &texture_bind_group, &[]);
             render_pass.set_bind_group(1, &render_data_bind_group, &[]);
-            render_pass.set_immediates(0, bytemuck::bytes_of(&frame_params));
+            self.params_binding
+                .set_render(&mut render_pass, &frame_params);
             render_pass.draw_indirect(&self.draw_command, 0);
         }
         trace!("CoreRenderer::render: render pass completed");

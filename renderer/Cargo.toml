@@ -22,6 +22,14 @@ parking_lot.workspace = true
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 moka.workspace = true
 
+[features]
+# Carry the per-frame parameter block in a uniform buffer instead of immediates.
+# Implied by a wasm build (WebGPU has no push constants); exposed as a feature so
+# the exact same code path — shader rewrite, bind group index, buffer size,
+# uniform layout rules — can be exercised on a real desktop GPU, without a
+# browser. See `core_renderer/frame_params.rs` and `tests/uniform_params.rs`.
+uniform-params = []
+
 [dev-dependencies]
 futures = { workspace = true }
 
