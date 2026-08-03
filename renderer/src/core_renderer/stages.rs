@@ -20,6 +20,8 @@
 
 use log::warn;
 
+use super::FrameParams;
+
 /// Threads per workgroup for the simple one-thread-per-instance stages
 /// (visibility test, scatter). Must match `@workgroup_size` in
 /// `renderer_cull.wgsl` and `renderer_scatter.wgsl`.
@@ -32,43 +34,22 @@ const WGSL_PREFIX_SUM_SINGLE_THREAD: &str =
 const WGSL_SCATTER: &str = include_str!("renderer_scatter.wgsl");
 const WGSL_COMMAND: &str = include_str!("renderer_command.wgsl");
 
-/// Per-frame parameters shared by all compute stages. Each stage picks what it
-/// needs and packs its own immediates from these.
-pub(crate) struct StageParams {
-    pub normalize_matrix: nalgebra::Matrix4<f32>,
-    pub instance_count: u32,
-}
-
 /// One compute stage of the compaction pipeline. Implementations own their
 /// pipeline(s) and any internal resources, and record their dispatches into
 /// the frame's command encoder. Stages run in the order they are stored in
 /// `CoreRendererInner::compaction_stages`; wgpu inserts the storage-buffer
 /// barriers between dispatches.
+///
+/// Every stage receives the whole [`FrameParams`] block and reads the fields it
+/// cares about — see that type for why there is one shared block rather than a
+/// tailored struct per stage.
 pub(crate) trait ComputeStage: Send + Sync {
     fn encode(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         data_bind_group: &wgpu::BindGroup,
-        params: &StageParams,
+        params: &FrameParams,
     );
-}
-
-/// Immediates for [`VisibilityStage`]. Layout must match `Pc` in
-/// `renderer_cull.wgsl`.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct VisibilityPushConstants {
-    normalize_matrix: nalgebra::Matrix4<f32>,
-    instance_count: u32,
-    _pad: [u32; 3],
-}
-
-/// Immediates for the prefix-sum and scatter stages. Layout must match `Pc`
-/// in the corresponding WGSL files.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct InstanceCountPushConstants {
-    instance_count: u32,
 }
 
 fn create_compute_pipeline(
@@ -122,7 +103,7 @@ impl VisibilityStage {
             &module,
             "culling_main",
             &[Some(data_bind_group_layout)],
-            std::mem::size_of::<VisibilityPushConstants>() as u32,
+            std::mem::size_of::<FrameParams>() as u32,
         );
         Self { pipeline }
     }
@@ -133,20 +114,15 @@ impl ComputeStage for VisibilityStage {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         data_bind_group: &wgpu::BindGroup,
-        params: &StageParams,
+        params: &FrameParams,
     ) {
-        let pc = VisibilityPushConstants {
-            normalize_matrix: params.normalize_matrix,
-            instance_count: params.instance_count,
-            _pad: [0; 3],
-        };
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("ObjectRenderer: Visibility Pass"),
             timestamp_writes: None,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, data_bind_group, &[]);
-        pass.set_immediates(0, bytemuck::bytes_of(&pc));
+        pass.set_immediates(0, bytemuck::bytes_of(params));
         pass.dispatch_workgroups(
             params.instance_count.div_ceil(COMPUTE_WORKGROUP_SIZE),
             1,
@@ -179,7 +155,7 @@ impl SingleThreadPrefixSumStage {
             &module,
             "prefix_sum_main",
             &[Some(data_bind_group_layout)],
-            std::mem::size_of::<InstanceCountPushConstants>() as u32,
+            std::mem::size_of::<FrameParams>() as u32,
         );
         Self { pipeline }
     }
@@ -190,18 +166,15 @@ impl ComputeStage for SingleThreadPrefixSumStage {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         data_bind_group: &wgpu::BindGroup,
-        params: &StageParams,
+        params: &FrameParams,
     ) {
-        let pc = InstanceCountPushConstants {
-            instance_count: params.instance_count,
-        };
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("ObjectRenderer: Prefix Sum Pass (single thread)"),
             timestamp_writes: None,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, data_bind_group, &[]);
-        pass.set_immediates(0, bytemuck::bytes_of(&pc));
+        pass.set_immediates(0, bytemuck::bytes_of(params));
         pass.dispatch_workgroups(1, 1, 1);
     }
 }
@@ -269,7 +242,7 @@ impl BlellochPrefixSumStage {
             Some(data_bind_group_layout),
             Some(&block_sums_bind_group_layout),
         ];
-        let immediate_size = std::mem::size_of::<InstanceCountPushConstants>() as u32;
+        let immediate_size = std::mem::size_of::<FrameParams>() as u32;
         let scan_blocks_pipeline = create_compute_pipeline(
             device,
             "Blelloch Scan Blocks Pipeline",
@@ -310,7 +283,7 @@ impl ComputeStage for BlellochPrefixSumStage {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         data_bind_group: &wgpu::BindGroup,
-        params: &StageParams,
+        params: &FrameParams,
     ) {
         if params.instance_count > BLELLOCH_MAX_ELEMENTS {
             warn!(
@@ -322,9 +295,6 @@ impl ComputeStage for BlellochPrefixSumStage {
             return;
         }
 
-        let pc = InstanceCountPushConstants {
-            instance_count: params.instance_count,
-        };
         let num_blocks = params.instance_count.div_ceil(BLELLOCH_BLOCK_ELEMENTS);
 
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -334,16 +304,18 @@ impl ComputeStage for BlellochPrefixSumStage {
         pass.set_bind_group(0, data_bind_group, &[]);
         pass.set_bind_group(1, &self.block_sums_bind_group, &[]);
 
+        // All three dispatches read the same block, so the web path can back
+        // this with a single uniform buffer written once per frame.
         pass.set_pipeline(&self.scan_blocks_pipeline);
-        pass.set_immediates(0, bytemuck::bytes_of(&pc));
+        pass.set_immediates(0, bytemuck::bytes_of(params));
         pass.dispatch_workgroups(num_blocks, 1, 1);
 
         pass.set_pipeline(&self.scan_block_sums_pipeline);
-        pass.set_immediates(0, bytemuck::bytes_of(&pc));
+        pass.set_immediates(0, bytemuck::bytes_of(params));
         pass.dispatch_workgroups(1, 1, 1);
 
         pass.set_pipeline(&self.add_block_offsets_pipeline);
-        pass.set_immediates(0, bytemuck::bytes_of(&pc));
+        pass.set_immediates(0, bytemuck::bytes_of(params));
         // One thread per element here (unlike scan_blocks' two per thread).
         pass.dispatch_workgroups(params.instance_count.div_ceil(256), 1, 1);
     }
@@ -372,7 +344,7 @@ impl ScatterStage {
             &module,
             "scatter_main",
             &[Some(data_bind_group_layout)],
-            std::mem::size_of::<InstanceCountPushConstants>() as u32,
+            std::mem::size_of::<FrameParams>() as u32,
         );
         Self { pipeline }
     }
@@ -383,18 +355,15 @@ impl ComputeStage for ScatterStage {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         data_bind_group: &wgpu::BindGroup,
-        params: &StageParams,
+        params: &FrameParams,
     ) {
-        let pc = InstanceCountPushConstants {
-            instance_count: params.instance_count,
-        };
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("ObjectRenderer: Scatter Pass"),
             timestamp_writes: None,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, data_bind_group, &[]);
-        pass.set_immediates(0, bytemuck::bytes_of(&pc));
+        pass.set_immediates(0, bytemuck::bytes_of(params));
         pass.dispatch_workgroups(
             params.instance_count.div_ceil(COMPUTE_WORKGROUP_SIZE),
             1,
@@ -436,7 +405,7 @@ impl ComputeStage for CommandStage {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         data_bind_group: &wgpu::BindGroup,
-        _params: &StageParams,
+        _params: &FrameParams,
     ) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("ObjectRenderer: Command Pass"),
@@ -617,9 +586,10 @@ mod tests {
 
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        let params = StageParams {
+        let params = FrameParams {
             normalize_matrix: nalgebra::Matrix4::identity(),
             instance_count: n as u32,
+            ..Default::default()
         };
         for stage in stages {
             stage.encode(&mut encoder, &data_bind_group, &params);
@@ -889,9 +859,10 @@ mod tests {
         let stage = VisibilityStage::new(device, &gpu.data_bind_group_layout);
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        let params = StageParams {
+        let params = FrameParams {
             normalize_matrix: make_normalize_matrix(viewport),
             instance_count: n as u32,
+            ..Default::default()
         };
         stage.encode(&mut encoder, &data_bind_group, &params);
         encoder.copy_buffer_to_buffer(&flags_buffer, 0, &readback, 0, flags_bytes);

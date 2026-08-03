@@ -90,15 +90,24 @@ struct VertexOutput {
 
 @group(1) @binding(0) var<storage, read> all_instances: array<InstanceData>;
 @group(1) @binding(1) var<storage, read> all_masks: array<MaskData>;
-@group(1) @binding(2) var<storage, read_write> visible_instances: array<u32>;
+// Written by the compaction stages, only ever read here — declaring it
+// `read_write` would demand `VERTEX_WRITABLE_STORAGE`, which WebGPU lacks.
+@group(1) @binding(2) var<storage, read> visible_instances: array<u32>;
 @group(1) @binding(7) var<storage, read> mask_indices: array<u32>;
 
-// Half a texel, in normalized UV units, for each atlas — see the Rust-side
-// `RenderPushConstants` doc comment for why the fragment shader needs this
-// (avoiding bilinear bleed with the zero-initialised margin just outside
-// each atlas region's usable rectangle).
+// Per-frame parameters, shared verbatim by every pipeline in the core renderer.
+// Must match `FrameParams` in `core_renderer.rs` exactly, and must stay
+// identical across all five shaders that declare it — see that type's doc
+// comment. Unused fields here are read by the compaction stages.
+//
+// Pad with scalar u32s only: `vec3<u32>` has alignment 16 in WGSL and would
+// silently grow this struct past the Rust side's 96 bytes.
 struct Pc {
     normalize_matrix: mat4x4<f32>,
+    instance_count: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
     texture_atlas_half_texel: vec2<f32>,
     stencil_atlas_half_texel: vec2<f32>,
 };
