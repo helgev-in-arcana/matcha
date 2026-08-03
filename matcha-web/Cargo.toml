@@ -1,0 +1,38 @@
+[package]
+name = "matcha-web"
+version = { workspace = true }
+edition = "2024"
+publish = false
+
+# A binary, not an example, for two reasons: Trunk builds `--bin`, and examples
+# pull matcha-ecs's dev-dependencies (env_logger) into the graph, which is dead
+# weight in a wasm bundle.
+[[bin]]
+name = "matcha-web"
+path = "src/main.rs"
+
+[dependencies]
+matcha-ecs = { workspace = true }
+matcha-ecs-widgets = { workspace = true }
+matcha-window = { workspace = true }
+log = { workspace = true }
+
+# NOTE: the `cfg` expressions below must stay in sync with the `web` alias
+# defined in build.rs (`all(target_arch = "wasm32", target_os = "unknown")`).
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+# The native build exists to keep this crate covered by `cargo build --workspace`
+# and to let the same UI be run in a desktop window while iterating.
+env_logger = "^0.11.8"
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+console_log = { workspace = true }
+console_error_panic_hook = { workspace = true }
+web-sys = { version = "0.3", features = ["Window"] }
+
+[build-dependencies]
+cfg_aliases = { workspace = true }
+
+[lints]
+workspace = true

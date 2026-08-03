@@ -11,6 +11,7 @@ members = [
     "matcha-ecs",
     "matcha-ecs-widgets",
     "glyph-cache",
+    "matcha-web",
 ]
 resolver = "3"
 
@@ -25,6 +26,7 @@ matcha-window = { path = "matcha-window" }
 matcha-tree-widgets = { path = "matcha-tree-widgets" }
 matcha-ecs = { path = "matcha-ecs" }
 matcha-ecs-widgets = { path = "matcha-ecs-widgets" }
+matcha-web = { path = "matcha-web" }
 shared-buffer = { path = "shared-buffer" }
 renderer = { path = "renderer" }
 utils = { path = "utils" }
