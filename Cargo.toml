@@ -64,7 +64,18 @@ bytemuck = { version = "1", features = ["derive"] }
 nalgebra = { version = "0.34", features = ["bytemuck"] }
 
 # image
-image = "0.25"
+# Default features pull in `rayon` (an OS thread pool) and `avif` -> ravif/rav1e,
+# neither of which is usable on wasm; the decoders below are all pure Rust and
+# cover everything the Image widgets actually decode.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+    "bmp",
+    "ico",
+    "tiff",
+] }
 
 # font
 # Disabled: crates.io suzuri 0.2.1 pins wgpu ^27, blocking the workspace's wgpu 29

@@ -45,11 +45,10 @@ const WGSL_COMMAND: &str = include_str!("renderer_command.wgsl");
 /// cares about — see that type for why there is one shared block rather than a
 /// tailored struct per stage.
 ///
-/// The bound is `MaybeSendSync` rather than `Send + Sync` because wgpu's types
-/// are neither on wasm, where there is only the one thread to begin with. It
-/// still means `Send + Sync` natively, where the renderer really is shared
-/// across the render thread.
-pub(crate) trait ComputeStage: utils::MaybeSendSync {
+/// `Send + Sync` because the renderer is shared with the render thread. On
+/// wasm that holds only via wgpu's `fragile-send-sync-non-atomic-wasm`, which
+/// this crate enables for the web target — see Cargo.toml.
+pub(crate) trait ComputeStage: Send + Sync {
     fn encode(
         &self,
         encoder: &mut wgpu::CommandEncoder,

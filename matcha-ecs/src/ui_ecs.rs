@@ -218,7 +218,7 @@ where
         let (sender, receiver) = mpsc::channel::<Box<dyn FnOnce(&mut M) + Send>>();
         let wake_pending = Arc::new(AtomicBool::new(false));
         let proxy_slot: Arc<OnceLock<Box<dyn EventLoopProxy<Self>>>> = Arc::new(OnceLock::new());
-        let wake: Arc<dyn Fn() + Send + Sync> = {
+        let wake: crate::model::WakeFn = {
             let proxy_slot = proxy_slot.clone();
             Arc::new(move || {
                 if let Some(proxy) = proxy_slot.get() {

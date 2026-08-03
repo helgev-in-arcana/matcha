@@ -84,6 +84,29 @@ pub struct WindowSurface {
     current_config: parking_lot::Mutex<wgpu::SurfaceConfiguration>,
 }
 
+// On the web, a window ends up inside a `bevy_ecs` component (matcha-ecs's
+// `components::window::Window`), and bevy requires `Send + Sync` of every
+// component — there is no non-`Send` component storage to opt into. But winit's
+// web window is built on `Rc` and is genuinely `!Send`, which no feature flag
+// can change.
+//
+// SAFETY: `wasm32-unknown-unknown` without the `atomics` target feature is
+// single-threaded. There is no other thread for a value to be sent to or shared
+// with, so these bounds cannot be violated. This is the same bargain, under the
+// same condition, that wgpu makes with `fragile-send-sync-non-atomic-wasm`.
+//
+// The guard below turns the assumption into a build failure rather than a
+// silent unsoundness the moment a threaded wasm target is used.
+#[cfg(all(web, target_feature = "atomics"))]
+compile_error!(
+    "WindowSurface's Send/Sync impls assume a single-threaded wasm target, but \
+     `atomics` is enabled. They are no longer sound; see window/surface.rs."
+);
+#[cfg(web)]
+unsafe impl Send for WindowSurface {}
+#[cfg(web)]
+unsafe impl Sync for WindowSurface {}
+
 /// Constructor
 impl WindowSurface {
     /// Wraps a backend window. The wgpu surface is not attached yet;
