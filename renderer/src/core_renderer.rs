@@ -1,17 +1,21 @@
+use bytemuck::Zeroable;
 use log::{debug, trace, warn};
 use std::sync::Arc;
 
 use crate::render_node::RenderNode;
-use gpu_utils::{device_loss_recoverable::DeviceLossRecoverable, texture_atlas};
+use gpu_utils::texture_atlas;
 use texture_atlas::RegionError;
 use thiserror::Error;
 
-const WGSL_CULL: &str = include_str!("core_renderer/renderer_cull.wgsl");
-const WGSL_COMMAND: &str = include_str!("core_renderer/renderer_command.wgsl");
+mod stages;
+use stages::{
+    BlellochPrefixSumStage, CommandStage, ComputeStage, ScatterStage, StageParams,
+    VisibilityStage,
+};
+
 const WGSL_RENDER: &str = include_str!("core_renderer/renderer_render.wgsl");
 
 const PIPELINE_CACHE_SIZE: u64 = 3;
-const COMPUTE_WORKGROUP_SIZE: u32 = 64;
 
 // PERF NOTE:
 // - BindGroup/Buffer の再利用・リング化を検討（毎フレームの生成/全量 write を抑制）
@@ -37,8 +41,11 @@ const COMPUTE_WORKGROUP_SIZE: u32 = 64;
 ///   them to normalized coordinates before writing InstanceData into GPU memory.
 /// - `in_atlas_size`: (width, height) size of the sub-image. Expected as NORMALIZED
 ///   values (0.0 .. 1.0). If atlas returns pixel sizes, normalize on the host side.
-/// - `stencil_index`: index+1 of the associated stencil in the stencil data array.
-///   0 indicates "no stencil". The shader uses `stencil_index - 1` to access the stencil.
+/// - `alpha`: draw-time opacity multiplied into the sampled colour.
+/// - `mask_offset` / `mask_count`: the half-open range `mask_indices[offset ..
+///   offset + count]`, each entry an index into the mask array. The instance's
+///   coverage is the **product** of every mask in that range, so `count == 0`
+///   means "unmasked". See [`MaskData`].
 ///
 /// NOTE: Keep Rust-side layout (#[repr(C)] + bytemuck) compatible with the WGSL
 /// `InstanceData` struct (field order, types, and padding). When changing fields,
@@ -47,67 +54,176 @@ struct InstanceData {
     /// transform vertex: {[0, 0], [0, 1], [1, 1], [1, 0]} to where the texture should be rendered
     viewport_position: nalgebra::Matrix4<f32>,
     atlas_page: u32,
+    /// draw-time opacity, multiplied into all four sampled channels.
+    alpha: f32,
+    /// [x, y] (normalized UVs expected)
+    in_atlas_offset: [f32; 2],
+    /// [width, height] (normalized size expected)
+    in_atlas_size: [f32; 2],
+    /// start of this instance's mask chain inside `mask_indices`.
+    mask_offset: u32,
+    /// number of masks in the chain. 0 means unmasked.
+    mask_count: u32,
+}
+
+/// A `mat3x3<f32>` in WGSL's storage layout: three columns, each padded to 16
+/// bytes. `nalgebra::Matrix3` is tightly packed (36 bytes) and therefore *not*
+/// layout-compatible; go through [`mat3_columns`].
+type Mat3Columns = [[f32; 4]; 3];
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+/// MaskData describes one element of an instance's mask chain: a quad whose
+/// coverage texture attenuates whatever the instance draws.
+///
+/// A mask is transformed exactly like a texture — same unit quad, same
+/// `viewport_position` — but it is applied in **screen space**: the fragment
+/// shader maps its own position back into the mask's local unit square and
+/// samples there. That is what makes a mask behave like a hole in a box, or a
+/// portal, rather than something baked into the instance's own surface, and it
+/// stays correct when the mask and the instance are not coplanar.
+///
+/// Semantics:
+/// - `viewport_position`: transform mapping the unit quad into UI space (before
+///   normalization). Used for culling, and as the source of `mask_from_screen`.
+/// - `mask_from_screen`: the inverse of that transform's **planar homography**,
+///   mapping a screen position back to the mask's local unit square. A mask's
+///   local coordinates are `(u, v, 0, 1)`, so only rows and columns `{0, 1, 3}`
+///   of the 4x4 ever contribute; restricting to that 3x3 and inverting is exact
+///   for any affine *or* projective transform, whereas inverting the full 4x4
+///   would presuppose that the fragment lies on the mask's plane.
+/// - `inverse_exists`: 0 if the transform is degenerate. Such a mask is skipped
+///   (treated as fully transparent to whatever it would mask), matching how
+///   culling treats it.
+/// - `kind`: reserved for analytic mask shapes (SDF rect / rounded rect /
+///   ellipse). Only 0 (sample the coverage texture) is implemented.
+/// - `atlas_page`: index of the mask atlas page (texture array layer).
+/// - `in_atlas_offset` / `in_atlas_size`: offset and size of the coverage image
+///   inside the atlas page. Expected to be NORMALIZED UVs (0.0 .. 1.0). If the
+///   atlas returns pixel coordinates, the host MUST normalize them before
+///   uploading to GPU.
+///
+/// NOTE: Maintain identical memory layout between this Rust struct and the WGSL
+/// `MaskData` declaration (including explicit padding fields). Update both
+/// definitions when changing sizes/types.
+struct MaskData {
+    /// transform vertex: {[0, 0], [0, 1], [1, 1], [1, 0]} to where the mask should be rendered
+    viewport_position: nalgebra::Matrix4<f32>,
+    /// screen -> mask-local homography; see the struct docs.
+    mask_from_screen: Mat3Columns,
+    /// 0 = sample the coverage texture. Other values are reserved.
+    kind: u32,
+    /// 0 if `viewport_position`'s planar homography is not invertible.
+    inverse_exists: u32,
+    atlas_page: u32,
     _padding1: u32,
     /// [x, y] (normalized UVs expected)
     in_atlas_offset: [f32; 2],
     /// [width, height] (normalized size expected)
     in_atlas_size: [f32; 2],
-    /// the index of the stencil in the stencil data array.
-    /// 0 if no stencil is used. Use `stencil_index - 1` in the shader.
-    stencil_index: u32,
-    _padding2: u32,
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-/// StencilData describes a stencil polygon used to mask instances.
-///
-/// Semantics:
-/// - `viewport_position`: transform mapping the unit quad into stencil space.
-///   Public renderer APIs accept coordinates with the origin at the top-left and Y
-///   increasing downward; the renderer converts these to the internal form required
-///   by the GPU pipeline.
-/// - `viewport_position_inverse_exists`: non-zero if `viewport_position` is invertible.
-/// - `viewport_position_inverse`: inverse matrix used by the vertex shader to compute
-///   stencil-space UV coordinates for masking.
-/// - `atlas_page`: index of the stencil atlas page (texture array layer).
-/// - `in_atlas_offset` / `in_atlas_size`: offset and size of the stencil image inside
-///   the atlas page. Expected to be NORMALIZED UVs (0.0 .. 1.0). If atlas returns
-///   pixel coordinates, the host MUST normalize them before uploading to GPU.
-///
-/// NOTE: Maintain identical memory layout between this Rust struct and the WGSL
-/// `StencilData` declaration (including explicit padding fields). Update both
-/// definitions when changing sizes/types.
-struct StencilData {
-    /// transform vertex: {[0, 0], [0, 1], [1, 1], [1, 0]} to where the stencil should be rendered
-    viewport_position: nalgebra::Matrix4<f32>,
-    /// if the inverse of the viewport position exists.
-    /// 0 if the inverse does not exist.
-    viewport_position_inverse_exists: u32,
-    _padding1: [u32; 3],
-    /// inverse of the viewport position matrix.
-    /// used to calculate stencil uv coordinates in the shader.
-    viewport_position_inverse: nalgebra::Matrix4<f32>,
-    atlas_page: u32,
-    _padding2: u32,
-    /// [x, y] (normalized UVs expected)
-    in_atlas_offset: [f32; 2],
-    /// [width, height] (normalized size expected)
-    in_atlas_size: [f32; 2],
-    _padding3: [u32; 2],
-}
+/// Mask kind: sample the coverage texture in the mask atlas.
+const MASK_KIND_COVERAGE: u32 = 0;
 
 const _: () = {
     assert!(std::mem::size_of::<InstanceData>() == 96);
-    assert!(std::mem::size_of::<StencilData>() == 176);
+    assert!(std::mem::size_of::<MaskData>() == 144);
+    assert!(std::mem::size_of::<RenderPushConstants>() == 80);
 };
 
+/// The planar homography of a unit-quad transform: the restriction of `m` to
+/// rows and columns `{0, 1, 3}`. See [`MaskData::mask_from_screen`].
+#[rustfmt::skip]
+fn planar_homography(m: &nalgebra::Matrix4<f32>) -> nalgebra::Matrix3<f32> {
+    nalgebra::Matrix3::new(
+        m[(0, 0)], m[(0, 1)], m[(0, 3)],
+        m[(1, 0)], m[(1, 1)], m[(1, 3)],
+        m[(3, 0)], m[(3, 1)], m[(3, 3)],
+    )
+}
+
+/// Re-lay a `Matrix3` into WGSL's padded column layout.
+fn mat3_columns(m: &nalgebra::Matrix3<f32>) -> Mat3Columns {
+    [
+        [m[(0, 0)], m[(1, 0)], m[(2, 0)], 0.0],
+        [m[(0, 1)], m[(1, 1)], m[(2, 1)], 0.0],
+        [m[(0, 2)], m[(1, 2)], m[(2, 2)], 0.0],
+    ]
+}
+
+/// Half a texel, in normalized UV units, for each atlas. Used by the render
+/// shader to inset the UV clamp bounds so that sampling at the very edge of
+/// an atlas region's usable (non-margin) rectangle can never land exactly on
+/// the boundary between the last real texel and the next (zero-initialised
+/// margin) texel — bilinear filtering would blend 50/50 with that margin
+/// texel there, bleeding the background colour into the edge of every
+/// texture/stencil sample. Insetting to the last texel's *centre* instead of
+/// its edge guarantees a pure, unblended sample.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct CullingPushConstants {
+struct RenderPushConstants {
     normalize_matrix: nalgebra::Matrix4<f32>,
-    instance_count: u32,
-    _pad: [u32; 3],
+    texture_atlas_half_texel: [f32; 2],
+    stencil_atlas_half_texel: [f32; 2],
+}
+
+/// A clip declared by the UI tree: a mask that applies to an entity *and
+/// everything nested inside it*.
+///
+/// Clips form their own small tree, kept as an arena rather than by nesting
+/// [`RenderNode`]s, because a frame is handed to the renderer as a flat list of
+/// per-entity trees — the ancestor relationship between two entities is simply
+/// not expressible in that shape. A `MaskNode` is transformed and sampled
+/// exactly like a texture; nothing distinguishes it from an object's own
+/// coverage mask once both reach the GPU.
+#[derive(Clone, Debug)]
+pub struct MaskNode {
+    /// Enclosing clip, if any. Always a **smaller index** than this node's own,
+    /// so the chain from any node up to its root can be collected by following
+    /// parents without a cycle check.
+    pub parent: Option<u32>,
+    /// Unit quad -> UI space, in the same convention and units as a texture's
+    /// position.
+    pub transform: nalgebra::Matrix4<f32>,
+    /// Coverage image. Single-channel; only the red channel is read.
+    pub region: texture_atlas::AtlasRegion,
+}
+
+/// One entry of a frame: a render tree, where to put it, and the state that
+/// applies to everything it draws.
+#[derive(Clone)]
+pub struct FlatItem {
+    pub node: Arc<RenderNode>,
+    /// Node-local space -> UI space.
+    pub transform: nalgebra::Matrix4<f32>,
+    /// The innermost clip this item sits inside, as an index into the `masks`
+    /// slice passed alongside. The clips it inherits are that node's ancestors.
+    pub clip: Option<u32>,
+    /// Draw-time opacity applied to everything the tree draws.
+    pub alpha: f32,
+}
+
+impl FlatItem {
+    /// An unclipped, fully opaque item — the common case.
+    pub fn new(node: Arc<RenderNode>, transform: nalgebra::Matrix4<f32>) -> Self {
+        Self {
+            node,
+            transform,
+            clip: None,
+            alpha: 1.0,
+        }
+    }
+
+    pub fn with_clip(mut self, clip: Option<u32>) -> Self {
+        self.clip = clip;
+        self
+    }
+
+    pub fn with_alpha(mut self, alpha: f32) -> Self {
+        self.alpha = alpha;
+        self
+    }
 }
 
 pub struct CoreRenderer {
@@ -120,16 +236,6 @@ impl CoreRenderer {
         Self {
             inner: parking_lot::RwLock::new(inner),
         }
-    }
-}
-
-impl DeviceLossRecoverable for CoreRenderer {
-    fn recover(&self, device: &wgpu::Device, _: &wgpu::Queue) {
-        debug!("CoreRenderer::recover: recovering GPU resources");
-        let new_inner = CoreRendererInner::new(device);
-        let mut inner_lock = self.inner.write();
-        *inner_lock = new_inner;
-        debug!("CoreRenderer::recover: recovery complete");
     }
 }
 
@@ -165,6 +271,37 @@ impl CoreRenderer {
             stencil_atlas,
         )
     }
+
+    /// Flat render entry point: draw several pre-transformed render trees in one
+    /// frame. See [`CoreRendererInner::render_flat`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_flat(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+        destination_view: &wgpu::TextureView,
+        destination_size: [f32; 2],
+        items: &[FlatItem],
+        clips: &[MaskNode],
+        load_color: wgpu::Color,
+        texture_atlas: &wgpu::Texture,
+        stencil_atlas: &wgpu::Texture,
+    ) -> Result<(), TextureValidationError> {
+        let inner_lock = self.inner.read();
+        inner_lock.render_flat(
+            device,
+            queue,
+            surface_format,
+            destination_view,
+            destination_size,
+            items,
+            clips,
+            load_color,
+            texture_atlas,
+            stencil_atlas,
+        )
+    }
 }
 
 pub struct CoreRendererInner {
@@ -174,21 +311,126 @@ pub struct CoreRendererInner {
     data_bind_group_layout: wgpu::BindGroupLayout,
 
     // Pipeline Layouts
-    culling_pipeline_layout: wgpu::PipelineLayout,
-    command_pipeline_layout: wgpu::PipelineLayout,
     render_pipeline_layout: wgpu::PipelineLayout,
     render_pipeline_shader_module: wgpu::ShaderModule,
 
+    // Compute stages of the compaction pipeline (visibility -> prefix sum ->
+    // scatter -> command), run in order. Each stage is an interchangeable
+    // `ComputeStage` implementation; see `stages.rs`.
+    compaction_stages: Vec<Box<dyn ComputeStage>>,
+
     // Pipelines
-    culling_pipeline: wgpu::ComputePipeline,
-    command_pipeline: wgpu::ComputePipeline,
     render_pipeline:
-        moka::sync::Cache<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>, fxhash::FxBuildHasher>, // key: surface format
+        crate::pipeline_cache::PipelineCache<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>>, // key: surface format
 
     // reusable buffers
     atomic_counter: wgpu::Buffer,
     draw_command: wgpu::Buffer,
     draw_command_storage: wgpu::Buffer,
+}
+
+/// Bind group layout for the data buffers shared by every compute stage and
+/// the render pass. Bindings 0-4 and 7 are also visible to the render shaders;
+/// bindings 5-6 are compute-only intermediates of the order-preserving
+/// compaction (see `stages.rs`).
+fn create_data_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("ObjectRenderer Data Bind Group Layout"),
+        entries: &[
+            // All Instances Buffer
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // All Masks Buffer. Masks are resolved per fragment, from the
+            // fragment's own screen position; the vertex stage never reads one.
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // Visible Instances Buffer (compacted, submission order)
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // Atomic Counter (visible instance count)
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // command buffer (indirect draw args)
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // Visibility flags (0/1 per instance; written by the visibility
+            // stage, consumed by the prefix-sum and scatter stages)
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // Scan offsets (exclusive prefix sum of the visibility flags;
+            // written by the prefix-sum stage, consumed by the scatter stage)
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // Mask chains: the flat backing store every instance's
+            // `mask_offset`/`mask_count` range points into.
+            wgpu::BindGroupLayoutEntry {
+                binding: 7,
+                visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
 }
 
 impl CoreRendererInner {
@@ -203,7 +445,7 @@ impl CoreRendererInner {
             border_color: Some(wgpu::SamplerBorderColor::TransparentBlack),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
 
@@ -243,76 +485,16 @@ impl CoreRendererInner {
                 ],
             });
 
-        // Culling Pipeline
-        let data_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Culling Bind Group Layout"),
-                entries: &[
-                    // All Instances Buffer
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    // All Stencils Buffer
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE
-                            | wgpu::ShaderStages::FRAGMENT
-                            | wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    // Visible Instances Buffer
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    // Atomic Counter
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    // command buffer
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 4,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
+        let data_bind_group_layout = create_data_bind_group_layout(device);
 
-        let (culling_pipeline_layout, culling_pipeline) =
-            Self::create_culling_pipeline(device, &data_bind_group_layout);
-
-        let (command_pipeline_layout, command_pipeline) =
-            Self::create_command_pipeline(device, &data_bind_group_layout);
+        let compaction_stages: Vec<Box<dyn ComputeStage>> = vec![
+            Box::new(VisibilityStage::new(device, &data_bind_group_layout)),
+            // Swap the scan algorithm by constructing a different stage here
+            // (e.g. `SingleThreadPrefixSumStage` as the naive reference).
+            Box::new(BlellochPrefixSumStage::new(device, &data_bind_group_layout)),
+            Box::new(ScatterStage::new(device, &data_bind_group_layout)),
+            Box::new(CommandStage::new(device, &data_bind_group_layout)),
+        ];
 
         let (render_pipeline_layout, render_pipeline_shader_module) =
             Self::create_render_pipeline_layout(
@@ -322,9 +504,7 @@ impl CoreRendererInner {
             );
         trace!("CoreRenderer::new: pipeline layouts created");
 
-        let render_pipeline = moka::sync::Cache::builder()
-            .max_capacity(PIPELINE_CACHE_SIZE)
-            .build_with_hasher(fxhash::FxBuildHasher::default());
+        let render_pipeline = crate::pipeline_cache::PipelineCache::new(PIPELINE_CACHE_SIZE);
 
         // Create buffers
         let atomic_counter = device.create_buffer(&wgpu::BufferDescriptor {
@@ -353,78 +533,14 @@ impl CoreRendererInner {
             texture_sampler,
             texture_bind_group_layout,
             data_bind_group_layout,
-            culling_pipeline_layout,
-            command_pipeline_layout,
             render_pipeline_layout,
             render_pipeline_shader_module,
-            culling_pipeline,
-            command_pipeline,
+            compaction_stages,
             render_pipeline,
             atomic_counter,
             draw_command,
             draw_command_storage,
         }
-    }
-
-    fn create_culling_pipeline(
-        device: &wgpu::Device,
-        bind_group_layout: &wgpu::BindGroupLayout,
-    ) -> (wgpu::PipelineLayout, wgpu::ComputePipeline) {
-        trace!("CoreRenderer::create_culling_pipeline: creating pipeline");
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Culling Shader"),
-            source: wgpu::ShaderSource::Wgsl(WGSL_CULL.into()),
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Culling Pipeline Layout"),
-            bind_group_layouts: &[bind_group_layout],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::COMPUTE,
-                range: 0..std::mem::size_of::<CullingPushConstants>() as u32,
-            }],
-        });
-
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Culling Pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &module,
-            entry_point: Some("culling_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        trace!("CoreRenderer::create_culling_pipeline: pipeline ready");
-
-        (pipeline_layout, pipeline)
-    }
-
-    fn create_command_pipeline(
-        device: &wgpu::Device,
-        bind_group_layout: &wgpu::BindGroupLayout,
-    ) -> (wgpu::PipelineLayout, wgpu::ComputePipeline) {
-        trace!("CoreRenderer::create_command_pipeline: creating pipeline");
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Command Shader"),
-            source: wgpu::ShaderSource::Wgsl(WGSL_COMMAND.into()),
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Command Pipeline Layout"),
-            bind_group_layouts: &[bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Command Pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &module,
-            entry_point: Some("command_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        trace!("CoreRenderer::create_command_pipeline: pipeline ready");
-
-        (pipeline_layout, pipeline)
     }
 
     fn create_render_pipeline_layout(
@@ -440,11 +556,11 @@ impl CoreRendererInner {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[texture_bind_group_layout, data_bind_group_layout],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                range: 0..std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32,
-            }],
+            bind_group_layouts: &[
+                Some(texture_bind_group_layout),
+                Some(data_bind_group_layout),
+            ],
+            immediate_size: std::mem::size_of::<RenderPushConstants>() as u32,
         });
 
         (pipeline_layout, module)
@@ -488,7 +604,7 @@ impl CoreRendererInner {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         })
     }
@@ -530,15 +646,89 @@ impl CoreRendererInner {
         // }
 
         // integrate objects into a instance array
-        let (instances, stencils) = create_instance_and_stencil_data(
-            render_node,
+        let frame = create_frame(render_node, texture_atlas.format(), stencil_atlas.format())?;
+
+        self.render_instances(
+            device,
+            queue,
+            surface_format,
+            destination_view,
+            destination_size,
+            &frame,
+            load_color,
+            texture_atlas,
+            stencil_atlas,
+        )
+    }
+
+    /// Flat variant of [`render`](Self::render): renders several already
+    /// window-space-transformed render trees (paint order) in a single frame.
+    /// Used by the M4 render-thread path, which extracts one [`FlatItem`] per
+    /// widget entity instead of building a pseudo root.
+    ///
+    /// `clips` is the frame's clip arena; an item names the innermost clip it
+    /// sits inside and inherits that clip's ancestors. See [`MaskNode`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_flat(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+        destination_view: &wgpu::TextureView,
+        destination_size: [f32; 2],
+        items: &[FlatItem],
+        clips: &[MaskNode],
+        load_color: wgpu::Color,
+        texture_atlas: &wgpu::Texture,
+        stencil_atlas: &wgpu::Texture,
+    ) -> Result<(), TextureValidationError> {
+        let frame = create_flat_frame(
+            items,
+            clips,
             texture_atlas.format(),
             stencil_atlas.format(),
         )?;
+
+        self.render_instances(
+            device,
+            queue,
+            surface_format,
+            destination_view,
+            destination_size,
+            &frame,
+            load_color,
+            texture_atlas,
+            stencil_atlas,
+        )
+    }
+
+    /// Encode and submit a prepared frame. Shared by [`render`](Self::render)
+    /// (single tree) and [`render_flat`](Self::render_flat) (multiple
+    /// pre-transformed roots).
+    #[allow(clippy::too_many_arguments)]
+    fn render_instances(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+        destination_view: &wgpu::TextureView,
+        destination_size: [f32; 2],
+        frame: &FlatFrame,
+        load_color: wgpu::Color,
+        texture_atlas: &wgpu::Texture,
+        stencil_atlas: &wgpu::Texture,
+    ) -> Result<(), TextureValidationError> {
+        let FlatFrame {
+            instances,
+            masks,
+            mask_indices,
+        } = frame;
+
         trace!(
-            "CoreRenderer::render: prepared {} instances and {} stencils",
+            "CoreRenderer::render_instances: prepared {} instances, {} masks, {} chain entries",
             instances.len(),
-            stencils.len()
+            masks.len(),
+            mask_indices.len()
         );
 
         // #[cfg(debug_assertions)]
@@ -570,9 +760,18 @@ impl CoreRendererInner {
             mapped_at_creation: false,
         });
 
-        let all_stencil_data_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ObjectRenderer Stencil Buffer"),
-            size: (std::mem::size_of::<StencilData>() * stencils.len().max(1)) as u64,
+        // `.max(1)`: a zero-sized storage binding is invalid, and a frame with
+        // no mask at all is the common case.
+        let all_mask_data_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ObjectRenderer Mask Buffer"),
+            size: (std::mem::size_of::<MaskData>() * masks.len().max(1)) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mask_indices_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ObjectRenderer Mask Chain Buffer"),
+            size: (std::mem::size_of::<u32>() * mask_indices.len().max(1)) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -581,6 +780,20 @@ impl CoreRendererInner {
             label: Some("ObjectRenderer Visible Instances Buffer"),
             size: (std::mem::size_of::<u32>() * instances.len()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let visibility_flags_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ObjectRenderer Visibility Flags Buffer"),
+            size: (std::mem::size_of::<u32>() * instances.len()) as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        let scan_offsets_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ObjectRenderer Scan Offsets Buffer"),
+            size: (std::mem::size_of::<u32>() * instances.len()) as u64,
+            usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
 
@@ -626,7 +839,7 @@ impl CoreRendererInner {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: all_stencil_data_buffer.as_entire_binding(),
+                    resource: all_mask_data_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -640,6 +853,18 @@ impl CoreRendererInner {
                     binding: 4,
                     resource: self.draw_command_storage.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: visibility_flags_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: scan_offsets_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: mask_indices_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -647,28 +872,22 @@ impl CoreRendererInner {
         queue.write_buffer(
             &all_instance_data_buffer,
             0,
-            bytemuck::cast_slice(&instances),
+            bytemuck::cast_slice(instances),
         );
 
-        if !stencils.is_empty() {
-            queue.write_buffer(&all_stencil_data_buffer, 0, bytemuck::cast_slice(&stencils));
+        // The `.max(1)`-sized buffers above are padded, never read: an instance
+        // with `mask_count == 0` dereferences neither. Zero-fill them anyway so
+        // a stale mapping can never be mistaken for a real mask.
+        if masks.is_empty() {
+            queue.write_buffer(&all_mask_data_buffer, 0, bytemuck::bytes_of(&MaskData::zeroed()));
         } else {
-            let default_stencil = StencilData {
-                viewport_position: nalgebra::Matrix4::identity(),
-                viewport_position_inverse_exists: 1,
-                _padding1: [0; 3],
-                viewport_position_inverse: nalgebra::Matrix4::identity(),
-                atlas_page: 0,
-                _padding2: 0,
-                in_atlas_offset: [0.0, 0.0],
-                in_atlas_size: [0.0, 0.0],
-                _padding3: [0; 2],
-            };
-            queue.write_buffer(
-                &all_stencil_data_buffer,
-                0,
-                bytemuck::bytes_of(&default_stencil),
-            );
+            queue.write_buffer(&all_mask_data_buffer, 0, bytemuck::cast_slice(masks));
+        }
+
+        if mask_indices.is_empty() {
+            queue.write_buffer(&mask_indices_buffer, 0, bytemuck::bytes_of(&0u32));
+        } else {
+            queue.write_buffer(&mask_indices_buffer, 0, bytemuck::cast_slice(mask_indices));
         }
 
         queue.write_buffer(&self.atomic_counter, 0, bytemuck::cast_slice(&[0u32]));
@@ -679,42 +898,31 @@ impl CoreRendererInner {
         trace!("CoreRenderer::render: command encoder created");
 
         let normalize_matrix = make_normalize_matrix(destination_size);
-        let cull_pc = CullingPushConstants {
+        let stage_params = StageParams {
             normalize_matrix,
             instance_count: instances.len() as u32,
-            _pad: [0; 3],
+        };
+        let texture_atlas_size = texture_atlas.size();
+        let stencil_atlas_size = stencil_atlas.size();
+        let render_pc = RenderPushConstants {
+            normalize_matrix,
+            texture_atlas_half_texel: [
+                0.5 / texture_atlas_size.width as f32,
+                0.5 / texture_atlas_size.height as f32,
+            ],
+            stencil_atlas_half_texel: [
+                0.5 / stencil_atlas_size.width as f32,
+                0.5 / stencil_atlas_size.height as f32,
+            ],
         };
 
-        // culling compute pass
-        {
-            let mut culling_pass =
-                command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("ObjectRenderer: Culling Pass"),
-                    timestamp_writes: None,
-                });
-            culling_pass.set_pipeline(&self.culling_pipeline);
-            culling_pass.set_bind_group(0, &data_bind_group, &[]);
-            culling_pass.set_push_constants(0, bytemuck::bytes_of(&cull_pc));
-            culling_pass.dispatch_workgroups(
-                (instances.len() as u32).div_ceil(COMPUTE_WORKGROUP_SIZE),
-                1,
-                1,
-            );
+        // Compaction pipeline: visibility -> prefix sum -> scatter -> command.
+        // The stages together produce an order-preserving compaction of the
+        // instance indices in `visible_instances` plus the indirect draw args.
+        for stage in &self.compaction_stages {
+            stage.encode(&mut command_encoder, &data_bind_group, &stage_params);
         }
-        trace!("CoreRenderer::render: culling pass dispatched");
-
-        // command encoding pass
-        {
-            let mut command_pass =
-                command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("ObjectRenderer: Command Pass"),
-                    timestamp_writes: None,
-                });
-            command_pass.set_pipeline(&self.command_pipeline);
-            command_pass.set_bind_group(0, &data_bind_group, &[]);
-            command_pass.dispatch_workgroups(1, 1, 1);
-        }
-        trace!("CoreRenderer::render: command pass dispatched");
+        trace!("CoreRenderer::render: compaction stages dispatched");
 
         command_encoder.copy_buffer_to_buffer(
             &self.draw_command_storage,
@@ -739,17 +947,14 @@ impl CoreRendererInner {
                 })],
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
                 timestamp_writes: None,
             });
 
             render_pass.set_pipeline(render_pipeline.as_ref());
             render_pass.set_bind_group(0, &texture_bind_group, &[]);
             render_pass.set_bind_group(1, &data_bind_group, &[]);
-            render_pass.set_push_constants(
-                wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                0,
-                bytemuck::cast_slice(normalize_matrix.as_slice()),
-            );
+            render_pass.set_immediates(0, bytemuck::bytes_of(&render_pc));
             render_pass.draw_indirect(&self.draw_command, 0);
         }
         trace!("CoreRenderer::render: render pass completed");
@@ -761,129 +966,241 @@ impl CoreRendererInner {
     }
 }
 
-fn create_instance_and_stencil_data(
-    objects: &RenderNode,
-    texture_format: wgpu::TextureFormat,
-    stencil_format: wgpu::TextureFormat,
-) -> Result<(Vec<InstanceData>, Vec<StencilData>), TextureValidationError> {
-    trace!("CoreRenderer::create_instance_and_stencil_data: start");
-    let mut instances = Vec::new();
-    let mut stencils = Vec::new();
-
-    let mut texture_atlas_id = None;
-    let mut stencil_atlas_id = None;
-
-    create_instance_and_stencil_data_recursive(
-        texture_format,
-        stencil_format,
-        objects,
-        nalgebra::Matrix4::identity(),
-        &mut instances,
-        &mut stencils,
-        &mut texture_atlas_id,
-        &mut stencil_atlas_id,
-        0,
-    )?;
-
-    trace!(
-        "CoreRenderer::create_instance_and_stencil_data: completed with {} instances and {} stencils",
-        instances.len(),
-        stencils.len()
-    );
-    Ok((instances, stencils))
+/// The GPU-side arrays one frame flattens down to.
+///
+/// Everything here is a plain `Vec`, uploaded verbatim: the walk below is the
+/// only place that knows about the pointer-linked [`RenderNode`] shape, so a
+/// future array-of-structs `RenderNode` changes the input to [`Flattener::walk`]
+/// and nothing else.
+struct FlatFrame {
+    instances: Vec<InstanceData>,
+    masks: Vec<MaskData>,
+    /// Backing storage for every instance's mask chain. An instance references
+    /// `mask_indices[mask_offset .. mask_offset + mask_count]`.
+    mask_indices: Vec<u32>,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn create_instance_and_stencil_data_recursive(
+/// Walks render trees into a [`FlatFrame`], validating that every region really
+/// comes from the atlas the caller is about to bind.
+struct Flattener {
     texture_format: wgpu::TextureFormat,
-    stencil_format: wgpu::TextureFormat,
-    object: &RenderNode,
-    transform: nalgebra::Matrix4<f32>,
-    instances: &mut Vec<InstanceData>,
-    stencils: &mut Vec<StencilData>,
-    texture_atlas_id: &mut Option<texture_atlas::TextureAtlasId>,
-    stencil_atlas_id: &mut Option<texture_atlas::TextureAtlasId>,
-    // the index + 1 of the current stencil in the stencils vector.
-    // 0 if no stencil is used.
-    mut current_stencil: u32,
-) -> Result<(), TextureValidationError> {
-    if let Some((stencil, stencil_position)) = &object.stencil() {
-        if stencil.format() != stencil_format {
-            warn!("CoreRenderer: stencil format mismatch");
-            return Err(TextureValidationError::FormatMismatch);
-        }
+    mask_format: wgpu::TextureFormat,
+    out: FlatFrame,
+    texture_atlas_id: Option<texture_atlas::TextureAtlasId>,
+    mask_atlas_id: Option<texture_atlas::TextureAtlasId>,
+    /// The chain most recently appended to `mask_indices`. Siblings under one
+    /// clip are painted consecutively and share a chain, so this one-entry
+    /// cache collapses the common run without hashing anything.
+    last_chain: Option<(u32, u32)>,
+    /// Longest chain emitted this frame, for the debug log.
+    max_chain_len: usize,
+    /// Opacity of the item currently being walked; constant for its whole tree.
+    alpha: f32,
+}
 
-        let atlas_id = stencil_atlas_id.get_or_insert_with(|| stencil.atlas_id());
-
-        if atlas_id != &stencil.atlas_id() {
-            warn!("CoreRenderer: stencil atlas id mismatch");
-            return Err(TextureValidationError::AtlasIdMismatch);
-        }
-
-        let (page, position_in_atlas) = stencil.position_in_atlas()?;
-
-        let stencil_position = transform * stencil_position;
-        let (inverse_exists, stencil_position_inverse) = stencil_position
-            .try_inverse()
-            .map(|m| (true, m))
-            .unwrap_or_else(|| (false, nalgebra::Matrix4::identity()));
-
-        stencils.push(StencilData {
-            viewport_position: stencil_position,
-            viewport_position_inverse_exists: if inverse_exists { 1 } else { 0 },
-            viewport_position_inverse: stencil_position_inverse,
-            atlas_page: page,
-            in_atlas_offset: [position_in_atlas.min.x, position_in_atlas.min.y],
-            in_atlas_size: [position_in_atlas.width(), position_in_atlas.height()],
-            _padding1: [0; 3],
-            _padding2: 0,
-            _padding3: [0; 2],
-        });
-
-        current_stencil = stencils.len() as u32;
-    }
-
-    if let Some((texture, texture_position)) = &object.texture() {
-        if texture.format() != texture_format {
-            warn!("CoreRenderer: texture format mismatch");
-            return Err(TextureValidationError::FormatMismatch);
-        }
-
-        let atlas_id = texture_atlas_id.get_or_insert_with(|| texture.atlas_id());
-
-        if atlas_id != &texture.atlas_id() {
-            warn!("CoreRenderer: texture atlas id mismatch");
-            return Err(TextureValidationError::AtlasIdMismatch);
-        }
-
-        let (page, position_in_atlas) = texture.position_in_atlas()?;
-
-        instances.push(InstanceData {
-            viewport_position: transform * texture_position,
-            atlas_page: page,
-            in_atlas_offset: [position_in_atlas.min.x, position_in_atlas.min.y],
-            in_atlas_size: [position_in_atlas.width(), position_in_atlas.height()],
-            stencil_index: current_stencil,
-            _padding1: 0,
-            _padding2: 0,
-        });
-    }
-
-    for (child, child_transform) in object.child_elements() {
-        create_instance_and_stencil_data_recursive(
+impl Flattener {
+    fn new(texture_format: wgpu::TextureFormat, mask_format: wgpu::TextureFormat) -> Self {
+        Self {
             texture_format,
-            stencil_format,
-            child,
-            transform * child_transform,
-            instances,
-            stencils,
-            texture_atlas_id,
-            stencil_atlas_id,
-            current_stencil,
-        )?;
+            mask_format,
+            out: FlatFrame {
+                instances: Vec::new(),
+                masks: Vec::new(),
+                mask_indices: Vec::new(),
+            },
+            texture_atlas_id: None,
+            mask_atlas_id: None,
+            last_chain: None,
+            max_chain_len: 0,
+            alpha: 1.0,
+        }
     }
 
-    Ok(())
+    /// Register the frame's clips, returning the resolved root-to-leaf mask
+    /// chain for each one.
+    ///
+    /// Relies on a parent always preceding its child, which [`MaskNode::parent`]
+    /// guarantees, so one forward pass suffices and no cycle can form.
+    fn register_clips(
+        &mut self,
+        clips: &[MaskNode],
+    ) -> Result<Vec<Vec<u32>>, TextureValidationError> {
+        let mut chains: Vec<Vec<u32>> = Vec::with_capacity(clips.len());
+        for (i, clip) in clips.iter().enumerate() {
+            let index = self.push_mask(&clip.region, clip.transform)?;
+            let mut chain = match clip.parent {
+                Some(parent) if (parent as usize) < i => chains[parent as usize].clone(),
+                Some(parent) => {
+                    warn!(
+                        "CoreRenderer: clip {i} references parent {parent}, which is not \
+                         an earlier clip; treating it as a root"
+                    );
+                    Vec::new()
+                }
+                None => Vec::new(),
+            };
+            chain.push(index);
+            chains.push(chain);
+        }
+        Ok(chains)
+    }
+
+    /// Record a mask quad and return its index.
+    fn push_mask(
+        &mut self,
+        region: &texture_atlas::AtlasRegion,
+        position: nalgebra::Matrix4<f32>,
+    ) -> Result<u32, TextureValidationError> {
+        if region.format() != self.mask_format {
+            warn!("CoreRenderer: mask format mismatch");
+            return Err(TextureValidationError::FormatMismatch);
+        }
+        let atlas_id = self.mask_atlas_id.get_or_insert_with(|| region.atlas_id());
+        if atlas_id != &region.atlas_id() {
+            warn!("CoreRenderer: mask atlas id mismatch");
+            return Err(TextureValidationError::AtlasIdMismatch);
+        }
+        let (page, position_in_atlas) = region.position_in_atlas()?;
+
+        // A degenerate transform has no usable inverse; the shaders treat such
+        // a mask as absent rather than as fully occluding, so a widget with a
+        // collapsed mask still draws instead of silently vanishing.
+        let inverse = planar_homography(&position).try_inverse();
+
+        self.out.masks.push(MaskData {
+            viewport_position: position,
+            mask_from_screen: mat3_columns(&inverse.unwrap_or_else(nalgebra::Matrix3::identity)),
+            kind: MASK_KIND_COVERAGE,
+            inverse_exists: u32::from(inverse.is_some()),
+            atlas_page: page,
+            _padding1: 0,
+            in_atlas_offset: [position_in_atlas.min.x, position_in_atlas.min.y],
+            in_atlas_size: [position_in_atlas.width(), position_in_atlas.height()],
+        });
+        Ok(self.out.masks.len() as u32 - 1)
+    }
+
+    /// Append a chain to `mask_indices` and return its `(offset, count)`.
+    fn push_chain(&mut self, chain: &[u32]) -> (u32, u32) {
+        self.max_chain_len = self.max_chain_len.max(chain.len());
+        if chain.is_empty() {
+            return (0, 0);
+        }
+        if let Some((offset, count)) = self.last_chain
+            && count as usize == chain.len()
+            && self.out.mask_indices[offset as usize..][..chain.len()] == *chain
+        {
+            return (offset, count);
+        }
+        let offset = self.out.mask_indices.len() as u32;
+        self.out.mask_indices.extend_from_slice(chain);
+        let entry = (offset, chain.len() as u32);
+        self.last_chain = Some(entry);
+        entry
+    }
+
+    /// Walk one tree. `inherited` is the chain of clips enclosing it.
+    fn walk(
+        &mut self,
+        object: &RenderNode,
+        transform: nalgebra::Matrix4<f32>,
+        inherited: &[u32],
+    ) -> Result<(), TextureValidationError> {
+        // A node's own mask covers that node alone (see `RenderNode::with_stencil`);
+        // only the enclosing clips carry down to children. Appending it here
+        // rather than in the child recursion is what expresses that.
+        let mut own_chain;
+        let chain: &[u32] = match object.stencil() {
+            Some((mask, mask_position)) => {
+                let index = self.push_mask(mask, transform * mask_position)?;
+                own_chain = Vec::with_capacity(inherited.len() + 1);
+                own_chain.extend_from_slice(inherited);
+                own_chain.push(index);
+                &own_chain
+            }
+            None => inherited,
+        };
+
+        if let Some((texture, texture_position)) = &object.texture() {
+            if texture.format() != self.texture_format {
+                warn!("CoreRenderer: texture format mismatch");
+                return Err(TextureValidationError::FormatMismatch);
+            }
+            let atlas_id = self
+                .texture_atlas_id
+                .get_or_insert_with(|| texture.atlas_id());
+            if atlas_id != &texture.atlas_id() {
+                warn!("CoreRenderer: texture atlas id mismatch");
+                return Err(TextureValidationError::AtlasIdMismatch);
+            }
+            let (page, position_in_atlas) = texture.position_in_atlas()?;
+            let (mask_offset, mask_count) = self.push_chain(chain);
+
+            self.out.instances.push(InstanceData {
+                viewport_position: transform * texture_position,
+                atlas_page: page,
+                alpha: self.alpha,
+                in_atlas_offset: [position_in_atlas.min.x, position_in_atlas.min.y],
+                in_atlas_size: [position_in_atlas.width(), position_in_atlas.height()],
+                mask_offset,
+                mask_count,
+            });
+        }
+
+        for (child, child_transform) in object.child_elements() {
+            self.walk(child, transform * child_transform, chain)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Flatten a frame's items and clips into the GPU-side arrays. Each item is
+/// walked with its own transform; the shared atlas-id checks apply across all
+/// of them.
+fn create_flat_frame(
+    items: &[FlatItem],
+    clips: &[MaskNode],
+    texture_format: wgpu::TextureFormat,
+    mask_format: wgpu::TextureFormat,
+) -> Result<FlatFrame, TextureValidationError> {
+    let mut flattener = Flattener::new(texture_format, mask_format);
+    let clip_chains = flattener.register_clips(clips)?;
+
+    const NO_CLIP: &[u32] = &[];
+    for item in items {
+        let inherited = match item.clip {
+            Some(clip) => clip_chains.get(clip as usize).map_or_else(
+                || {
+                    warn!("CoreRenderer: item references clip {clip}, which does not exist");
+                    NO_CLIP
+                },
+                Vec::as_slice,
+            ),
+            None => NO_CLIP,
+        };
+        flattener.alpha = item.alpha;
+        flattener.walk(&item.node, item.transform, inherited)?;
+    }
+
+    debug!(
+        "CoreRenderer: flattened {} instances, {} masks, {} chain entries, deepest chain {}",
+        flattener.out.instances.len(),
+        flattener.out.masks.len(),
+        flattener.out.mask_indices.len(),
+        flattener.max_chain_len,
+    );
+    Ok(flattener.out)
+}
+
+fn create_frame(
+    objects: &RenderNode,
+    texture_format: wgpu::TextureFormat,
+    mask_format: wgpu::TextureFormat,
+) -> Result<FlatFrame, TextureValidationError> {
+    let mut flattener = Flattener::new(texture_format, mask_format);
+    flattener.walk(objects, nalgebra::Matrix4::identity(), &[])?;
+    Ok(flattener.out)
 }
 
 #[derive(Error, Debug)]

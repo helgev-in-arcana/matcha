@@ -59,7 +59,7 @@ struct Bezier2dImpl {
     compute_pipeline: wgpu::ComputePipeline,
     command_pipeline: wgpu::ComputePipeline,
     draw_pipeline:
-        moka::sync::Cache<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>, fxhash::FxBuildHasher>,
+        crate::pipeline_cache::PipelineCache<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>>,
 
     // reusable resources
     draw_command_buffer: wgpu::Buffer,
@@ -137,9 +137,7 @@ impl Bezier2dImpl {
             make_command_pipeline(device, &data_bind_group_layout);
         let draw_pipeline_layout = make_draw_pipeline_layout(device);
 
-        let draw_pipeline = moka::sync::Cache::builder()
-            .max_capacity(PIPELINE_CACHE_SIZE)
-            .build_with_hasher(fxhash::FxBuildHasher::default());
+        let draw_pipeline = crate::pipeline_cache::PipelineCache::new(PIPELINE_CACHE_SIZE);
 
         let draw_command_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("bezier_2d_draw_command_buffer"),
@@ -303,13 +301,8 @@ impl Bezier2d {
             affine_transform([target_size[0] as f32, target_size[1] as f32], position);
 
         render_pass.set_pipeline(&draw_pipeline);
-        render_pass.set_push_constants(
-            wgpu::ShaderStages::VERTEX,
-            0,
-            bytemuck::cast_slice(affine_transform.as_slice()),
-        );
-        render_pass.set_push_constants(
-            wgpu::ShaderStages::FRAGMENT,
+        render_pass.set_immediates(0, bytemuck::cast_slice(affine_transform.as_slice()));
+        render_pass.set_immediates(
             std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32,
             bytemuck::cast_slice(&color),
         );
@@ -328,8 +321,8 @@ fn make_compute_pipeline(
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("bezier_2d_compute_pipeline_layout"),
-        bind_group_layouts: &[bind_group_layout],
-        push_constant_ranges: &[],
+        bind_group_layouts: &[Some(bind_group_layout)],
+        immediate_size: 0,
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("bezier_2d_compute_pipeline"),
@@ -352,8 +345,8 @@ fn make_command_pipeline(
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("bezier_2d_command_pipeline_layout"),
-        bind_group_layouts: &[bind_group_layout],
-        push_constant_ranges: &[],
+        bind_group_layouts: &[Some(bind_group_layout)],
+        immediate_size: 0,
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("bezier_2d_command_pipeline"),
@@ -370,18 +363,10 @@ fn make_draw_pipeline_layout(device: &wgpu::Device) -> wgpu::PipelineLayout {
     device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("bezier_2d_draw_pipeline_layout"),
         bind_group_layouts: &[],
-        push_constant_ranges: &[
-            wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::VERTEX,
-                range: 0..(std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32),
-            },
-            wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::FRAGMENT,
-                range: (std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32)
-                    ..(std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32
-                        + std::mem::size_of::<[f32; 4]>() as u32),
-            },
-        ],
+        // wgpu 29: immediates replace push constants; the former per-stage ranges
+        // (VERTEX matrix at 0, FRAGMENT color after it) collapse into one size.
+        immediate_size: std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32
+            + std::mem::size_of::<[f32; 4]>() as u32,
     })
 }
 
@@ -420,7 +405,7 @@ fn make_draw_pipeline(
         },
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
-        multiview: None,
+        multiview_mask: None,
         cache: None,
     })
 }

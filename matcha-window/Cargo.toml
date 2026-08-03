@@ -1,0 +1,63 @@
+[package]
+name = "matcha-window"
+edition = "2024"
+version.workspace = true
+
+[dependencies]
+# self
+utils = { workspace = true }
+gpu-utils = { workspace = true }
+shared-buffer = { workspace = true }
+
+wgpu = { workspace = true }
+
+# async runtime, utility
+async-trait = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+
+# winit
+winit = { workspace = true, optional = true }
+baseview = { workspace = true, optional = true }
+
+# math
+nalgebra = { features = ["bytemuck"], workspace = true }
+
+# other
+bitflags = { workspace = true }
+keyboard-types = { workspace = true }
+num = { workspace = true }
+fxhash = { workspace = true }
+dashmap = { workspace = true }
+smallvec = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+enum-map = "2.7.3"
+web-time = { workspace = true }
+arboard = { version = "3.6", default-features = false }
+
+# NOTE: the `cfg` expressions below must stay in sync with the `web` alias
+# defined in build.rs (`all(target_arch = "wasm32", target_os = "unknown")`).
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen-futures = { workspace = true }
+wasm-bindgen = { workspace = true }
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement"] }
+
+[build-dependencies]
+cfg_aliases = { workspace = true }
+
+[features]
+default = ["winit"]
+winit = ["dep:winit"]
+baseview = ["dep:baseview"]
+# Additive (NOT a third exclusive backend): in-memory windows + a test-driven
+# event loop for headless tests. Does not require `winit` -- builds and passes
+# its own test suite with `winit` fully disabled.
+headless = []
+
+[[test]]
+name = "headless"
+required-features = ["headless"]
+
+[lints]
+workspace = true

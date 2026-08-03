@@ -15,7 +15,7 @@ const PIPELINE_CACHE_SIZE: u64 = 4;
 
 struct VertexColorImpl {
     pipeline_layout: wgpu::PipelineLayout,
-    pipeline: moka::sync::Cache<wgpu::TextureFormat, wgpu::RenderPipeline, fxhash::FxBuildHasher>,
+    pipeline: crate::pipeline_cache::PipelineCache<wgpu::TextureFormat, wgpu::RenderPipeline>,
 }
 
 impl VertexColorImpl {
@@ -23,14 +23,10 @@ impl VertexColorImpl {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("vertex_color_pipeline_layout"),
             bind_group_layouts: &[],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::VERTEX,
-                range: 0..(std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32),
-            }],
+            immediate_size: (std::mem::size_of::<nalgebra::Matrix4<f32>>() as u32),
         });
 
-        let pipeline = moka::sync::CacheBuilder::new(PIPELINE_CACHE_SIZE)
-            .build_with_hasher(fxhash::FxBuildHasher::default());
+        let pipeline = crate::pipeline_cache::PipelineCache::new(PIPELINE_CACHE_SIZE);
 
         Self {
             pipeline_layout,
@@ -100,8 +96,7 @@ impl VertexColor {
         });
 
         render_pass.set_pipeline(&render_pipeline);
-        render_pass.set_push_constants(
-            wgpu::ShaderStages::VERTEX,
+        render_pass.set_immediates(
             0,
             bytemuck::cast_slice(view_port_affine_transform.as_slice()),
         );
@@ -158,7 +153,7 @@ fn make_pipeline(
             mask: !0,
             alpha_to_coverage_enabled: false,
         },
-        multiview: None,
+        multiview_mask: None,
         cache: None,
     })
 }

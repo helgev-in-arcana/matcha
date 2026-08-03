@@ -5,35 +5,17 @@ edition = "2024"
 
 [dependencies]
 # self
-matcha-core = { workspace = true }
-matcha-widgets = { workspace = true }
-text-render = { workspace = true }
+matcha-tree = { workspace = true }
+matcha-tree-widgets = { workspace = true }
+gpu-utils = { workspace = true }
+shared-buffer = { workspace = true }
 
 # runtime
 tokio = { workspace = true }
-async-trait = { workspace = true }
-futures = { workspace = true }
-
-# winit
-winit = { workspace = true }
-
-# graphics
-wgpu = { workspace = true }
-bytemuck = { features = ["derive"], workspace = true }
-vello = { workspace = true }
-
-# math
-nalgebra = { features = ["bytemuck"], workspace = true }
-
-# image
-image = { workspace = true }
-
-# other
-bitflags = { workspace = true }
-num = { workspace = true }
 
 # log
 env_logger = "^0.11.8"
+log = { workspace = true }
 
 [lints]
 workspace = true

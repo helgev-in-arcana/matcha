@@ -8,8 +8,6 @@ use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::device_loss_recoverable::DeviceLossRecoverable;
-
 mod viewport_clear;
 use viewport_clear::ViewportClear;
 
@@ -285,6 +283,7 @@ impl AtlasRegion {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             clear_pass.set_viewport(
@@ -323,6 +322,7 @@ impl AtlasRegion {
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
 
         // Set the viewport to the usable texture area (excluding margins)
@@ -537,48 +537,6 @@ impl TextureAtlas {
             margin,
             weak_self: weak_self.clone(),
         })
-    }
-}
-
-impl DeviceLossRecoverable for TextureAtlas {
-    fn recover(&self, device: &wgpu::Device, _: &wgpu::Queue) {
-        let format = self.format;
-        let size = self.size();
-        let id = self.id;
-
-        let (texture, texture_view, layer_texture_views) =
-            Self::create_texture_and_view(device, format, size);
-
-        // Initialize the state with an empty allocator and allocation map.
-        let state = TextureAtlasState {
-            allocators: (0..size.depth_or_array_layers)
-                .map(|_| Size::new(size.width as i32, size.height as i32))
-                .map(AtlasAllocator::new)
-                .collect(),
-            texture_id_to_location: HashMap::new(),
-            texture_id_to_alloc_id: HashMap::new(),
-            usage: 0,
-        };
-
-        let resources = TextureAtlasResources {
-            texture,
-            texture_view,
-            layer_texture_views,
-            size,
-        };
-
-        let mut state_lock = self.state.lock();
-        *state_lock = state;
-
-        let mut resources_lock = self.resources.write();
-        *resources_lock = resources;
-
-        *self.device.write() = device.clone();
-        self.viewport_clear.reset();
-
-        trace!(
-            "TextureAtlas::recover: recovered atlas id={id:?} with size={size:?} and format={format:?}"
-        );
     }
 }
 
@@ -825,6 +783,7 @@ impl TextureAtlas {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
         }
 
@@ -1184,25 +1143,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn position_in_atlas_returns_not_found_after_recover() {
-        let (device, queue, atlas) = setup_atlas(
-            wgpu::Extent3d {
-                width: 16,
-                height: 16,
-                depth_or_array_layers: 1,
-            },
-            wgpu::TextureFormat::Rgba8Unorm,
-            1,
-        )
-        .await;
-        let region = atlas.allocate(&device, &queue, [4, 4]).unwrap();
-
-        atlas.recover(&device, &queue);
-        let err = region.position_in_atlas().unwrap_err();
-        assert!(matches!(err, RegionError::TextureNotFoundInAtlas));
-    }
-
-    #[tokio::test]
     async fn position_in_atlas_returns_atlas_gone_when_atlas_dropped() {
         let (device, queue, atlas) = setup_atlas(
             wgpu::Extent3d {
@@ -1283,10 +1223,6 @@ mod tests {
         assert_eq!(translated[3], [usable_uv.max.x, usable_uv.max.y]);
         assert!((0.0..=1.0).contains(&translated[4][0]));
         assert!((0.0..=1.0).contains(&translated[4][1]));
-
-        atlas.recover(&device, &queue);
-        let err = region.translate_uv(&[[0.0, 0.0]]).unwrap_err();
-        assert!(matches!(err, RegionError::TextureNotFoundInAtlas));
     }
 
     #[tokio::test]
@@ -1365,29 +1301,6 @@ mod tests {
 
         let err = region.write_data(&queue, &payload).unwrap_err();
         assert!(matches!(err, RegionError::AtlasGone));
-    }
-
-    #[tokio::test]
-    async fn write_data_fails_with_texture_not_found_after_recover() {
-        let (device, queue, atlas) = setup_atlas(
-            wgpu::Extent3d {
-                width: 8,
-                height: 8,
-                depth_or_array_layers: 1,
-            },
-            wgpu::TextureFormat::Rgba8Unorm,
-            0,
-        )
-        .await;
-        let region = atlas.allocate(&device, &queue, [2, 2]).unwrap();
-        let bytes_per_pixel = region.format().block_copy_size(None).unwrap();
-        let byte_count =
-            (region.texture_size()[0] * region.texture_size()[1] * bytes_per_pixel) as usize;
-        let data = vec![0u8; byte_count];
-
-        atlas.recover(&device, &queue);
-        let err = region.write_data(&queue, &data).unwrap_err();
-        assert!(matches!(err, RegionError::TextureNotFoundInAtlas));
     }
 
     #[test]
@@ -1473,6 +1386,7 @@ mod tests {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             region.set_viewport(&mut pass).unwrap();
         }
@@ -1480,7 +1394,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_viewport_errors_when_atlas_missing_or_region_unmapped() {
+    async fn set_viewport_errors_when_atlas_gone() {
         let (device, queue, atlas) = setup_atlas(
             wgpu::Extent3d {
                 width: 8,
@@ -1493,28 +1407,6 @@ mod tests {
         .await;
         let region = atlas.allocate(&device, &queue, [2, 2]).unwrap();
         let view = atlas.texture_view();
-
-        atlas.recover(&device, &queue);
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("recover"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            let err = region.set_viewport(&mut pass).unwrap_err();
-            assert!(matches!(err, RegionError::TextureNotFoundInAtlas));
-        }
 
         drop(atlas);
         let view_clone = view.clone();
@@ -1534,6 +1426,7 @@ mod tests {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             let err = region.set_viewport(&mut pass).unwrap_err();
             assert!(matches!(err, RegionError::AtlasGone));
@@ -1553,7 +1446,7 @@ mod tests {
         )
         .await;
         let region = atlas.allocate(&device, &queue, [2, 2]).unwrap();
-        if !device.features().contains(wgpu::Features::PUSH_CONSTANTS) {
+        if !device.features().contains(wgpu::Features::IMMEDIATES) {
             return;
         }
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
@@ -1644,7 +1537,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn begin_render_pass_errors_when_atlas_missing_or_region_unmapped() {
+    async fn begin_render_pass_errors_when_atlas_gone() {
         let (device, queue, atlas) = setup_atlas(
             wgpu::Extent3d {
                 width: 8,
@@ -1656,13 +1549,6 @@ mod tests {
         )
         .await;
         let region = atlas.allocate(&device, &queue, [2, 2]).unwrap();
-
-        atlas.recover(&device, &queue);
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        assert!(matches!(
-            region.begin_render_pass(&mut encoder).unwrap_err(),
-            RegionError::TextureNotFoundInAtlas
-        ));
 
         drop(atlas);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
@@ -1670,55 +1556,6 @@ mod tests {
             region.begin_render_pass(&mut encoder).unwrap_err(),
             RegionError::AtlasGone
         ));
-    }
-
-    #[tokio::test]
-    async fn recover_reinitializes_resources_and_resets_state() {
-        let (device, queue, atlas) = setup_atlas(
-            wgpu::Extent3d {
-                width: 8,
-                height: 8,
-                depth_or_array_layers: 1,
-            },
-            wgpu::TextureFormat::Rgba8Unorm,
-            0,
-        )
-        .await;
-        let region = atlas.allocate(&device, &queue, [2, 2]).unwrap();
-        assert!(atlas.usage() > 0);
-
-        atlas.recover(&device, &queue);
-        assert_eq!(atlas.usage(), 0);
-        assert_eq!(atlas.max_allocation_size(), [0, 0]);
-        let err = region.position_in_atlas().unwrap_err();
-        assert!(matches!(err, RegionError::TextureNotFoundInAtlas));
-    }
-
-    #[tokio::test]
-    async fn recover_recreates_gpu_resources_and_resets_caches() {
-        let (device, queue, atlas) = setup_atlas(
-            wgpu::Extent3d {
-                width: 8,
-                height: 8,
-                depth_or_array_layers: 1,
-            },
-            wgpu::TextureFormat::Rgba8Unorm,
-            0,
-        )
-        .await;
-        let region = atlas.allocate(&device, &queue, [2, 2]).unwrap();
-        drop(region);
-        atlas.recover(&device, &queue);
-
-        let new_region = atlas.allocate(&device, &queue, [2, 2]).unwrap();
-        if !device.features().contains(wgpu::Features::PUSH_CONSTANTS) {
-            return;
-        }
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        {
-            let _pass = new_region.begin_render_pass(&mut encoder).unwrap();
-        }
-        queue.submit(Some(encoder.finish()));
     }
 
     #[tokio::test]

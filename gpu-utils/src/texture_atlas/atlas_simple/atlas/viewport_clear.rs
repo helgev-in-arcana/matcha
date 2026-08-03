@@ -27,10 +27,7 @@ impl ViewportClearInner {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("atlas_viewport_clear_pipeline_layout"),
             bind_group_layouts: &[],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::FRAGMENT,
-                range: 0..PUSH_CONSTANT_SIZE,
-            }],
+            immediate_size: PUSH_CONSTANT_SIZE,
         });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -78,7 +75,7 @@ impl ViewportClearInner {
                 },
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             })
         })
@@ -99,11 +96,7 @@ impl ViewportClear {
 
         render_pass.set_pipeline(pipeline);
         let constants = PushConstant { color };
-        render_pass.set_push_constants(
-            wgpu::ShaderStages::FRAGMENT,
-            0,
-            bytemuck::bytes_of(&constants),
-        );
+        render_pass.set_immediates(0, bytemuck::bytes_of(&constants));
         render_pass.draw(0..4, 0..1);
     }
 

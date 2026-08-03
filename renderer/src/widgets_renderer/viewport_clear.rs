@@ -18,7 +18,7 @@ struct PushConstant {
 
 const _: () = {
     assert!(
-        wgpu::PUSH_CONSTANT_ALIGNMENT == 4,
+        wgpu::IMMEDIATE_DATA_ALIGNMENT == 4,
         "PushConstant alignment changed. check memory layout"
     );
 };
@@ -27,7 +27,7 @@ const PUSH_CONSTANTS_SIZE: u32 = std::mem::size_of::<PushConstant>() as u32;
 
 struct ViewportClearImpl {
     pipeline_layout: wgpu::PipelineLayout,
-    pipeline: moka::sync::Cache<wgpu::TextureFormat, wgpu::RenderPipeline, fxhash::FxBuildHasher>,
+    pipeline: crate::pipeline_cache::PipelineCache<wgpu::TextureFormat, wgpu::RenderPipeline>,
 }
 
 impl ViewportClearImpl {
@@ -35,14 +35,10 @@ impl ViewportClearImpl {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("viewport_clear_pipeline_layout"),
             bind_group_layouts: &[],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::FRAGMENT,
-                range: 0..PUSH_CONSTANTS_SIZE,
-            }],
+            immediate_size: PUSH_CONSTANTS_SIZE,
         });
 
-        let pipeline = moka::sync::CacheBuilder::new(PIPELINE_CACHE_SIZE)
-            .build_with_hasher(fxhash::FxBuildHasher::default());
+        let pipeline = crate::pipeline_cache::PipelineCache::new(PIPELINE_CACHE_SIZE);
 
         ViewportClearImpl {
             pipeline_layout,
@@ -73,11 +69,7 @@ impl ViewportClear {
         render_pass.set_pipeline(&pipeline);
 
         let push_constants = PushConstant { color };
-        render_pass.set_push_constants(
-            wgpu::ShaderStages::FRAGMENT,
-            0,
-            bytemuck::cast_slice(&[push_constants]),
-        );
+        render_pass.set_immediates(0, bytemuck::cast_slice(&[push_constants]));
 
         render_pass.draw(0..4, 0..1);
     }
@@ -119,7 +111,7 @@ fn make_pipeline(
         },
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
-        multiview: None,
+        multiview_mask: None,
         cache: None,
     })
 }

@@ -1,0 +1,9 @@
+[package]
+name = "shared-buffer"
+version.workspace = true
+edition = "2021"
+
+[dependencies]
+arc-swap = "1"
+log = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }

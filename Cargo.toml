@@ -1,32 +1,41 @@
 [workspace]
 members = [
     "matcha",
-    "matcha-core",
-    "matcha-widgets",
+    "matcha-tree",
+    "matcha-tree-widgets",
     "renderer",
-    "text-render",
     "utils",
     "gpu-utils",
+    "shared-buffer",
+    "matcha-window",
+    "matcha-ecs",
+    "matcha-ecs-widgets",
+    "glyph-cache",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.5"
+version = "0.0.6"
 
 [workspace.dependencies]
 # self
 matcha = { path = "matcha" }
-matcha-core = { path = "matcha-core" }
-matcha-widgets = { path = "matcha-widgets" }
+matcha-tree = { path = "matcha-tree" }
+matcha-window = { path = "matcha-window" }
+matcha-tree-widgets = { path = "matcha-tree-widgets" }
+matcha-ecs = { path = "matcha-ecs" }
+matcha-ecs-widgets = { path = "matcha-ecs-widgets" }
+shared-buffer = { path = "shared-buffer" }
 renderer = { path = "renderer" }
-text-render = { path = "text-render" }
 utils = { path = "utils" }
 gpu-utils = { path = "gpu-utils" }
+glyph-cache = { path = "glyph-cache" }
 
 # async runtime, utilities
+# `rt-multi-thread` is intentionally omitted: it is not supported on wasm.
+# Crates that need it add it via a target-specific or dev dependency.
 tokio = { version = "1", features = [
     "rt",
-    "rt-multi-thread",
     "macros",
     "sync",
     "parking_lot",
@@ -36,15 +45,20 @@ async-trait = "0.1.88"
 futures = "0.3.31"
 parking_lot = { version = "0.12.3" }
 
-# winit and accessibility
+# window
 winit = "0.30"
+# The W3C UI Events keyboard vocabulary. Not a windowing library: enums only,
+# bitflags its sole dependency. Both backends already speak it.
+keyboard-types = "0.8"
+baseview = { git = "https://github.com/RustAudio/baseview.git" }
+
+# accessibility
 accesskit = "0.21"
 accesskit_winit = { version = "0.29", features = ["tokio"] }
 
 # graphics
-wgpu = { version = "27.0.1", features = ["noop"] }
+wgpu = { version = "29", features = ["noop"] }
 bytemuck = { version = "1", features = ["derive"] }
-vello = { git = "https://github.com/linebender/vello.git", branch = "main" }
 
 # math
 nalgebra = { version = "0.34", features = ["bytemuck"] }
@@ -53,7 +67,12 @@ nalgebra = { version = "0.34", features = ["bytemuck"] }
 image = "0.25"
 
 # font
-suzuri = { git = "https://github.com/helgev-traP/suzuri.git", branch = "main", features = ["wgpu"] }
+# Disabled: crates.io suzuri 0.2.1 pins wgpu ^27, blocking the workspace's wgpu 29
+# upgrade. Only the legacy matcha-tree stack used this (with the `wgpu` feature);
+# matcha-ecs-widgets uses the sibling path dependency (CPU shaping only, no wgpu).
+# suzuri = { version = "0.2.1", features = ["wgpu"] }
+parley = { version = "0.11.0", features = ["complex-scripts"] }
+swash = "0.2.6"
 
 # other
 rand = "0.9"
@@ -72,6 +91,19 @@ thiserror = "2.0"
 
 # log
 log = "^0.4.28"
+
+# wasm
+web-time = "1.1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_log = "1.0"
+console_error_panic_hook = "0.1"
+
+# build-time cfg aliases.
+# Each crate that splits modules along the "web" axis declares a `web` alias
+# in its build.rs via `cfg_aliases::cfg_aliases!`. The alias expansion is
+# kept in sync with the `[target.'cfg(...)']` sections in each Cargo.toml.
+cfg_aliases = "0.2"
 
 # interpolation crate
 # todo: maybe useful.

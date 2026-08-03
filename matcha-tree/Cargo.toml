@@ -1,0 +1,51 @@
+[package]
+name = "matcha-tree"
+version = { workspace = true }
+edition = "2024"
+publish = false
+
+[dependencies]
+# self
+renderer = { workspace = true }
+utils = { workspace = true }
+gpu-utils = { workspace = true }
+shared-buffer = { workspace = true }
+
+# async runtime, utility
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+
+# window
+matcha-window = { workspace = true }
+
+# graphics
+wgpu = { workspace = true }
+bytemuck = { features = ["derive"], workspace = true }
+
+# math
+nalgebra = { features = ["bytemuck"], workspace = true }
+
+# image
+image = { workspace = true }
+
+# other
+bitflags = { workspace = true }
+num = { workspace = true }
+fxhash = { workspace = true }
+dashmap = { workspace = true }
+smallvec = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+enum-map = "2.7.3"
+
+[build-dependencies]
+cfg_aliases = { workspace = true }
+
+[features]
+default = ["winit"]
+winit = ["matcha-window/winit"]
+baseview = ["matcha-window/baseview"]
+
+[lints]
+workspace = true

@@ -1,0 +1,44 @@
+[package]
+name = "matcha-tree-widgets"
+version = { workspace = true }
+edition = "2024"
+publish = false
+
+[dependencies]
+# matcha
+renderer = { workspace = true }
+matcha-tree = { workspace = true }
+utils = { workspace = true }
+gpu-utils = { workspace = true }
+
+# runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+
+# winit
+winit = { workspace = true }
+
+# graphics
+wgpu = { workspace = true }
+bytemuck = { features = ["derive"], workspace = true }
+
+# math
+nalgebra = { features = ["bytemuck"], workspace = true }
+
+# image
+image = { workspace = true }
+
+# text
+# suzuri = { workspace = true } # disabled: pins wgpu ^27 (see workspace Cargo.toml)
+
+# other
+num = { workspace = true }
+fxhash = { workspace = true }
+dashmap = { workspace = true }
+log = { workspace = true }
+smallvec = { workspace = true }
+
+[lints]
+workspace = true
