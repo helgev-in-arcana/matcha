@@ -40,6 +40,8 @@ impl SignalContext {
 /// # Using the global context (common case)
 ///
 /// ```rust
+/// use crate::shared_buffer::SharedValue;
+/// 
 /// let v = SharedValue::new(0.0f32);
 /// v.store(1.0);
 /// ```
@@ -47,6 +49,9 @@ impl SignalContext {
 /// # Using a custom context
 ///
 /// ```rust
+/// use crate::shared_buffer::SharedValue;
+/// use crate::shared_buffer::BufferContext;
+/// 
 /// let ctx = BufferContext::new();
 /// let v = SharedValue::new_in(0.0f32, ctx);
 /// ```
