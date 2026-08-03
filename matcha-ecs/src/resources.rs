@@ -77,6 +77,35 @@ pub fn ui_root_window(world: &World) -> Option<(Entity, &Window)> {
 #[derive(Resource, Clone, Copy)]
 pub struct FrameTime(pub web_time::Instant);
 
+/// Physical pixels per UI pixel — the display's scale factor.
+///
+/// The window reports its size, and delivers pointer positions, in *physical*
+/// pixels. Layout and hit-testing work in UI pixels. On a desktop at 100% those
+/// are the same thing, which is why nothing needed this before; on a HiDPI
+/// display or any browser with `devicePixelRatio != 1` they are not, and a UI
+/// laid out directly against physical pixels comes out at the wrong size.
+///
+/// Dividing physical by this yields UI pixels. The framebuffer itself stays at
+/// full physical resolution — only the coordinate system is scaled, so text and
+/// edges keep their sharpness.
+///
+/// Defaults to 1.0, which reproduces the previous behaviour exactly.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct UiScale(pub f32);
+
+impl Default for UiScale {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+impl UiScale {
+    /// Physical pixels -> UI pixels.
+    pub fn to_ui(self, physical: [f32; 2]) -> [f32; 2] {
+        [physical[0] / self.0, physical[1] / self.0]
+    }
+}
+
 /// "This frame is not the final one — schedule another."
 ///
 /// Reset to `false` before each render-schedule run; any system may call

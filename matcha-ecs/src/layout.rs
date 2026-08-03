@@ -430,7 +430,13 @@ pub fn run_layout(world: &mut World) {
         return;
     };
     let inner = window.window.inner_size();
-    let constraints = Constraints::from_max_size([inner[0] as f32, inner[1] as f32]);
+    // The window reports physical pixels; layout works in UI pixels.
+    let scale = world
+        .get_resource::<crate::resources::UiScale>()
+        .copied()
+        .unwrap_or_default();
+    let size = scale.to_ui([inner[0] as f32, inner[1] as f32]);
+    let constraints = Constraints::from_max_size(size);
 
     layout_root(world, root, constraints);
 }

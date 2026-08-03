@@ -54,7 +54,8 @@ use crate::{
     pointer::{self, sync_cursor, sync_pointer_components},
     render::{build_and_present, extract_items, InlineDriver, RenderDriver, RenderSnapshot},
     resources::{
-        ClipMask, FrameTime, GpuResource, RedrawRequest, RenderWindowRoot, RendererResource, ui_root,
+        ClipMask, FrameTime, GpuResource, RedrawRequest, RenderWindowRoot, RendererResource,
+        UiScale, ui_root,
     },
     view::{run_view, Scope},
 };
@@ -270,6 +271,7 @@ where
         world.insert_resource(FocusConfig::default());
         world.insert_resource(FrameTime(web_time::Instant::now()));
         world.insert_resource(RedrawRequest::default());
+        world.insert_resource(UiScale::default());
 
         let (sender, receiver) = mpsc::channel::<Box<dyn FnOnce(&mut M) + Send>>();
         let wake_pending = Arc::new(AtomicBool::new(false));
@@ -383,6 +385,16 @@ where
     /// [`InlineDriver`] on the web, which is the only one that works there).
     pub fn with_render_driver(mut self, driver: impl RenderDriver + 'static) -> Self {
         self.render_driver = parking_lot::Mutex::new(Box::new(driver));
+        self
+    }
+
+    /// Set the display scale factor (physical pixels per UI pixel).
+    ///
+    /// Defaults to 1.0. The window's own reported scale factor is picked up
+    /// automatically on `ScaleFactorChanged`; this is for setting it before the
+    /// first frame, which on the web means `window.devicePixelRatio`.
+    pub fn with_ui_scale(mut self, scale: f32) -> Self {
+        self.world.insert_resource(UiScale(scale));
         self
     }
 
@@ -548,6 +560,19 @@ where
     /// extract the drawable items, and clone the GPU resources. Returns `None`
     /// if the frame should be skipped (wrong window, no GPU/root, or the
     /// surface has no texture to give this frame).
+    /// The pointer's position in UI pixels.
+    ///
+    /// Events carry physical pixels, but picking tests against rects layout
+    /// produced in UI pixels, so the two have to be expressed the same way or
+    /// clicks land somewhere other than where the user aimed.
+    fn pointer_ui_position(&self, event: &DeviceEvent) -> [f32; 2] {
+        self.world
+            .get_resource::<UiScale>()
+            .copied()
+            .unwrap_or_default()
+            .to_ui(event.mouse_viewport_position())
+    }
+
     fn build_snapshot(&mut self, window_id: WindowId) -> Option<RenderSnapshot> {
         let root_entity = self.root_of(window_id)?;
 
@@ -564,7 +589,15 @@ where
         let window_comp = self.world.get::<WindowComp>(root_entity)?;
         let window = &window_comp.window;
         let inner = window.inner_size();
-        let viewport_size = [inner[0] as f32, inner[1] as f32];
+        // UI pixels, matching what layout produced. The framebuffer stays at
+        // full physical resolution — this only scales the coordinate system the
+        // renderer normalises against, so nothing is drawn at reduced detail.
+        let viewport_size = self
+            .world
+            .get_resource::<UiScale>()
+            .copied()
+            .unwrap_or_default()
+            .to_ui([inner[0] as f32, inner[1] as f32]);
         let format = window.format();
 
         let surface_texture = match window.surface().get_surface_texture(&device) {
@@ -821,6 +854,13 @@ where
     ) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            // Moving a window between displays of different densities, or a
+            // browser zoom. Layout reads this every frame, so updating the
+            // resource and redrawing is the whole of it.
+            WindowEvent::ScaleFactorChanged { scale_factor } => {
+                self.world.insert_resource(UiScale(scale_factor as f32));
+                self.render_sync(window_id);
+            }
             WindowEvent::Resized { inner_size, .. } => {
                 // wgpu forbids reconfiguring a surface while a SurfaceTexture
                 // acquired from it hasn't been presented yet, so wait for any
@@ -859,6 +899,7 @@ where
         // Per-window resource teardown is not needed for the single window M1/M2 support.
     }
 
+
     fn device_event(
         &mut self,
         _event_loop: &impl EventLoop,
@@ -874,13 +915,13 @@ where
         // keystroke cannot claim the pointer is at the origin.
         if let DeviceEventData::MouseInput { event: mouse, .. } = event.event() {
             let left = matches!(mouse, Some(matcha_window::event::device_event::MouseInput::Left));
-            let position = (!left).then(|| event.mouse_viewport_position());
+            let position = (!left).then(|| self.pointer_ui_position(&event));
             let moved = pointer::set_position(&mut self.world, position);
             self.settle(moved);
         }
 
         let at_pointer = PickQuery {
-            viewport_pos: event.mouse_viewport_position(),
+            viewport_pos: self.pointer_ui_position(&event),
         };
 
         // `on_click` only fires on the primary-button press edge (not every
