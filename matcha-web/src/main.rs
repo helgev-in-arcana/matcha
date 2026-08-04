@@ -39,8 +39,8 @@
 
 use matcha_ecs::{ui_ecs::UiEcs, view::Scope};
 use matcha_ecs_widgets::{
-    AlignItems, Button, Checkbox, ColorRect, Column, Container, JustifyContent, Length, Panel,
-    RichText, Row, Text,
+    AlignItems, Button, Checkbox, ColorRect, Column, JustifyContent, Length, Panel, RichText, Row,
+    Text,
 };
 
 const INK: [f32; 4] = [0.90, 0.90, 0.94, 1.0];
@@ -170,12 +170,19 @@ fn main() {
             .map(|w| w.device_pixel_ratio() as f32)
             .unwrap_or(1.0);
 
+        log::info!("matcha-web: starting (devicePixelRatio = {dpr})");
+
         let config = matcha_window::window::WindowConfig::default()
             .with_title("matcha")
             .with_canvas_id(CANVAS_ID);
 
-        let app = UiEcs::new_async(model(), view, reduce)
-            .await
+        // GPU init is the one genuinely async step and the most likely thing to
+        // fail on an unfamiliar machine, so bracket it: seeing "starting"
+        // without "GPU ready" in the console localises the problem instantly.
+        let app = UiEcs::new_async(model(), view, reduce).await;
+        log::info!("matcha-web: GPU ready, handing off to the browser event loop");
+
+        let app = app
             .with_window_config(config)
             .with_ui_scale(dpr)
             .with_pre_layout_systems(matcha_ecs_widgets::default_systems());

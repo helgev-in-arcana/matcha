@@ -73,7 +73,12 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     // texture
     @location(0) texture_uv: vec2<f32>,
-    @location(1) texture_atlas_page: u32,
+    // `@interpolate(flat)` is REQUIRED, not an optimisation: WGSL forbids
+    // interpolating an integer vertex output, and a browser (Dawn) rejects the
+    // shader outright without it. naga does not enforce this, so the native
+    // build compiles either way and no native test can catch a regression here
+    // — the check is a browser.
+    @location(1) @interpolate(flat) texture_atlas_page: u32,
     @location(2) texture_atlas_bounds_x: vec2<f32>,
     @location(3) texture_atlas_bounds_y: vec2<f32>,
     // Masks carry no per-vertex data: each one is resolved from the fragment's
