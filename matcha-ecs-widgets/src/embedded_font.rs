@@ -23,15 +23,26 @@
 //! from one file — the alternative being a Latin font plus a separate CJK font
 //! plus fallback wiring. The OFL permits redistribution and embedding,
 //! including inside a compiled binary, provided the licence travels with it;
-//! see `assets/NotoSansJP-VF.ttf.LICENSE`.
+//! see `assets/NotoSansJP-VF.ttf.LICENSE`. The file is a subset (below), which
+//! the OFL also permits — Noto declares no Reserved Font Name, so the family
+//! name is kept as published.
 //!
-//! # Size
+//! # Size, and the subset
 //!
-//! It is ~9.6 MB, which dominates the wasm bundle. That is a deliberate first
-//! step, not the end state: a `pyftsubset` run restricted to the character set
-//! a page actually uses cuts it by well over an order of magnitude, and because
-//! this is a plain `include_bytes!` of one file, swapping in a subset later is
-//! a file replacement and nothing more.
+//! The file here is **not** the font as published — it is a subset built by
+//! `tools/subset_font.py`, ~0.56 MB against the original's 9.6 MB. Note that
+//! "Latin + Japanese" is not itself the saving: keeping every kanji only takes
+//! 9.6 MB down to 8.2 MB, because the kanji *are* the font. What makes the
+//! difference is keeping only the ideographs this repository's own sources
+//! actually contain (95 of them), alongside the full Latin and kana ranges.
+//!
+//! The consequence to know about: **a character outside the subset renders as
+//! tofu, silently.** Re-run the script after adding Japanese text to the demo.
+//! The variable weight axis is deliberately retained — see the script for why
+//! flattening it to one weight would quietly disable bold.
+//!
+//! Native builds do not include any of this — they enumerate real system
+//! fonts, so embedding would cost half a megabyte for nothing.
 //!
 //! Native builds do **not** include this — they enumerate real system fonts, so
 //! embedding would cost 9.6 MB for nothing.
