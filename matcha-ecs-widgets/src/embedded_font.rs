@@ -23,29 +23,25 @@
 //! from one file — the alternative being a Latin font plus a separate CJK font
 //! plus fallback wiring. The OFL permits redistribution and embedding,
 //! including inside a compiled binary, provided the licence travels with it;
-//! see `assets/NotoSansJP-VF.ttf.LICENSE`. The file is a subset (below), which
-//! the OFL also permits — Noto declares no Reserved Font Name, so the family
-//! name is kept as published.
+//! see `assets/NotoSansJP-VF.ttf.LICENSE`, which *is* tracked — built artifacts
+//! redistribute the font, so its licence has to travel with this repository
+//! even though the font itself does not.
 //!
-//! # Size, and the subset
+//! # Where the file comes from
 //!
-//! The file here is **not** the font as published — it is a subset built by
-//! `tools/subset_font.py`, ~0.56 MB against the original's 9.6 MB. Note that
-//! "Latin + Japanese" is not itself the saving: keeping every kanji only takes
-//! 9.6 MB down to 8.2 MB, because the kanji *are* the font. What makes the
-//! difference is keeping only the ideographs this repository's own sources
-//! actually contain (95 of them), alongside the full Latin and kana ranges.
+//! `assets/NotoSansJP-VF.ttf` is **not in git**. It is ~9.6 MB of binary that
+//! would sit in history forever, and `build.rs` downloads it on the first wasm
+//! build (pinned to a release tag and checked against a SHA-256) and caches it
+//! there. Native builds never fetch it — they enumerate real system fonts.
 //!
-//! The consequence to know about: **a character outside the subset renders as
-//! tofu, silently.** Re-run the script after adding Japanese text to the demo.
-//! The variable weight axis is deliberately retained — see the script for why
-//! flattening it to one weight would quietly disable bold.
-//!
-//! Native builds do not include any of this — they enumerate real system
-//! fonts, so embedding would cost half a megabyte for nothing.
-//!
-//! Native builds do **not** include this — they enumerate real system fonts, so
-//! embedding would cost 9.6 MB for nothing.
+//! It is the font *whole*, deliberately, because this repository is the
+//! framework: its demos grow new text as features land, and a subset narrowed
+//! to today's strings would turn tomorrow's demo into tofu **silently** — no
+//! error, no log line. A page built on matcha is the opposite case, a closed
+//! set of text known at build time, so it should subset the font to its own
+//! content in its own repository and point `MATCHA_EMBEDDED_FONT` at the
+//! result. Doing that is worth roughly 0.3 MB gzipped against a ~5 MB wasm
+//! binary, which is the honest reason it is not done here.
 
 /// The embedded font, compiled into web builds only.
 pub(crate) const FONT_BYTES: &[u8] = include_bytes!("assets/NotoSansJP-VF.ttf");
