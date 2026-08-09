@@ -17,9 +17,7 @@ pub mod checkbox;
 pub mod color;
 pub mod color_rect;
 pub mod easing;
-/// The font web builds carry, because a browser exposes no system fonts.
-#[cfg(web)]
-pub(crate) mod embedded_font;
+pub mod font;
 pub mod image;
 pub mod interaction;
 pub mod layout;
@@ -44,6 +42,7 @@ pub use parley;
 
 pub use anchor::Anchor;
 pub use easing::Easing;
+pub use font::{register_default_font, WithDefaultFont};
 pub use box_style::{box_node, BoxShadow, BoxStyle, Corners, Sides};
 pub use button::{Button, ButtonLabel};
 pub use checkbox::Checkbox;

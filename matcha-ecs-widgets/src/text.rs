@@ -95,6 +95,11 @@ struct FontCtxInner {
     /// shared across every `Text` entity/frame that draws the same glyph at
     /// the same quantized size (`suzuri::GlyphId` bundles font+glyph+size).
     stencil_cache: Mutex<HashMap<suzuri::GlyphId, (AtlasRegion, [f32; 2]), fxhash::FxBuildHasher>>,
+    /// Fonts registered so far, and the deduplication key for
+    /// [`FontCtx::ensure_registered`]. The `Arc`s are kept alive deliberately —
+    /// see `RichText`'s `ParleyFontCtxInner::registered_fonts` for why identity
+    /// has to outlive the comparison.
+    registered_fonts: Mutex<Vec<Arc<Vec<u8>>>>,
 }
 
 /// World resource wrapping the shared `suzuri::FontSystem` plus the glyph
@@ -109,18 +114,69 @@ pub(crate) struct FontCtx(Arc<FontCtxInner>);
 impl FontCtx {
     pub(crate) fn new() -> Self {
         let font_system = suzuri::FontSystem::new();
-        // A browser exposes no system fonts to enumerate: `load_system_fonts`
-        // is a no-op there, every query misses, and `Text` silently measures
-        // 0x0 and draws nothing. `Button` draws its label through this same
-        // context, so without the embedded font every button is blank too.
-        #[cfg(web)]
-        crate::embedded_font::register_with_suzuri(&font_system);
         #[cfg(not(web))]
         font_system.load_system_fonts();
         Self(Arc::new(FontCtxInner {
             font_system,
             stencil_cache: Mutex::new(HashMap::default()),
+            registered_fonts: Mutex::new(Vec::new()),
         }))
+    }
+
+    /// Register `data` with suzuri's font system, unless the very same `Arc`
+    /// was registered before, and make it the sans-serif family — which is
+    /// what [`shape`] queries for, so a font registered but not mapped still
+    /// draws nothing.
+    ///
+    /// # Why this exists
+    ///
+    /// A browser exposes no font database to enumerate: `load_system_fonts`
+    /// goes through `fontdb`, whose implementation is a series of
+    /// `#[cfg(target_os = ...)]` blocks with no arm matching wasm, so it is a
+    /// no-op there. `shape` then queries `Family::SansSerif`, misses, and
+    /// returns an empty layout — not an error, just a widget that measures
+    /// 0x0 and draws nothing. `Button` draws its label through this same
+    /// context, so without a registered font every button is blank too.
+    ///
+    /// Only the **first** font registered becomes sans-serif; later ones are
+    /// available for lookup but do not displace it.
+    pub(crate) fn ensure_registered(&self, data: &Arc<Vec<u8>>) {
+        let first;
+        {
+            let mut registered = self.0.registered_fonts.lock();
+            if registered.iter().any(|font| Arc::ptr_eq(font, data)) {
+                return;
+            }
+            registered.push(data.clone());
+            first = registered.len() == 1;
+        }
+
+        // Faces this load appends start here. Indexing rather than
+        // `faces().first()` because on native `load_system_fonts` has already
+        // filled the database, so the first face is some system font, not the
+        // one being registered now.
+        let face_base = self.0.font_system.faces().len();
+        self.0.font_system.load_font_binary(data.to_vec());
+
+        if !first {
+            // Available for lookup, but it does not displace sans-serif.
+            return;
+        }
+
+        // Take the family name from the face the load produced rather than
+        // hardcoding one: swapping in a subset (or a different font) should
+        // not require editing a string here to match.
+        match self
+            .0
+            .font_system
+            .faces()
+            .get(face_base)
+            .and_then(|face| face.families.first())
+            .cloned()
+        {
+            Some((name, _)) => self.0.font_system.set_sans_serif_family(name),
+            None => log::error!("the registered font produced no faces; text will not render"),
+        }
     }
 
     /// Look up (or rasterise-and-cache) the stencil atlas region holding

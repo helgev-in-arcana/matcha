@@ -273,6 +273,7 @@ pub struct TextBox<Msg: Message> {
     key: Key,
     sizing: Sizing,
     value: String,
+    font_data: Option<Arc<Vec<u8>>>,
     w: f32,
     h: f32,
     style: TextBoxStyle,
@@ -288,6 +289,7 @@ impl<Msg: Message> TextBox<Msg> {
             key: Key::Auto,
             sizing: Sizing::default(),
             value: String::new(),
+            font_data: None,
             w,
             h,
             style: TextBoxStyle {
@@ -305,6 +307,30 @@ impl<Msg: Message> TextBox<Msg> {
             on_confirm: None,
             confirm_key: confirm_on_ctrl_enter,
             cursor: matcha_window::window::CursorIcon::Text,
+        }
+    }
+
+    /// Register font bytes for this text box.
+    ///
+    /// Only needed to add a font beyond whatever the application already
+    /// registered via
+    /// [`register_default_font`](crate::font::register_default_font) — which
+    /// is the normal way to supply a font, since it covers every widget at
+    /// once. Registration is idempotent per `Arc` identity, so passing a
+    /// cloned handle (e.g. from a `LazyLock`) every frame costs nothing.
+    pub fn font(mut self, data: Arc<Vec<u8>>) -> Self {
+        self.font_data = Some(data);
+        self
+    }
+
+    /// Register this text box's own font, if it declared one. See
+    /// `RichText::register_font` for why this is not done from the render
+    /// item builder.
+    fn register_font(&self, entity: &mut EntityWorldMut) {
+        let font_ctx = entity
+            .world_scope(|world| world.get_resource_or_insert_with(ParleyFontCtx::new).clone());
+        if let Some(font_data) = &self.font_data {
+            font_ctx.ensure_registered(font_data);
         }
     }
 
@@ -458,12 +484,16 @@ impl<Msg: Message> Widget for TextBox<Msg> {
     }
 
     fn after_spawn(&self, entity: &mut EntityWorldMut) {
+        self.register_font(entity);
         let item = text_box_render_item(entity, self.style);
         entity.insert(item);
     }
 
     fn patch(&self, entity: &mut EntityWorldMut) {
         self.sync_sizing(entity);
+        // Unconditionally: a newly declared font must reach the context even
+        // when nothing else about this text box changed.
+        self.register_font(entity);
         let mut needs_rebuild = false;
 
         // Only an app-driven *change* of the declared value overwrites the

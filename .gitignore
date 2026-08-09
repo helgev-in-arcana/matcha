@@ -30,7 +30,7 @@ Cargo.lock
 # Trunk build output
 matcha-web/dist/
 
-# The font the web build embeds. Fetched by matcha-ecs-widgets/build.rs and
+# The font the web build embeds. Fetched by matcha-web/build.rs and
 # cached here; ~9.6 MB of binary that does not belong in history. Its licence
 # stays tracked, since built artifacts redistribute the font.
-matcha-ecs-widgets/src/assets/NotoSansJP-VF.ttf
+matcha-web/src/assets/NotoSansJP-VF.ttf

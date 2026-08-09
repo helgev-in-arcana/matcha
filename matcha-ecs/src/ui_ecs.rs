@@ -409,6 +409,18 @@ where
         self
     }
 
+    /// The world, for installing resources before the first frame.
+    ///
+    /// This is the escape hatch a widget crate needs to offer its own
+    /// startup-time configuration: `matcha-ecs-widgets` depends on this crate
+    /// and never the reverse, so a widget-owned resource (a font, say) cannot
+    /// be reached through a `with_*` method here without the core learning
+    /// what it is. Such configuration is exposed as an extension trait over
+    /// `UiEcs` on the widget side, and this is what it writes through.
+    pub fn world_mut(&mut self) -> &mut World {
+        &mut self.world
+    }
+
     /// The current focus state. Focus lives in the ECS world rather than in
     /// the app model, so this is how an embedder reads it from outside.
     pub fn focus(&self) -> &Focus {

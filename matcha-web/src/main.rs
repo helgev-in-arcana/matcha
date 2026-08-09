@@ -51,6 +51,20 @@ const ACCENT: [f32; 4] = [0.35, 0.60, 0.95, 1.0];
 /// The id of the `<canvas>` in `index.html`.
 const CANVAS_ID: &str = "matcha-canvas";
 
+/// The font web builds carry, because a browser exposes no system fonts to
+/// enumerate and both text stacks then draw nothing, silently — see
+/// [`matcha_ecs_widgets::font`] for the full story, and `build.rs` for where
+/// the bytes come from (they are not in git).
+///
+/// A `LazyLock<Arc<Vec<u8>>>` rather than a `&'static [u8]` for two reasons:
+/// registration deduplicates on `Arc` identity, so the same handle has to be
+/// handed out every time; and parley's `Blob::new` takes an
+/// `Arc<dyn AsRef<[u8]>>`, so a *sized* `Vec` behind the `Arc` is what lets it
+/// share this allocation instead of copying ~9.6 MB.
+#[cfg(web)]
+static FONT: std::sync::LazyLock<std::sync::Arc<Vec<u8>>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(include_bytes!("assets/NotoSansJP-VF.ttf").to_vec()));
+
 struct Model {
     count: i32,
     agree: bool,
@@ -182,9 +196,15 @@ fn main() {
         let app = UiEcs::new_async(model(), view, reduce).await;
         log::info!("matcha-web: GPU ready, handing off to the browser event loop");
 
+        // One registration reaches both text stacks, and so every widget:
+        // `RichText`/`TextBox` shape through parley, `Text` and `Button`'s
+        // label through suzuri. Leaving it out draws nothing anywhere, with no
+        // error to go on.
+        use matcha_ecs_widgets::WithDefaultFont;
         let app = app
             .with_window_config(config)
             .with_ui_scale(dpr)
+            .with_default_font(FONT.clone())
             .with_pre_layout_systems(matcha_ecs_widgets::default_systems());
 
         // Returns immediately: winit hands the app to the browser's event loop.

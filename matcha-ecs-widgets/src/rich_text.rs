@@ -45,7 +45,10 @@ use std::{
     collections::HashMap,
     num::NonZeroUsize,
     ops::Range,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -490,6 +493,14 @@ pub(crate) struct ParleyFontCtxInner {
     /// every frame), shared across every `RichText` entity/frame drawing the
     /// same glyph at the same size.
     stencil_cache: Mutex<glyph_cache::GlyphCache<GlyphKey, Option<(AtlasRegion, [f32; 2], [i32; 2])>>>,
+    /// Fonts registered so far, and the deduplication key for
+    /// [`ParleyFontCtx::ensure_registered`]. The `Arc`s are kept alive
+    /// deliberately: identity is pointer identity, and a dropped allocation
+    /// could otherwise be reused at the same address, making a *new* font
+    /// compare equal to an old one and silently skip registration — which
+    /// surfaces as text that draws nothing, with no error and no log line.
+    registered_fonts: Mutex<Vec<Arc<Vec<u8>>>>,
+    generics_mapped: AtomicBool,
 }
 
 /// World resource wrapping parley's `FontContext`/`LayoutContext`, swash's
@@ -500,10 +511,7 @@ pub(crate) struct ParleyFontCtx(pub(crate) Arc<ParleyFontCtxInner>);
 
 impl ParleyFontCtx {
     pub(crate) fn new() -> Self {
-        #[allow(unused_mut)]
-        let mut font_cx = parley::FontContext::new();
-        #[cfg(web)]
-        crate::embedded_font::register_with_parley(&mut font_cx);
+        let font_cx = parley::FontContext::new();
 
         Self(Arc::new(ParleyFontCtxInner {
             font_cx: Mutex::new(font_cx),
@@ -512,7 +520,66 @@ impl ParleyFontCtx {
             stencil_cache: Mutex::new(glyph_cache::GlyphCache::new(
                 NonZeroUsize::new(GLYPH_CACHE_CAPACITY).expect("GLYPH_CACHE_CAPACITY is a nonzero constant"),
             )),
+            registered_fonts: Mutex::new(Vec::new()),
+            generics_mapped: AtomicBool::new(false),
         }))
+    }
+
+    /// Register `data` with parley's font context, unless the very same `Arc`
+    /// was registered before (see `registered_fonts` for why identity is
+    /// pointer identity over a kept-alive `Arc`, not a hash of the bytes).
+    ///
+    /// The **first** font registered this way also becomes every generic
+    /// family — `sans-serif`, `system-ui`, `serif`, `monospace`. Mapping all
+    /// four matters because `system-ui` is `RichText`/`TextBox`'s default
+    /// `font_family`, so a font present but mapped to nothing still renders
+    /// nothing. Note this writes fontique's *collection-wide* generic mapping,
+    /// shared by every widget drawing through this resource, and that
+    /// "the first one wins" makes it order-dependent when an app registers
+    /// several fonts — declare the one you want as the default first.
+    ///
+    /// This is deliberately **not** gated on the web: `.font(..)`/
+    /// [`register_default_font`] is an explicit request, and silently ignoring
+    /// it on native while honouring it in a browser would be a platform
+    /// difference with no signal. Native builds that never call it keep
+    /// enumerating system fonts exactly as before.
+    pub(crate) fn ensure_registered(&self, data: &Arc<Vec<u8>>) {
+        {
+            let mut registered = self.0.registered_fonts.lock();
+            if registered.iter().any(|font| Arc::ptr_eq(font, data)) {
+                return;
+            }
+            registered.push(data.clone());
+        }
+
+        use parley::fontique::{Blob, GenericFamily};
+
+        // `Arc<Vec<u8>>: AsRef<[u8]>`, so the blob shares this allocation rather
+        // than copying it — which matters when the font is ~9.6 MB and the
+        // heap is a browser's.
+        let blob = Blob::new(data.clone());
+        let mut font_cx = self.0.font_cx.lock();
+        let registered_families = font_cx.collection.register_fonts(blob, None);
+
+        if registered_families.is_empty() {
+            log::error!("the registered font produced no families; text will not render");
+            return;
+        }
+
+        if !self.0.generics_mapped.swap(true, Ordering::Relaxed) {
+            if let Some((family_id, _)) = registered_families.first() {
+                for generic in [
+                    GenericFamily::SansSerif,
+                    GenericFamily::SystemUi,
+                    GenericFamily::Serif,
+                    GenericFamily::Monospace,
+                ] {
+                    font_cx
+                        .collection
+                        .set_generic_families(generic, core::iter::once(*family_id));
+                }
+            }
+        }
     }
 
     /// Marks the start of a new eviction-protection batch. Called once per
@@ -923,6 +990,7 @@ pub struct RichText {
     key: Key,
     sizing: Sizing,
     content: String,
+    font_data: Option<Arc<Vec<u8>>>,
     font_size: f32,
     color: [f32; 4],
     font_family: String,
@@ -954,6 +1022,7 @@ impl RichText {
             key: Key::Auto,
             sizing: Sizing::default(),
             content: content.into(),
+            font_data: None,
             font_size: 16.0,
             color: [0.0, 0.0, 0.0, 1.0],
             font_family: "system-ui".to_string(),
@@ -978,6 +1047,19 @@ impl RichText {
             enter_fade: None,
             exit_fade: None,
         }
+    }
+
+    /// Register font bytes for this text.
+    ///
+    /// Only needed to add a font beyond whatever the application already
+    /// registered via
+    /// [`register_default_font`](crate::font::register_default_font) — which
+    /// is the normal way to supply a font, since it covers every widget at
+    /// once. Registration is idempotent per `Arc` identity, so passing a
+    /// cloned handle (e.g. from a `LazyLock`) every frame costs nothing.
+    pub fn font(mut self, data: Arc<Vec<u8>>) -> Self {
+        self.font_data = Some(data);
+        self
     }
 
     /// Append a differently-styled run of text after whatever's been
@@ -1205,8 +1287,25 @@ impl RichText {
         }
     }
 
+    /// Register this widget's own font, if it declared one, and make sure the
+    /// `ParleyFontCtx` resource exists.
+    ///
+    /// Called from `after_spawn`/`patch` rather than from the `RenderItem`
+    /// builder, deliberately: `RichTextStyle::measure` shapes through this
+    /// same resource, so the font has to be in place before *layout* runs, and
+    /// hanging that off the draw path would make layout depend on a side
+    /// effect of building a render item. Idempotent per `Arc` identity.
+    fn register_font(&self, entity: &mut EntityWorldMut) -> ParleyFontCtx {
+        let font_ctx = entity
+            .world_scope(|world| world.get_resource_or_insert_with(ParleyFontCtx::new).clone());
+        if let Some(font_data) = &self.font_data {
+            font_ctx.ensure_registered(font_data);
+        }
+        font_ctx
+    }
+
     fn rebuild_render_item(&self, entity: &mut EntityWorldMut) -> RenderItem {
-        let font_ctx = entity.world_scope(|world| world.get_resource_or_insert_with(ParleyFontCtx::new).clone());
+        let font_ctx = self.register_font(entity);
         let wrap_width = entity
             .get::<RichTextWrapWidth>()
             .expect("bundle() inserted RichTextWrapWidth")
@@ -1253,6 +1352,9 @@ impl Widget for RichText {
 
     fn patch(&self, entity: &mut EntityWorldMut) {
         self.sync_sizing(entity);
+        // Unconditionally: a newly declared font must reach the context even
+        // when content and style are unchanged.
+        self.register_font(entity);
         let mut changed = false;
         if let Some(mut c) = entity.get_mut::<RichTextContent>() {
             changed |= c.set_if_neq(self.resolved_content());
