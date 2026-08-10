@@ -47,6 +47,11 @@ parking_lot = { workspace = true }
 
 # NOTE: the `cfg` expression below must stay in sync with the `web` alias
 # defined in build.rs (`all(target_arch = "wasm32", target_os = "unknown")`).
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+# The workspace dep turns `image`'s defaults off for wasm's sake; `rayon` is
+# only unusable *there*, so a native build gets its parallel decode back.
+image = { workspace = true, features = ["rayon"] }
+
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 # This crate also holds wgpu handles in ECS resources (FontCtx's stencil cache,
 # ImageCtx). matcha-ecs enables the same feature and Cargo unifies them, but

@@ -66,17 +66,27 @@ bytemuck = { version = "1", features = ["derive"] }
 nalgebra = { version = "0.34", features = ["bytemuck"] }
 
 # image
-# Default features pull in `rayon` (an OS thread pool) and `avif` -> ravif/rav1e,
-# neither of which is usable on wasm; the decoders below are all pure Rust and
-# cover everything the Image widgets actually decode.
+# `default = ["rayon", "default-formats"]`, and neither is usable on wasm:
+# `rayon` is an OS thread pool, and `default-formats` includes `avif` ->
+# ravif/rav1e. Everything else in `default-formats` is pure Rust and kept, so
+# this narrows only those two rather than the format list generally.
+#
+# `rayon` is added back for native targets by the crates that consume this
+# (matcha-ecs-widgets, matcha-tree-widgets) — a wasm constraint should not cost
+# a desktop build its parallel decode.
 image = { version = "0.25", default-features = false, features = [
-    "png",
-    "jpeg",
-    "gif",
-    "webp",
     "bmp",
+    "dds",
+    "ff",
+    "gif",
     "ico",
+    "jpeg",
+    "png",
+    "pnm",
+    "qoi",
+    "tga",
     "tiff",
+    "webp",
 ] }
 
 # font
