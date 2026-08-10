@@ -9,8 +9,13 @@
 //! These are unit tests of the conversion itself. Whether `run_layout` and the
 //! pointer path apply it is exercised end-to-end by `tests/headless_app.rs`,
 //! which drives the real `UiEcs` through the real `Adapter`.
+//!
+//! It lives on the window entity rather than in a resource because the factor
+//! genuinely differs per window — two displays of different densities give the
+//! same app two at once. `resumed` seeds it from the window's own reported
+//! scale factor, so an app never supplies it.
 
-use matcha_ecs::resources::UiScale;
+use matcha_ecs::components::window::UiScale;
 
 #[test]
 fn the_default_is_one_to_one() {

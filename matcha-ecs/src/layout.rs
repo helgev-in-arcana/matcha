@@ -432,7 +432,7 @@ pub fn run_layout(world: &mut World) {
     let inner = window.window.inner_size();
     // The window reports physical pixels; layout works in UI pixels.
     let scale = world
-        .get_resource::<crate::resources::UiScale>()
+        .get::<crate::components::window::UiScale>(root)
         .copied()
         .unwrap_or_default();
     let size = scale.to_ui([inner[0] as f32, inner[1] as f32]);

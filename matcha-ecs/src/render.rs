@@ -12,7 +12,10 @@
 //! [`InlineDriver`] runs the same `build_and_present` synchronously; it exists to
 //! isolate regressions between "the snapshot/extract split" and "the threading".
 
-use std::{collections::HashMap, sync::mpsc, sync::Arc, thread::JoinHandle};
+use std::sync::Arc;
+// `ThreadDriver`'s alone — it is native-only, and so are these.
+#[cfg(not(web))]
+use std::{collections::HashMap, sync::mpsc, thread::JoinHandle};
 
 use bevy_ecs::{entity::Entity, world::World};
 use gpu_utils::texture_atlas::TextureAtlas;
@@ -71,6 +74,12 @@ pub struct ExtractedFrame {
 pub struct RenderSnapshot {
     pub window_id: WindowId,
     pub surface_texture: wgpu::SurfaceTexture,
+    /// Render target view of `surface_texture`, made by
+    /// `WindowSurface::create_render_view` — the one place that knows a view's
+    /// format is not always its texture's. Built when the snapshot is, because
+    /// that is where the surface is still in reach.
+    pub view: wgpu::TextureView,
+    /// The format `view` is in, and so the format pipelines target.
     pub format: wgpu::TextureFormat,
     pub viewport_size: [f32; 2],
     pub load_color: wgpu::Color,
@@ -151,6 +160,7 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
     let RenderSnapshot {
         window_id,
         surface_texture,
+        view,
         format,
         viewport_size,
         load_color,
@@ -187,18 +197,6 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
                 .with_clip(item.clip),
         );
     }
-
-    // Name the format explicitly rather than inheriting the texture's: on the
-    // web the canvas is configured non-sRGB (WebGPU allows no sRGB canvas
-    // format) and drawn through an sRGB view, which is what preserves the
-    // automatic linear->sRGB encode the builders' colours rely on. `format` is
-    // `WindowSurface::format()`, i.e. already the view format where they differ.
-    let view = surface_texture
-        .texture
-        .create_view(&wgpu::TextureViewDescriptor {
-            format: Some(format),
-            ..Default::default()
-        });
 
     if let Err(e) = core.render_flat(
         &device,

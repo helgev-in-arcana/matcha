@@ -16,6 +16,7 @@ use std::sync::{atomic::AtomicBool, mpsc, Arc, OnceLock};
 
 use bevy_ecs::{
     entity::Entity,
+    resource::Resource,
     schedule::{IntoScheduleConfigs, Schedule, SystemSet},
     system::{Query, Res, ResMut, ScheduleSystem},
     world::World,
@@ -41,7 +42,7 @@ use crate::{
     components::{
         input::Message,
         view::ViewChildren,
-        window::{Window as WindowComp, WindowBelonging},
+        window::{UiScale, Window as WindowComp, WindowBelonging},
     },
     focus::{run_validate_focus, sync_focus_components, Focus, FocusConfig},
     input::{
@@ -52,16 +53,18 @@ use crate::{
     model::{ModelHandle, ModelResource},
     pick::{update_picker, PickQuery, Picker, PickerResource},
     pointer::{self, sync_cursor, sync_pointer_components},
-    render::{build_and_present, extract_items, InlineDriver, RenderDriver, RenderSnapshot},
+    render::{build_and_present, extract_items, RenderDriver, RenderSnapshot},
     resources::{
         ClipMask, FrameTime, GpuResource, RedrawRequest, RenderWindowRoot, RendererResource,
-        UiScale, ui_root,
+        ui_root,
     },
     view::{run_view, Scope},
 };
 
 #[cfg(not(web))]
 use crate::render::ThreadDriver;
+#[cfg(web)]
+use crate::render::InlineDriver;
 
 /// The render schedule's stages, run in this order every frame.
 ///
@@ -271,7 +274,6 @@ where
         world.insert_resource(FocusConfig::default());
         world.insert_resource(FrameTime(web_time::Instant::now()));
         world.insert_resource(RedrawRequest::default());
-        world.insert_resource(UiScale::default());
 
         let (sender, receiver) = mpsc::channel::<Box<dyn FnOnce(&mut M) + Send>>();
         let wake_pending = Arc::new(AtomicBool::new(false));
@@ -382,19 +384,10 @@ where
     }
 
     /// Swap the render driver (default: [`ThreadDriver`] natively,
-    /// [`InlineDriver`] on the web, which is the only one that works there).
+    /// [`crate::render::InlineDriver`] on the web, which is the only one that
+    /// works there).
     pub fn with_render_driver(mut self, driver: impl RenderDriver + 'static) -> Self {
         self.render_driver = parking_lot::Mutex::new(Box::new(driver));
-        self
-    }
-
-    /// Set the display scale factor (physical pixels per UI pixel).
-    ///
-    /// Defaults to 1.0. The window's own reported scale factor is picked up
-    /// automatically on `ScaleFactorChanged`; this is for setting it before the
-    /// first frame, which on the web means `window.devicePixelRatio`.
-    pub fn with_ui_scale(mut self, scale: f32) -> Self {
-        self.world.insert_resource(UiScale(scale));
         self
     }
 
@@ -409,7 +402,8 @@ where
         self
     }
 
-    /// The world, for installing resources before the first frame.
+    /// Configure a resource before the first frame, inserting it with `init`
+    /// if it is not there yet.
     ///
     /// This is the escape hatch a widget crate needs to offer its own
     /// startup-time configuration: `matcha-ecs-widgets` depends on this crate
@@ -417,8 +411,20 @@ where
     /// be reached through a `with_*` method here without the core learning
     /// what it is. Such configuration is exposed as an extension trait over
     /// `UiEcs` on the widget side, and this is what it writes through.
-    pub fn world_mut(&mut self) -> &mut World {
-        &mut self.world
+    ///
+    /// Deliberately narrower than handing out `&mut World`: the caller names
+    /// one resource type and gets that resource, so it cannot despawn
+    /// entities, drop resources it does not own, or run a schedule. It can
+    /// still name a core-owned resource, so this is a guard rail rather than a
+    /// boundary — but the accidents it does rule out are the ones that would
+    /// be silent.
+    pub fn configure_resource<T: Resource>(
+        mut self,
+        init: impl FnOnce() -> T,
+        f: impl FnOnce(&mut T),
+    ) -> Self {
+        f(&mut self.world.get_resource_or_insert_with(init));
+        self
     }
 
     /// The current focus state. Focus lives in the ECS world rather than in
@@ -539,6 +545,44 @@ where
         (root.window_id == window_id).then_some(root.entity)
     }
 
+    /// The entity carrying the window with this id, whether or not it is the
+    /// UI root.
+    ///
+    /// Unlike [`root_of`](Self::root_of) this is a scan over every
+    /// `WindowComp`, which is what an event naming a specific window needs:
+    /// the answer stays correct once there is more than one.
+    fn window_entity(&mut self, window_id: WindowId) -> Option<Entity> {
+        let mut windows = self.world.query::<(Entity, &WindowComp)>();
+        windows
+            .iter(&self.world)
+            .find(|(_, window_comp)| window_comp.window.id() == window_id)
+            .map(|(entity, _)| entity)
+    }
+
+    /// The scale factor of the window rooted at `entity`, or 1:1 if it carries
+    /// none — which is the behaviour every caller had before `UiScale` existed.
+    fn ui_scale_of(&self, entity: Entity) -> UiScale {
+        self.world.get::<UiScale>(entity).copied().unwrap_or_default()
+    }
+
+    /// The pointer's position in UI pixels.
+    ///
+    /// Events carry physical pixels, but picking tests against rects layout
+    /// produced in UI pixels, so the two have to be expressed the same way or
+    /// clicks land somewhere other than where the user aimed.
+    ///
+    /// Scaled by the UI root window's factor. A `DeviceEvent` is not reliably
+    /// attributed to a window, so this cannot select one by id — the same
+    /// single-root assumption [`ui_root`] already makes.
+    fn pointer_ui_position(&self, event: &DeviceEvent) -> [f32; 2] {
+        let scale = self
+            .world
+            .get_resource::<RenderWindowRoot>()
+            .map(|root| self.ui_scale_of(root.entity))
+            .unwrap_or_default();
+        scale.to_ui(event.mouse_viewport_position())
+    }
+
     /// Ask one window to redraw, ignoring an id that is not ours.
     fn request_redraw_of(&self, window_id: WindowId) {
         if let Some(root) = self.root_of(window_id)
@@ -572,19 +616,6 @@ where
     /// extract the drawable items, and clone the GPU resources. Returns `None`
     /// if the frame should be skipped (wrong window, no GPU/root, or the
     /// surface has no texture to give this frame).
-    /// The pointer's position in UI pixels.
-    ///
-    /// Events carry physical pixels, but picking tests against rects layout
-    /// produced in UI pixels, so the two have to be expressed the same way or
-    /// clicks land somewhere other than where the user aimed.
-    fn pointer_ui_position(&self, event: &DeviceEvent) -> [f32; 2] {
-        self.world
-            .get_resource::<UiScale>()
-            .copied()
-            .unwrap_or_default()
-            .to_ui(event.mouse_viewport_position())
-    }
-
     fn build_snapshot(&mut self, window_id: WindowId) -> Option<RenderSnapshot> {
         let root_entity = self.root_of(window_id)?;
 
@@ -598,19 +629,15 @@ where
             )
         };
 
+        let scale = self.ui_scale_of(root_entity);
         let window_comp = self.world.get::<WindowComp>(root_entity)?;
         let window = &window_comp.window;
         let inner = window.inner_size();
         // UI pixels, matching what layout produced. The framebuffer stays at
         // full physical resolution — this only scales the coordinate system the
         // renderer normalises against, so nothing is drawn at reduced detail.
-        let viewport_size = self
-            .world
-            .get_resource::<UiScale>()
-            .copied()
-            .unwrap_or_default()
-            .to_ui([inner[0] as f32, inner[1] as f32]);
-        let format = window.format();
+        let viewport_size = scale.to_ui([inner[0] as f32, inner[1] as f32]);
+        let format = window.render_format();
 
         let surface_texture = match window.surface().get_surface_texture(&device) {
             Ok(Some(texture)) => texture,
@@ -620,6 +647,9 @@ where
                 return None;
             }
         };
+        // Made here rather than at present time: the surface is the only thing
+        // that knows a render view's format is not always its texture's.
+        let view = window.surface().create_render_view(&surface_texture.texture);
 
         let frame = extract_items(&self.world, root_entity);
         let clips = self.resolve_clips(&frame.clips, &device, &queue, &stencil_atlas);
@@ -627,6 +657,7 @@ where
         Some(RenderSnapshot {
             window_id,
             surface_texture,
+            view,
             format,
             viewport_size,
             load_color: wgpu::Color {
@@ -766,6 +797,10 @@ where
         };
         let window_id = window.id();
 
+        // The window already knows its display's scale factor, so nothing has
+        // to be told what it is. `ScaleFactorChanged` keeps it current.
+        let ui_scale = UiScale(window.dpi() as f32);
+
         let entity = self.world.spawn_empty().id();
         self.world.entity_mut(entity).insert((
             WindowComp { window },
@@ -774,6 +809,7 @@ where
                 window_id,
                 window_entity: entity,
             },
+            ui_scale,
         ));
 
         let view_fn = &self.view_fn;
@@ -867,10 +903,15 @@ where
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             // Moving a window between displays of different densities, or a
-            // browser zoom. Layout reads this every frame, so updating the
-            // resource and redrawing is the whole of it.
+            // browser zoom. Layout reads the component every frame, so updating
+            // the window this names and redrawing is the whole of it.
             WindowEvent::ScaleFactorChanged { scale_factor } => {
-                self.world.insert_resource(UiScale(scale_factor as f32));
+                let Some(entity) = self.window_entity(window_id) else {
+                    return;
+                };
+                self.world
+                    .entity_mut(entity)
+                    .insert(UiScale(scale_factor as f32));
                 self.render_sync(window_id);
             }
             WindowEvent::Resized { inner_size, .. } => {
@@ -884,11 +925,10 @@ where
                     return;
                 };
 
-                let mut windows = self.world.query::<&WindowComp>();
-                let Some(window_comp) = windows
-                    .iter(&self.world)
-                    .find(|window_comp| window_comp.window.id() == window_id)
-                else {
+                let Some(entity) = self.window_entity(window_id) else {
+                    return;
+                };
+                let Some(window_comp) = self.world.get::<WindowComp>(entity) else {
                     return;
                 };
 
@@ -910,7 +950,6 @@ where
     fn window_destroyed(&mut self, _event_loop: &impl EventLoop, _window_id: WindowId) {
         // Per-window resource teardown is not needed for the single window M1/M2 support.
     }
-
 
     fn device_event(
         &mut self,

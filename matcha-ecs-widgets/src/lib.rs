@@ -42,7 +42,7 @@ pub use parley;
 
 pub use anchor::Anchor;
 pub use easing::Easing;
-pub use font::{register_default_font, WithDefaultFont};
+pub use font::{register_default_font, FontData, WithDefaultFont};
 pub use box_style::{box_node, BoxShadow, BoxStyle, Corners, Sides};
 pub use button::{Button, ButtonLabel};
 pub use checkbox::Checkbox;

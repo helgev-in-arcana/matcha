@@ -72,6 +72,7 @@ use parley::{PlainEditor, StyleProperty};
 use renderer::RenderNode;
 
 use crate::{
+    font::FontData,
     live::{LiveBool, LiveF32, LiveVec},
     sizing::Sizing,
     box_style::{box_node, BoxStyle},
@@ -273,7 +274,7 @@ pub struct TextBox<Msg: Message> {
     key: Key,
     sizing: Sizing,
     value: String,
-    font_data: Option<Arc<Vec<u8>>>,
+    font_data: Option<FontData>,
     w: f32,
     h: f32,
     style: TextBoxStyle,
@@ -318,7 +319,7 @@ impl<Msg: Message> TextBox<Msg> {
     /// is the normal way to supply a font, since it covers every widget at
     /// once. Registration is idempotent per `Arc` identity, so passing a
     /// cloned handle (e.g. from a `LazyLock`) every frame costs nothing.
-    pub fn font(mut self, data: Arc<Vec<u8>>) -> Self {
+    pub fn font(mut self, data: FontData) -> Self {
         self.font_data = Some(data);
         self
     }

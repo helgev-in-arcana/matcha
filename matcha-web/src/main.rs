@@ -56,14 +56,16 @@ const CANVAS_ID: &str = "matcha-canvas";
 /// [`matcha_ecs_widgets::font`] for the full story, and `build.rs` for where
 /// the bytes come from (they are not in git).
 ///
-/// A `LazyLock<Arc<Vec<u8>>>` rather than a `&'static [u8]` for two reasons:
-/// registration deduplicates on `Arc` identity, so the same handle has to be
-/// handed out every time; and parley's `Blob::new` takes an
-/// `Arc<dyn AsRef<[u8]>>`, so a *sized* `Vec` behind the `Arc` is what lets it
-/// share this allocation instead of copying ~9.6 MB.
+/// A `LazyLock` rather than a bare `&'static [u8]` because registration
+/// deduplicates on `Arc` identity, so the same handle has to be handed out
+/// every time. The `Arc` wraps the static slice itself, not a `Vec` copy of
+/// it: [`FontData`] is a trait object, so parley shares these bytes straight
+/// out of the binary's data segment. (suzuri's `load_font_binary` wants an
+/// owned `Vec` and still copies once — that is its API.)
 #[cfg(web)]
-static FONT: std::sync::LazyLock<std::sync::Arc<Vec<u8>>> =
-    std::sync::LazyLock::new(|| std::sync::Arc::new(include_bytes!("assets/NotoSansJP-VF.ttf").to_vec()));
+static FONT: std::sync::LazyLock<matcha_ecs_widgets::FontData> = std::sync::LazyLock::new(|| {
+    std::sync::Arc::new(include_bytes!("assets/NotoSansJP-VF.ttf").as_slice())
+});
 
 struct Model {
     count: i32,
@@ -178,13 +180,7 @@ fn main() {
     let _ = console_log::init_with_level(log::Level::Info);
 
     wasm_bindgen_futures::spawn_local(async {
-        // Physical pixels per CSS pixel. Without this the whole UI renders at
-        // 1/dpr scale on any HiDPI display or zoomed browser.
-        let dpr = web_sys::window()
-            .map(|w| w.device_pixel_ratio() as f32)
-            .unwrap_or(1.0);
-
-        log::info!("matcha-web: starting (devicePixelRatio = {dpr})");
+        log::info!("matcha-web: starting");
 
         let config = matcha_window::window::WindowConfig::default()
             .with_title("matcha")
@@ -203,7 +199,6 @@ fn main() {
         use matcha_ecs_widgets::WithDefaultFont;
         let app = app
             .with_window_config(config)
-            .with_ui_scale(dpr)
             .with_default_font(FONT.clone())
             .with_pre_layout_systems(matcha_ecs_widgets::default_systems());
 

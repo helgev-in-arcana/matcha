@@ -45,10 +45,7 @@ use std::{
     collections::HashMap,
     num::NonZeroUsize,
     ops::Range,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::Duration,
 };
 
@@ -74,6 +71,7 @@ use matcha_ecs::{
     view::Widget,
 };
 
+use crate::font::{FontData, FontRegistry};
 use crate::live::LiveF32;
 use crate::sizing::Sizing;
 use crate::animation::{Easing, ExitFade, OpacityTween};
@@ -493,14 +491,13 @@ pub(crate) struct ParleyFontCtxInner {
     /// every frame), shared across every `RichText` entity/frame drawing the
     /// same glyph at the same size.
     stencil_cache: Mutex<glyph_cache::GlyphCache<GlyphKey, Option<(AtlasRegion, [f32; 2], [i32; 2])>>>,
-    /// Fonts registered so far, and the deduplication key for
-    /// [`ParleyFontCtx::ensure_registered`]. The `Arc`s are kept alive
-    /// deliberately: identity is pointer identity, and a dropped allocation
-    /// could otherwise be reused at the same address, making a *new* font
-    /// compare equal to an old one and silently skip registration — which
-    /// surfaces as text that draws nothing, with no error and no log line.
-    registered_fonts: Mutex<Vec<Arc<Vec<u8>>>>,
-    generics_mapped: AtomicBool,
+    /// Which fonts have been handed to `font_cx`, and whether one of them is
+    /// its generic families. See [`FontRegistry`] for the locking rule.
+    ///
+    /// Lock order is `registry` then `font_cx`, and nothing takes them the
+    /// other way round — `shape`/`draw_parley_layout` take `font_cx` alone and
+    /// never register.
+    registry: Mutex<FontRegistry>,
 }
 
 /// World resource wrapping parley's `FontContext`/`LayoutContext`, swash's
@@ -520,16 +517,15 @@ impl ParleyFontCtx {
             stencil_cache: Mutex::new(glyph_cache::GlyphCache::new(
                 NonZeroUsize::new(GLYPH_CACHE_CAPACITY).expect("GLYPH_CACHE_CAPACITY is a nonzero constant"),
             )),
-            registered_fonts: Mutex::new(Vec::new()),
-            generics_mapped: AtomicBool::new(false),
+            registry: Mutex::new(FontRegistry::default()),
         }))
     }
 
-    /// Register `data` with parley's font context, unless the very same `Arc`
-    /// was registered before (see `registered_fonts` for why identity is
-    /// pointer identity over a kept-alive `Arc`, not a hash of the bytes).
+    /// Register `data` with parley's font context, unless the very same handle
+    /// was registered before (see [`FontRegistry`] for why identity is pointer
+    /// identity over a kept-alive `Arc`, not a hash of the bytes).
     ///
-    /// The **first** font registered this way also becomes every generic
+    /// The first font to register **successfully** also becomes every generic
     /// family — `sans-serif`, `system-ui`, `serif`, `monospace`. Mapping all
     /// four matters because `system-ui` is `RichText`/`TextBox`'s default
     /// `font_family`, so a font present but mapped to nothing still renders
@@ -543,41 +539,41 @@ impl ParleyFontCtx {
     /// it on native while honouring it in a browser would be a platform
     /// difference with no signal. Native builds that never call it keep
     /// enumerating system fonts exactly as before.
-    pub(crate) fn ensure_registered(&self, data: &Arc<Vec<u8>>) {
-        {
-            let mut registered = self.0.registered_fonts.lock();
-            if registered.iter().any(|font| Arc::ptr_eq(font, data)) {
-                return;
-            }
-            registered.push(data.clone());
-        }
-
+    pub(crate) fn ensure_registered(&self, data: &FontData) {
         use parley::fontique::{Blob, GenericFamily};
 
-        // `Arc<Vec<u8>>: AsRef<[u8]>`, so the blob shares this allocation rather
-        // than copying it — which matters when the font is ~9.6 MB and the
-        // heap is a browser's.
+        // Held across the registration, not just across the membership check —
+        // see `FontRegistry`'s locking note.
+        let mut registry = self.0.registry.lock();
+        if registry.contains(data) {
+            return;
+        }
+
+        // `Blob::new` takes exactly this type, so the blob shares the app's
+        // allocation rather than copying it — which matters when the font is
+        // ~10 MB and the heap is a browser's.
         let blob = Blob::new(data.clone());
         let mut font_cx = self.0.font_cx.lock();
         let registered_families = font_cx.collection.register_fonts(blob, None);
 
-        if registered_families.is_empty() {
+        let Some(family_id) = registered_families.first().map(|(id, _)| *id) else {
+            // Deliberately not recorded: a font that registered nothing must
+            // not consume the default slot, and re-offering it should retry.
             log::error!("the registered font produced no families; text will not render");
             return;
-        }
+        };
 
-        if !self.0.generics_mapped.swap(true, Ordering::Relaxed) {
-            if let Some((family_id, _)) = registered_families.first() {
-                for generic in [
-                    GenericFamily::SansSerif,
-                    GenericFamily::SystemUi,
-                    GenericFamily::Serif,
-                    GenericFamily::Monospace,
-                ] {
-                    font_cx
-                        .collection
-                        .set_generic_families(generic, core::iter::once(*family_id));
-                }
+        registry.record(data);
+        if registry.claim_default_slot() {
+            for generic in [
+                GenericFamily::SansSerif,
+                GenericFamily::SystemUi,
+                GenericFamily::Serif,
+                GenericFamily::Monospace,
+            ] {
+                font_cx
+                    .collection
+                    .set_generic_families(generic, core::iter::once(family_id));
             }
         }
     }
@@ -990,7 +986,7 @@ pub struct RichText {
     key: Key,
     sizing: Sizing,
     content: String,
-    font_data: Option<Arc<Vec<u8>>>,
+    font_data: Option<FontData>,
     font_size: f32,
     color: [f32; 4],
     font_family: String,
@@ -1057,7 +1053,7 @@ impl RichText {
     /// is the normal way to supply a font, since it covers every widget at
     /// once. Registration is idempotent per `Arc` identity, so passing a
     /// cloned handle (e.g. from a `LazyLock`) every frame costs nothing.
-    pub fn font(mut self, data: Arc<Vec<u8>>) -> Self {
+    pub fn font(mut self, data: FontData) -> Self {
         self.font_data = Some(data);
         self
     }

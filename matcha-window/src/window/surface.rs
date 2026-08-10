@@ -303,28 +303,53 @@ impl WindowSurface {
         self.window.dpi()
     }
 
-    /// The format render pipelines should target — **not** necessarily the
-    /// format the surface is configured with.
+    /// The format the surface itself is configured with.
     ///
-    /// When a view format is requested it wins, because that is what
-    /// [`rendering_with_surface_texture`](Self::rendering_with_surface_texture)
-    /// creates the render target view as. The two differ only where the platform
-    /// forbids the format we actually want to draw in: WebGPU accepts only
-    /// `rgba8unorm`, `bgra8unorm` and `rgba16float` for a canvas, so the web
-    /// configures a non-sRGB canvas and draws through an sRGB view of it.
-    pub fn format(&self) -> wgpu::TextureFormat {
+    /// This is what the platform holds the swapchain in — pair it with
+    /// [`set_surface_format`](Self::set_surface_format). It is **not**
+    /// necessarily what to build pipelines against; see
+    /// [`render_format`](Self::render_format).
+    pub fn surface_format(&self) -> wgpu::TextureFormat {
+        self.current_config.lock().format
+    }
+
+    /// The format render pipelines should target.
+    ///
+    /// A requested view format wins, because that is what
+    /// [`create_render_view`](Self::create_render_view) makes the render target
+    /// view as. The two differ only where the platform forbids the format we
+    /// actually want to draw in: WebGPU accepts only `rgba8unorm`,
+    /// `bgra8unorm` and `rgba16float` for a canvas, so the web configures a
+    /// non-sRGB canvas and draws through an sRGB view of it.
+    pub fn render_format(&self) -> wgpu::TextureFormat {
         let config = self.current_config.lock();
         config.view_formats.first().copied().unwrap_or(config.format)
     }
 
     /// Updates the surface format. If no surface is attached, only updates the
     /// stored config so the next `create_surface` uses the new format.
-    pub fn change_format(&self, device: &wgpu::Device, format: wgpu::TextureFormat) {
+    ///
+    /// Leaves `view_formats` alone, so this does not necessarily change what
+    /// [`render_format`](Self::render_format) reports.
+    pub fn set_surface_format(&self, device: &wgpu::Device, format: wgpu::TextureFormat) {
         let mut config = self.current_config.lock();
         config.format = format;
         if let Some(surface) = &self.surface {
             surface.configure(device, &config);
         }
+    }
+
+    /// A render target view of `texture`, in the format pipelines target.
+    ///
+    /// Always use this instead of `create_view(&Default::default())`, which
+    /// inherits the *texture's* format: on the web that is the non-sRGB canvas
+    /// format, and drawing through it silently drops the automatic
+    /// linear->sRGB encode every colour on the upload side is written against.
+    pub fn create_render_view(&self, texture: &wgpu::Texture) -> wgpu::TextureView {
+        texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(self.render_format()),
+            ..Default::default()
+        })
     }
 }
 
@@ -391,15 +416,7 @@ impl WindowSurface {
     ) -> Result<Option<R>, SurfaceTextureError> {
         match self.get_surface_texture(device)? {
             Some(surface_texture) => {
-                // Name the format explicitly: on the web the surface is
-                // configured non-sRGB with an sRGB view format, so the
-                // texture's own format is not what we want to draw through.
-                let view = surface_texture
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor {
-                        format: Some(self.format()),
-                        ..Default::default()
-                    });
+                let view = self.create_render_view(&surface_texture.texture);
                 let result = f(&view, &surface_texture.texture);
                 surface_texture.present();
                 Ok(Some(result))
@@ -415,15 +432,7 @@ impl WindowSurface {
     ) -> Result<Option<Result<R, E>>, SurfaceTextureError> {
         match self.get_surface_texture(device)? {
             Some(surface_texture) => {
-                // Name the format explicitly: on the web the surface is
-                // configured non-sRGB with an sRGB view format, so the
-                // texture's own format is not what we want to draw through.
-                let view = surface_texture
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor {
-                        format: Some(self.format()),
-                        ..Default::default()
-                    });
+                let view = self.create_render_view(&surface_texture.texture);
                 let result = f(view);
                 surface_texture.present();
                 Ok(Some(result))
