@@ -38,10 +38,14 @@ pub(crate) const USES_UNIFORM: bool = cfg!(any(web, feature = "uniform-params"))
 /// `var<immediate> pc: Pc;` into a uniform binding at [`PARAMS_GROUP`].
 ///
 /// The rewrite is a plain substring replacement, which is only safe because
-/// every shader spells that declaration identically — the debug assertion below
-/// is what keeps it that way. A shader that reformats or renames the
-/// declaration would otherwise silently keep a push constant and fail to
-/// compile on WebGPU, in a build nobody runs locally.
+/// every shader spells that declaration identically. A shader that reformats
+/// or renames the declaration keeps its push constant, and then fails — a
+/// browser rejects the WGSL at `createShaderModule` (wgpu's WebGPU backend
+/// hands the source straight over, so naga never sees it), and under
+/// `uniform-params` naga rejects it natively against an `immediate_size` of 0.
+/// Loud, but only once a pipeline is built, and on the web only in a console.
+/// `every_shader_declares_the_parameter_block_identically` below catches it in
+/// the default `cargo test` run instead, with no GPU and no feature.
 pub(crate) fn prepare_wgsl(src: &str) -> std::borrow::Cow<'_, str> {
     #[cfg(any(web, feature = "uniform-params"))]
     {
@@ -173,5 +177,54 @@ impl FrameParamsBinding {
         pass.set_bind_group(PARAMS_GROUP, &self.bind_group, &[]);
         #[cfg(not(any(web, feature = "uniform-params")))]
         pass.set_immediates(0, bytemuck::bytes_of(_params));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every shader that reads [`FrameParams`], with the shaders' own names,
+    /// so a failure says which file to look at.
+    const DECLARING: &[(&str, &str)] = &[
+        ("renderer_render.wgsl", super::super::WGSL_RENDER),
+        ("renderer_cull.wgsl", super::super::stages::WGSL_CULL),
+        (
+            "renderer_prefix_sum_blelloch.wgsl",
+            super::super::stages::WGSL_PREFIX_SUM_BLELLOCH,
+        ),
+        (
+            "renderer_prefix_sum_single_thread.wgsl",
+            super::super::stages::WGSL_PREFIX_SUM_SINGLE_THREAD,
+        ),
+        ("renderer_scatter.wgsl", super::super::stages::WGSL_SCATTER),
+    ];
+
+    /// [`prepare_wgsl`](super::prepare_wgsl) rewrites the parameter block's
+    /// declaration by exact substring match, so a shader that reformats or
+    /// renames it keeps a push constant the web cannot use.
+    ///
+    /// Checked as text rather than by asserting on the rewrite's output,
+    /// because that is the form the check works in on *both* paths: on the
+    /// immediate path `prepare_wgsl` is the identity and has nothing to
+    /// assert. This is the whole reason the check can live in the default test
+    /// run rather than behind `uniform-params` or a browser.
+    #[test]
+    fn every_shader_declares_the_parameter_block_identically() {
+        for (name, src) in DECLARING {
+            assert_eq!(
+                src.matches("var<immediate> pc: Pc;").count(),
+                1,
+                "{name} must declare the frame parameters exactly as \
+                 `var<immediate> pc: Pc;`, on one line, once"
+            );
+        }
+    }
+
+    /// The command stage reads no parameters. It still gets the binding in its
+    /// pipeline layout (every group must be bound before a dispatch), but it
+    /// must not declare one — nothing would rewrite it, since the pipeline
+    /// reserves no immediate storage.
+    #[test]
+    fn the_command_shader_declares_no_parameter_block() {
+        assert!(!super::super::stages::WGSL_COMMAND.contains("var<immediate>"));
     }
 }

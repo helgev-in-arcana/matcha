@@ -28,12 +28,12 @@ use super::frame_params::{FrameParamsBinding, prepare_wgsl};
 /// `renderer_cull.wgsl` and `renderer_scatter.wgsl`.
 pub(crate) const COMPUTE_WORKGROUP_SIZE: u32 = 64;
 
-const WGSL_CULL: &str = include_str!("renderer_cull.wgsl");
-const WGSL_PREFIX_SUM_BLELLOCH: &str = include_str!("renderer_prefix_sum_blelloch.wgsl");
-const WGSL_PREFIX_SUM_SINGLE_THREAD: &str =
+pub(super) const WGSL_CULL: &str = include_str!("renderer_cull.wgsl");
+pub(super) const WGSL_PREFIX_SUM_BLELLOCH: &str = include_str!("renderer_prefix_sum_blelloch.wgsl");
+pub(super) const WGSL_PREFIX_SUM_SINGLE_THREAD: &str =
     include_str!("renderer_prefix_sum_single_thread.wgsl");
-const WGSL_SCATTER: &str = include_str!("renderer_scatter.wgsl");
-const WGSL_COMMAND: &str = include_str!("renderer_command.wgsl");
+pub(super) const WGSL_SCATTER: &str = include_str!("renderer_scatter.wgsl");
+pub(super) const WGSL_COMMAND: &str = include_str!("renderer_command.wgsl");
 
 /// One compute stage of the compaction pipeline. Implementations own their
 /// pipeline(s) and any internal resources, and record their dispatches into

@@ -170,6 +170,12 @@ fn mat3_columns(m: &nalgebra::Matrix3<f32>) -> Mat3Columns {
 /// scalar `u32`s only** — a `vec3<u32>` has alignment 16 in WGSL, which would
 /// silently make the shader-side struct larger than this one.
 ///
+/// **The ceiling is 128 bytes**, not 96: that is Vulkan's guaranteed minimum
+/// immediate/push-constant size, and since every pipeline here reserves this
+/// whole block, one of them exceeding it fails everywhere. There is room for
+/// two more `vec4`s, no more. (The uniform path has no such limit — this is
+/// one of the things a runtime choice between the two paths would relax.)
+///
 /// `*_half_texel` is half a texel in normalized UV units, per atlas. The render
 /// shader uses it to inset the UV clamp bounds, so that sampling at the very
 /// edge of an atlas region's usable (non-margin) rectangle can never land
