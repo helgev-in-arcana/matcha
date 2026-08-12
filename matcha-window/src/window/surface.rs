@@ -153,8 +153,17 @@ impl WindowSurface {
             return Ok(());
         };
 
+        // Only configure once the window has a size. A zero-sized
+        // configuration is rejected by wgpu, and then *every* frame fails on
+        // it — an unpresentable swapchain texture, an invalid view, an invalid
+        // render pass — until something resizes. The web reaches this
+        // routinely: winit's web backend reports `0x0` until its
+        // `ResizeObserver` first fires, which is after the surface is created.
+        // Leaving the surface unconfigured is safe: `get_surface_texture`
+        // reports the failure once and skips the frame, and the `Resized` that
+        // follows configures it.
         let [width, height] = self.window.inner_size();
-        {
+        if width != 0 && height != 0 {
             let mut config = self.current_config.lock();
             config.width = width;
             config.height = height;

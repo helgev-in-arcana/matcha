@@ -673,6 +673,13 @@ where
         // drift apart. The framebuffer stays at full physical resolution — this
         // only scales the coordinate system the renderer normalises against.
         let viewport_size = scale.to_ui(crate::render::framebuffer_size(window));
+        // Nothing can be drawn into a zero-sized framebuffer, and trying
+        // produces a fresh validation error for every stage of every frame
+        // rather than one. Reachable on the web, where winit reports `0x0`
+        // until its `ResizeObserver` first fires.
+        if viewport_size[0] <= 0.0 || viewport_size[1] <= 0.0 {
+            return None;
+        }
         let format = window.render_format();
 
         let surface_texture = match window.surface().get_surface_texture(&device) {
