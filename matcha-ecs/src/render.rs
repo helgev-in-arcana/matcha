@@ -94,6 +94,30 @@ pub struct RenderSnapshot {
     pub stencil_atlas: Arc<TextureAtlas>,
 }
 
+/// The size, in physical pixels, of the framebuffer this window's frames are
+/// actually drawn into.
+///
+/// **Not `Window::inner_size()`**, which is what the OS says the window is
+/// right now. The two disagree whenever the surface has not been reconfigured
+/// since the window changed — and then layout, the renderer's normalise matrix
+/// and the real attachment all disagree about how big the frame is. Deriving
+/// both the layout extent and `RenderSnapshot::viewport_size` from *this*
+/// makes that class of mismatch unobservable: whatever the surface is
+/// configured to, the frame is laid out and normalised to exactly fill it.
+///
+/// Falls back to the window when the surface has no size yet — a surfaceless
+/// headless window, or the web before the first `ResizeObserver` callback
+/// lands, where the config is seeded `0x0` and dividing by it would poison
+/// every coordinate with `inf`.
+pub fn framebuffer_size(window: &matcha_window::window::Window) -> [f32; 2] {
+    let config = window.surface().surface_config();
+    if config.width != 0 && config.height != 0 {
+        return [config.width as f32, config.height as f32];
+    }
+    let inner = window.inner_size();
+    [inner[0] as f32, inner[1] as f32]
+}
+
 /// Collect a window root's drawable entities and the clips enclosing them, in
 /// paint order. Clones each entity's `RenderItem` (the `cache`/`builder`
 /// `Arc`s are shared, not deep-copied) and its `GlobalTransform`; the builder

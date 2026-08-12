@@ -565,6 +565,42 @@ where
         self.world.get::<UiScale>(entity).copied().unwrap_or_default()
     }
 
+    /// One of this app's OS windows, by id.
+    ///
+    /// Resolved through [`root_of`](Self::root_of), so this answers for the UI
+    /// root window only — the same single-root scope `pointer_ui_position`
+    /// works in, and the only window this framework creates today. The
+    /// `WindowComp` scan the event handlers use needs `&mut World` for its
+    /// query cache, which a shared accessor cannot take.
+    pub fn window(&self, window_id: WindowId) -> Option<&matcha_window::window::Window> {
+        let entity = self.root_of(window_id)?;
+        self.world.get::<WindowComp>(entity).map(|c| &c.window)
+    }
+
+    /// Read-only access to the world, for inspecting what a frame resolved to
+    /// — layout output, focus, the entity tree.
+    ///
+    /// Shared rather than mutable on purpose. The mutable counterpart was
+    /// removed in favour of [`configure_resource`](Self::configure_resource),
+    /// because a caller holding `&mut World` can despawn the window root or
+    /// drop a resource the schedule assumes is present; reading can do neither.
+    pub fn world(&self) -> &World {
+        &self.world
+    }
+
+    /// The UI-space extent of `window_id`'s next frame: the constraints
+    /// [`run_layout`](crate::layout::run_layout) hands the view tree, and the
+    /// size the renderer normalises against.
+    ///
+    /// Derived from the framebuffer rather than from the window (see
+    /// [`render::framebuffer_size`](crate::render::framebuffer_size)), so this
+    /// times `UiScale` is always exactly the attachment being drawn into.
+    pub fn viewport_size(&self, window_id: WindowId) -> Option<[f32; 2]> {
+        let entity = self.root_of(window_id)?;
+        let window = &self.world.get::<WindowComp>(entity)?.window;
+        Some(self.ui_scale_of(entity).to_ui(crate::render::framebuffer_size(window)))
+    }
+
     /// The pointer's position in UI pixels.
     ///
     /// Events carry physical pixels, but picking tests against rects layout
@@ -632,11 +668,11 @@ where
         let scale = self.ui_scale_of(root_entity);
         let window_comp = self.world.get::<WindowComp>(root_entity)?;
         let window = &window_comp.window;
-        let inner = window.inner_size();
-        // UI pixels, matching what layout produced. The framebuffer stays at
-        // full physical resolution — this only scales the coordinate system the
-        // renderer normalises against, so nothing is drawn at reduced detail.
-        let viewport_size = scale.to_ui([inner[0] as f32, inner[1] as f32]);
+        // UI pixels, from the same source `run_layout` used, so the extent the
+        // frame was laid out to and the extent it is normalised against cannot
+        // drift apart. The framebuffer stays at full physical resolution — this
+        // only scales the coordinate system the renderer normalises against.
+        let viewport_size = scale.to_ui(crate::render::framebuffer_size(window));
         let format = window.render_format();
 
         let surface_texture = match window.surface().get_surface_texture(&device) {
@@ -903,15 +939,36 @@ where
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             // Moving a window between displays of different densities, or a
-            // browser zoom. Layout reads the component every frame, so updating
-            // the window this names and redrawing is the whole of it.
+            // browser zoom.
+            //
+            // The surface is reconfigured here as well as in `Resized`, and
+            // that is not belt-and-braces. A scale change can move the
+            // window's physical size *without* a `Resized` following it, and
+            // then nothing else would ever re-sync the surface: the only other
+            // path that re-reads the window's size is `reconfigure` from
+            // `get_surface_texture`'s `Outdated`/`Lost` arms, which WebGPU
+            // never reports — so on the web a stale configuration is permanent.
             WindowEvent::ScaleFactorChanged { scale_factor } => {
+                // Same ordering rule as `Resized`: wgpu forbids reconfiguring
+                // while an acquired `SurfaceTexture` is unpresented.
+                self.render_driver.get_mut().wait_idle(window_id);
+
                 let Some(entity) = self.window_entity(window_id) else {
                     return;
                 };
                 self.world
                     .entity_mut(entity)
                     .insert(UiScale(scale_factor as f32));
+
+                if let Some((device, _queue)) = self.world.resource::<GpuResource>().gpu.context()
+                    && let Some(window_comp) = self.world.get::<WindowComp>(entity)
+                {
+                    // `reconfigure`, not `resize`: the event carries no size,
+                    // and the window has already been updated by the backend
+                    // before this is dispatched.
+                    window_comp.window.surface().reconfigure(&device);
+                }
+
                 self.render_sync(window_id);
             }
             WindowEvent::Resized { inner_size, .. } => {
