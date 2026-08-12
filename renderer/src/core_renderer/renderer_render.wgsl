@@ -42,7 +42,12 @@ struct InstanceData {
 // - `viewport_position`: transform mapping the unit quad into UI space, before
 //   normalization. Used for culling, and as the source of `mask_from_screen`.
 // - `mask_from_screen`: inverse of that transform's PLANAR HOMOGRAPHY, mapping a
-//   screen position back to the mask's local unit square. A mask's local
+//   screen position back to the mask's local unit square. Screen here means
+//   ATTACHMENT PIXELS -- `@builtin(position)`, the only position a fragment
+//   has. `viewport_position` is in UI space, and the two differ by
+//   `attachment / destination_size` whenever a display scale is in play, so the
+//   host folds that ratio in when building this matrix (`ui_from_screen` in
+//   core_renderer.rs). Do not divide by anything here. A mask's local
 //   coordinates are (u, v, 0, 1), so only rows/columns {0, 1, 3} of the 4x4 ever
 //   contribute; restricting to that 3x3 and inverting is exact for any affine or
 //   projective transform, whereas inverting the full 4x4 would presuppose that

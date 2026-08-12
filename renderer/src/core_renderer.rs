@@ -95,6 +95,17 @@ type Mat3Columns = [[f32; 4]; 3];
 ///   of the 4x4 ever contribute; restricting to that 3x3 and inverting is exact
 ///   for any affine *or* projective transform, whereas inverting the full 4x4
 ///   would presuppose that the fragment lies on the mask's plane.
+///
+///   It maps from **physical attachment pixels**, not from UI space:
+///   `viewport_position` is in UI space, so [`ui_from_screen`] is folded in
+///   here, on the CPU, once per mask. The fragment shader has only its own
+///   `@builtin(position)` to work from, which is in attachment pixels, and the
+///   two coordinate systems coincide only when the UI extent happens to equal
+///   the attachment's size. When they do not — a display scale, or a surface
+///   not yet reconfigured — a mask built without this displaces by that ratio,
+///   *increasingly with distance from the origin*, so masked draws are eaten
+///   into from one side while unmasked ones stay fine. Pinned by
+///   `renderer/tests/mask_scale.rs`.
 /// - `inverse_exists`: 0 if the transform is degenerate. Such a mask is skipped
 ///   (treated as fully transparent to whatever it would mask), matching how
 ///   culling treats it.
@@ -112,7 +123,7 @@ type Mat3Columns = [[f32; 4]; 3];
 struct MaskData {
     /// transform vertex: {[0, 0], [0, 1], [1, 1], [1, 0]} to where the mask should be rendered
     viewport_position: nalgebra::Matrix4<f32>,
-    /// screen -> mask-local homography; see the struct docs.
+    /// attachment pixels -> mask-local homography; see the struct docs.
     mask_from_screen: Mat3Columns,
     /// 0 = sample the coverage texture. Other values are reserved.
     kind: u32,
@@ -144,6 +155,33 @@ fn planar_homography(m: &nalgebra::Matrix4<f32>) -> nalgebra::Matrix3<f32> {
         m[(1, 0)], m[(1, 1)], m[(1, 3)],
         m[(3, 0)], m[(3, 1)], m[(3, 3)],
     )
+}
+
+/// The map from physical attachment pixels to UI pixels.
+///
+/// [`make_normalize_matrix`] spreads the UI extent over the whole attachment,
+/// so `screen = ui * (attachment / destination_size)` exactly, per axis, and
+/// the inverse of that is all this is. It is the identity precisely when the
+/// two agree, which is why nothing needed it until a display scale existed.
+///
+/// Derived from the attachment rather than taken as a parameter: the renderer
+/// is handed the view it is about to draw into, so it can read the authority
+/// directly instead of trusting a caller to keep a second number in step.
+///
+/// A zero-sized attachment yields the identity rather than a division by zero.
+/// Such a frame draws nothing anyway.
+fn ui_from_screen(destination_size: [f32; 2], attachment: wgpu::Extent3d) -> nalgebra::Matrix3<f32> {
+    let ratio = |ui: f32, physical: u32| {
+        if physical == 0 || !ui.is_finite() {
+            1.0
+        } else {
+            ui / physical as f32
+        }
+    };
+    nalgebra::Matrix3::new_nonuniform_scaling(&nalgebra::Vector2::new(
+        ratio(destination_size[0], attachment.width),
+        ratio(destination_size[1], attachment.height),
+    ))
 }
 
 /// Re-lay a `Matrix3` into WGSL's padded column layout.
@@ -747,7 +785,12 @@ impl CoreRendererInner {
         // }
 
         // integrate objects into a instance array
-        let frame = create_frame(render_node, texture_atlas.format(), stencil_atlas.format())?;
+        let frame = create_frame(
+            render_node,
+            texture_atlas.format(),
+            stencil_atlas.format(),
+            ui_from_screen(destination_size, destination_view.texture().size()),
+        )?;
 
         self.render_instances(
             device,
@@ -783,11 +826,13 @@ impl CoreRendererInner {
         texture_atlas: &wgpu::Texture,
         stencil_atlas: &wgpu::Texture,
     ) -> Result<(), TextureValidationError> {
+        let ui_from_screen = ui_from_screen(destination_size, destination_view.texture().size());
         let frame = create_flat_frame(
             items,
             clips,
             texture_atlas.format(),
             stencil_atlas.format(),
+            ui_from_screen,
         )?;
 
         self.render_instances(
@@ -1131,13 +1176,20 @@ struct Flattener {
     max_chain_len: usize,
     /// Opacity of the item currently being walked; constant for its whole tree.
     alpha: f32,
+    /// Folded into every mask's inverse; see [`ui_from_screen`].
+    ui_from_screen: nalgebra::Matrix3<f32>,
 }
 
 impl Flattener {
-    fn new(texture_format: wgpu::TextureFormat, mask_format: wgpu::TextureFormat) -> Self {
+    fn new(
+        texture_format: wgpu::TextureFormat,
+        mask_format: wgpu::TextureFormat,
+        ui_from_screen: nalgebra::Matrix3<f32>,
+    ) -> Self {
         Self {
             texture_format,
             mask_format,
+            ui_from_screen,
             out: FlatFrame {
                 instances: Vec::new(),
                 masks: Vec::new(),
@@ -1200,7 +1252,14 @@ impl Flattener {
         // A degenerate transform has no usable inverse; the shaders treat such
         // a mask as absent rather than as fully occluding, so a widget with a
         // collapsed mask still draws instead of silently vanishing.
-        let inverse = planar_homography(&position).try_inverse();
+        //
+        // Composed with `ui_from_screen` so the result maps from the fragment's
+        // own coordinate system. `ui_from_screen` is a positive scaling and so
+        // never invertible-or-not on its own — whether an inverse exists is
+        // still entirely `position`'s business.
+        let inverse = planar_homography(&position)
+            .try_inverse()
+            .map(|ui_to_local| ui_to_local * self.ui_from_screen);
 
         self.out.masks.push(MaskData {
             viewport_position: position,
@@ -1298,8 +1357,9 @@ fn create_flat_frame(
     clips: &[MaskNode],
     texture_format: wgpu::TextureFormat,
     mask_format: wgpu::TextureFormat,
+    ui_from_screen: nalgebra::Matrix3<f32>,
 ) -> Result<FlatFrame, TextureValidationError> {
-    let mut flattener = Flattener::new(texture_format, mask_format);
+    let mut flattener = Flattener::new(texture_format, mask_format, ui_from_screen);
     let clip_chains = flattener.register_clips(clips)?;
 
     const NO_CLIP: &[u32] = &[];
@@ -1332,8 +1392,9 @@ fn create_frame(
     objects: &RenderNode,
     texture_format: wgpu::TextureFormat,
     mask_format: wgpu::TextureFormat,
+    ui_from_screen: nalgebra::Matrix3<f32>,
 ) -> Result<FlatFrame, TextureValidationError> {
-    let mut flattener = Flattener::new(texture_format, mask_format);
+    let mut flattener = Flattener::new(texture_format, mask_format, ui_from_screen);
     flattener.walk(objects, nalgebra::Matrix4::identity(), &[])?;
     Ok(flattener.out)
 }
