@@ -1,9 +1,8 @@
 //! Smoke test: `CoreRenderer::new` on a wgpu noop device.
 //!
-//! The noop adapter reports every feature (including `PUSH_CONSTANTS` and
-//! `VERTEX_WRITABLE_STORAGE`), so pipeline creation must succeed without any
-//! real GPU. This is the renderer-side gate for the headless test stack
-//! (`matcha-ecs/tests/headless_app.rs`).
+//! The noop adapter reports every feature (including `IMMEDIATES`), so pipeline
+//! creation must succeed without any real GPU. This is the renderer-side gate
+//! for the headless test stack (`matcha-ecs/tests/headless_app.rs`).
 
 use gpu_utils::gpu::{Gpu, GpuDescriptor};
 use renderer::CoreRenderer;

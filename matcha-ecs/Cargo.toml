@@ -28,6 +28,25 @@ nalgebra = { features = ["bytemuck"], workspace = true }
 log = { workspace = true }
 web-time = { workspace = true }
 
+# NOTE: the `cfg` expression below must stay in sync with the `web` alias
+# defined in build.rs (`all(target_arch = "wasm32", target_os = "unknown")`).
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+# wgpu's types are `!Send + !Sync` on wasm, but bevy_ecs requires both of every
+# Component and Resource. bevy has `insert_non_send_resource` but no non-Send
+# *component* storage, and `Window`/`RenderItem` are components — so this is not
+# avoidable by moving things around. Sound here: single-threaded, no atomics.
+wgpu = { workspace = true, features = ["fragile-send-sync-non-atomic-wasm"] }
+# Without bevy_platform's `web` feature, its `cfg::web` is off, so
+# `TaskPool::spawn` takes the std branch and never polls a task again after its
+# first Pending (spawn_task would stall forever), and `bevy_platform::time::
+# Instant` resolves to `std::time::Instant`, which panics on wasm. This is a
+# feature-unification lever: bevy_tasks depends on bevy_platform, and enabling
+# the feature here turns it on there.
+bevy_platform = { version = "0.18.1", features = ["web"] }
+
+[build-dependencies]
+cfg_aliases = { workspace = true }
+
 [dev-dependencies]
 # Widget implementations are only needed by tests/examples. A dev-dependency
 # keeps the one-way crate rule (matcha-ecs-widgets -> matcha-ecs) intact.
