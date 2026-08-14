@@ -23,45 +23,6 @@ impl From<winit::window::WindowId> for super::WindowId {
 /// A real OS window managed by winit.
 pub(crate) struct WinitWindow(Arc<winit::window::Window>);
 
-/// The drawing buffer a canvas needs, in physical pixels: its CSS box times
-/// `devicePixelRatio`.
-///
-/// **This is what `inner_size` must report on the web, and winit's own answer
-/// is not reliably it.** winit derives the canvas's size from its
-/// `ResizeObserver`, preferring `devicePixelContentBox` but falling back to the
-/// CSS content box where that is unavailable — and the fallback is in *CSS*
-/// pixels. Taking that as physical and then dividing by the scale factor (which
-/// is what `UiScale` does downstream) applies the scale twice: at
-/// `devicePixelRatio` 2 the surface is configured to half the resolution it
-/// needs and the UI is laid out into half the space it has, so the frame is
-/// magnified and clipped rather than merely soft. Measured directly: a 375x812
-/// CSS canvas at dpr 2 reported `375x812` and laid out into `187.5x406`.
-///
-/// Computing it from the canvas closes that off whichever branch winit took —
-/// where winit is already right this returns the same number — and it is the
-/// same formula `window_config::web::sync_backing_store_to_css_size` uses to
-/// seed the buffer before the window exists, so the two cannot disagree.
-///
-/// `None` when there is no canvas or it has no CSS size yet (not laid out, or
-/// `display: none`), leaving the caller with winit's answer.
-#[cfg(web)]
-fn web_drawing_buffer_size(window: &winit::window::Window) -> Option<[u32; 2]> {
-    use winit::platform::web::WindowExtWebSys;
-
-    let canvas = window.canvas()?;
-    let (css_w, css_h) = (canvas.client_width(), canvas.client_height());
-    if css_w <= 0 || css_h <= 0 {
-        return None;
-    }
-    let dpr = web_sys::window()
-        .map(|w| w.device_pixel_ratio())
-        .unwrap_or(1.0);
-    Some([
-        (css_w as f64 * dpr).round() as u32,
-        (css_h as f64 * dpr).round() as u32,
-    ])
-}
-
 /// Winit constructor
 impl WindowSurface {
     /// Creates the native window only. The wgpu surface is not attached yet.
@@ -97,10 +58,6 @@ impl NativeWindow for WinitWindow {
     // --- Size ---
 
     fn inner_size(&self) -> [u32; 2] {
-        #[cfg(web)]
-        if let Some(size) = web_drawing_buffer_size(&self.0) {
-            return size;
-        }
         let s = self.0.inner_size();
         [s.width, s.height]
     }

@@ -283,10 +283,6 @@ pub struct Image {
 
 impl Image {
     /// Decode from a filesystem path, displayed within a `w`×`h` box.
-    ///
-    /// **Native only in practice.** `std::fs` compiles on wasm but every call
-    /// returns `Unsupported`, so on the web this degrades to a log line and
-    /// nothing drawn. Use [`Image::from_bytes`] with `include_bytes!` there.
     pub fn from_path(path: impl Into<PathBuf>, w: f32, h: f32) -> Self {
         Self {
             key: Key::Auto,

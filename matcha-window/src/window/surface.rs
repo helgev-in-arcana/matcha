@@ -84,29 +84,6 @@ pub struct WindowSurface {
     current_config: parking_lot::Mutex<wgpu::SurfaceConfiguration>,
 }
 
-// On the web, a window ends up inside a `bevy_ecs` component (matcha-ecs's
-// `components::window::Window`), and bevy requires `Send + Sync` of every
-// component — there is no non-`Send` component storage to opt into. But winit's
-// web window is built on `Rc` and is genuinely `!Send`, which no feature flag
-// can change.
-//
-// SAFETY: `wasm32-unknown-unknown` without the `atomics` target feature is
-// single-threaded. There is no other thread for a value to be sent to or shared
-// with, so these bounds cannot be violated. This is the same bargain, under the
-// same condition, that wgpu makes with `fragile-send-sync-non-atomic-wasm`.
-//
-// The guard below turns the assumption into a build failure rather than a
-// silent unsoundness the moment a threaded wasm target is used.
-#[cfg(all(web, target_feature = "atomics"))]
-compile_error!(
-    "WindowSurface's Send/Sync impls assume a single-threaded wasm target, but \
-     `atomics` is enabled. They are no longer sound; see window/surface.rs."
-);
-#[cfg(web)]
-unsafe impl Send for WindowSurface {}
-#[cfg(web)]
-unsafe impl Sync for WindowSurface {}
-
 /// Constructor
 impl WindowSurface {
     /// Wraps a backend window. The wgpu surface is not attached yet;
@@ -119,11 +96,7 @@ impl WindowSurface {
             height,
             usage: config.surface_config.usage,
             format: config.surface_config.format,
-            // Propagated, not dropped: the web configures the canvas as
-            // `Rgba8Unorm` (WebGPU permits no sRGB canvas format) and asks for
-            // an `Rgba8UnormSrgb` view format, which is what keeps the automatic
-            // linear->sRGB encode the render pipeline relies on. See `format`.
-            view_formats: config.surface_config.view_formats.clone(),
+            view_formats: Vec::new(),
             present_mode: config.surface_config.present_mode,
             desired_maximum_frame_latency: config.surface_config.desired_maximum_frame_latency,
             alpha_mode: config.surface_config.alpha_mode,
@@ -153,17 +126,8 @@ impl WindowSurface {
             return Ok(());
         };
 
-        // Only configure once the window has a size. A zero-sized
-        // configuration is rejected by wgpu, and then *every* frame fails on
-        // it — an unpresentable swapchain texture, an invalid view, an invalid
-        // render pass — until something resizes. The web reaches this
-        // routinely: winit's web backend reports `0x0` until its
-        // `ResizeObserver` first fires, which is after the surface is created.
-        // Leaving the surface unconfigured is safe: `get_surface_texture`
-        // reports the failure once and skips the frame, and the `Resized` that
-        // follows configures it.
         let [width, height] = self.window.inner_size();
-        if width != 0 && height != 0 {
+        {
             let mut config = self.current_config.lock();
             config.width = width;
             config.height = height;
@@ -312,53 +276,18 @@ impl WindowSurface {
         self.window.dpi()
     }
 
-    /// The format the surface itself is configured with.
-    ///
-    /// This is what the platform holds the swapchain in — pair it with
-    /// [`set_surface_format`](Self::set_surface_format). It is **not**
-    /// necessarily what to build pipelines against; see
-    /// [`render_format`](Self::render_format).
-    pub fn surface_format(&self) -> wgpu::TextureFormat {
+    pub fn format(&self) -> wgpu::TextureFormat {
         self.current_config.lock().format
-    }
-
-    /// The format render pipelines should target.
-    ///
-    /// A requested view format wins, because that is what
-    /// [`create_render_view`](Self::create_render_view) makes the render target
-    /// view as. The two differ only where the platform forbids the format we
-    /// actually want to draw in: WebGPU accepts only `rgba8unorm`,
-    /// `bgra8unorm` and `rgba16float` for a canvas, so the web configures a
-    /// non-sRGB canvas and draws through an sRGB view of it.
-    pub fn render_format(&self) -> wgpu::TextureFormat {
-        let config = self.current_config.lock();
-        config.view_formats.first().copied().unwrap_or(config.format)
     }
 
     /// Updates the surface format. If no surface is attached, only updates the
     /// stored config so the next `create_surface` uses the new format.
-    ///
-    /// Leaves `view_formats` alone, so this does not necessarily change what
-    /// [`render_format`](Self::render_format) reports.
-    pub fn set_surface_format(&self, device: &wgpu::Device, format: wgpu::TextureFormat) {
+    pub fn change_format(&self, device: &wgpu::Device, format: wgpu::TextureFormat) {
         let mut config = self.current_config.lock();
         config.format = format;
         if let Some(surface) = &self.surface {
             surface.configure(device, &config);
         }
-    }
-
-    /// A render target view of `texture`, in the format pipelines target.
-    ///
-    /// Always use this instead of `create_view(&Default::default())`, which
-    /// inherits the *texture's* format: on the web that is the non-sRGB canvas
-    /// format, and drawing through it silently drops the automatic
-    /// linear->sRGB encode every colour on the upload side is written against.
-    pub fn create_render_view(&self, texture: &wgpu::Texture) -> wgpu::TextureView {
-        texture.create_view(&wgpu::TextureViewDescriptor {
-            format: Some(self.render_format()),
-            ..Default::default()
-        })
     }
 }
 
@@ -425,7 +354,9 @@ impl WindowSurface {
     ) -> Result<Option<R>, SurfaceTextureError> {
         match self.get_surface_texture(device)? {
             Some(surface_texture) => {
-                let view = self.create_render_view(&surface_texture.texture);
+                let view = surface_texture
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
                 let result = f(&view, &surface_texture.texture);
                 surface_texture.present();
                 Ok(Some(result))
@@ -441,7 +372,9 @@ impl WindowSurface {
     ) -> Result<Option<Result<R, E>>, SurfaceTextureError> {
         match self.get_surface_texture(device)? {
             Some(surface_texture) => {
-                let view = self.create_render_view(&surface_texture.texture);
+                let view = surface_texture
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
                 let result = f(view);
                 surface_texture.present();
                 Ok(Some(result))
