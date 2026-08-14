@@ -31,17 +31,8 @@
 // the shared data bind group). One u32 per block, MAX_BLOCKS entries.
 @group(1) @binding(0) var<storage, read_write> block_sums: array<u32>;
 
-// Per-frame parameters. Must match `FrameParams` in `core_renderer.rs` and stay
-// identical across all five shaders that declare it. Pad with scalar u32s only
-// — `vec3<u32>` has alignment 16 and would grow the struct past 96 bytes.
 struct Pc {
-    normalize_matrix: mat4x4<f32>,
     instance_count: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
-    texture_atlas_half_texel: vec2<f32>,
-    stencil_atlas_half_texel: vec2<f32>,
 };
 var<immediate> pc: Pc;
 

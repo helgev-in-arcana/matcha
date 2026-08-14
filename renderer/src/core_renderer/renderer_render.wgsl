@@ -42,12 +42,7 @@ struct InstanceData {
 // - `viewport_position`: transform mapping the unit quad into UI space, before
 //   normalization. Used for culling, and as the source of `mask_from_screen`.
 // - `mask_from_screen`: inverse of that transform's PLANAR HOMOGRAPHY, mapping a
-//   screen position back to the mask's local unit square. Screen here means
-//   ATTACHMENT PIXELS -- `@builtin(position)`, the only position a fragment
-//   has. `viewport_position` is in UI space, and the two differ by
-//   `attachment / destination_size` whenever a display scale is in play, so the
-//   host folds that ratio in when building this matrix (`ui_from_screen` in
-//   core_renderer.rs). Do not divide by anything here. A mask's local
+//   screen position back to the mask's local unit square. A mask's local
 //   coordinates are (u, v, 0, 1), so only rows/columns {0, 1, 3} of the 4x4 ever
 //   contribute; restricting to that 3x3 and inverting is exact for any affine or
 //   projective transform, whereas inverting the full 4x4 would presuppose that
@@ -78,12 +73,7 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     // texture
     @location(0) texture_uv: vec2<f32>,
-    // `@interpolate(flat)` is REQUIRED, not an optimisation: WGSL forbids
-    // interpolating an integer vertex output, and a browser (Dawn) rejects the
-    // shader outright without it. naga does not enforce this, so the native
-    // build compiles either way and no native test can catch a regression here
-    // — the check is a browser.
-    @location(1) @interpolate(flat) texture_atlas_page: u32,
+    @location(1) texture_atlas_page: u32,
     @location(2) texture_atlas_bounds_x: vec2<f32>,
     @location(3) texture_atlas_bounds_y: vec2<f32>,
     // Masks carry no per-vertex data: each one is resolved from the fragment's
@@ -100,24 +90,15 @@ struct VertexOutput {
 
 @group(1) @binding(0) var<storage, read> all_instances: array<InstanceData>;
 @group(1) @binding(1) var<storage, read> all_masks: array<MaskData>;
-// Written by the compaction stages, only ever read here — declaring it
-// `read_write` would demand `VERTEX_WRITABLE_STORAGE`, which WebGPU lacks.
-@group(1) @binding(2) var<storage, read> visible_instances: array<u32>;
+@group(1) @binding(2) var<storage, read_write> visible_instances: array<u32>;
 @group(1) @binding(7) var<storage, read> mask_indices: array<u32>;
 
-// Per-frame parameters, shared verbatim by every pipeline in the core renderer.
-// Must match `FrameParams` in `core_renderer.rs` exactly, and must stay
-// identical across all five shaders that declare it — see that type's doc
-// comment. Unused fields here are read by the compaction stages.
-//
-// Pad with scalar u32s only: `vec3<u32>` has alignment 16 in WGSL and would
-// silently grow this struct past the Rust side's 96 bytes.
+// Half a texel, in normalized UV units, for each atlas — see the Rust-side
+// `RenderPushConstants` doc comment for why the fragment shader needs this
+// (avoiding bilinear bleed with the zero-initialised margin just outside
+// each atlas region's usable rectangle).
 struct Pc {
     normalize_matrix: mat4x4<f32>,
-    instance_count: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
     texture_atlas_half_texel: vec2<f32>,
     stencil_atlas_half_texel: vec2<f32>,
 };

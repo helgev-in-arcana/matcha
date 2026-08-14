@@ -424,19 +424,13 @@ fn visible_children(world: &World, children: &ViewChildren) -> Vec<Entity> {
 }
 
 /// Exclusive system: find the window root and lay out its view tree against
-/// the surface it will actually be drawn into. Registered in
-/// `MatchaSet::Layout`.
+/// the window's current inner size. Registered in `MatchaSet::Layout`.
 pub fn run_layout(world: &mut World) {
     let Some((root, window)) = ui_root_window(world) else {
         return;
     };
-    // The framebuffer reports physical pixels; layout works in UI pixels.
-    let scale = world
-        .get::<crate::components::window::UiScale>(root)
-        .copied()
-        .unwrap_or_default();
-    let size = scale.to_ui(crate::render::framebuffer_size(&window.window));
-    let constraints = Constraints::from_max_size(size);
+    let inner = window.window.inner_size();
+    let constraints = Constraints::from_max_size([inner[0] as f32, inner[1] as f32]);
 
     layout_root(world, root, constraints);
 }

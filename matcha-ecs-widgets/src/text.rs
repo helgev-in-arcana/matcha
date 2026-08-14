@@ -51,7 +51,6 @@ use matcha_ecs::{
     view::Widget,
 };
 
-use crate::font::{font_bytes, FontData, FontRegistry};
 use crate::live::LiveF32;
 use crate::sizing::Sizing;
 use crate::animation::{Easing, ExitFade, OpacityTween};
@@ -96,9 +95,6 @@ struct FontCtxInner {
     /// shared across every `Text` entity/frame that draws the same glyph at
     /// the same quantized size (`suzuri::GlyphId` bundles font+glyph+size).
     stencil_cache: Mutex<HashMap<suzuri::GlyphId, (AtlasRegion, [f32; 2]), fxhash::FxBuildHasher>>,
-    /// Which fonts have been handed to `font_system`, and whether one of them
-    /// is its sans-serif family. See [`FontRegistry`] for the locking rule.
-    registry: Mutex<FontRegistry>,
 }
 
 /// World resource wrapping the shared `suzuri::FontSystem` plus the glyph
@@ -113,72 +109,11 @@ pub(crate) struct FontCtx(Arc<FontCtxInner>);
 impl FontCtx {
     pub(crate) fn new() -> Self {
         let font_system = suzuri::FontSystem::new();
-        #[cfg(not(web))]
         font_system.load_system_fonts();
         Self(Arc::new(FontCtxInner {
             font_system,
             stencil_cache: Mutex::new(HashMap::default()),
-            registry: Mutex::new(FontRegistry::default()),
         }))
-    }
-
-    /// Register `data` with suzuri's font system, unless the very same handle
-    /// was registered before, and make it the sans-serif family — which is
-    /// what [`shape`] queries for, so a font registered but not mapped still
-    /// draws nothing.
-    ///
-    /// # Why this exists
-    ///
-    /// A browser exposes no font database to enumerate: `load_system_fonts`
-    /// goes through `fontdb`, whose implementation is a series of
-    /// `#[cfg(target_os = ...)]` blocks with no arm matching wasm, so it is a
-    /// no-op there. `shape` then queries `Family::SansSerif`, misses, and
-    /// returns an empty layout — not an error, just a widget that measures
-    /// 0x0 and draws nothing. `Button` draws its label through this same
-    /// context, so without a registered font every button is blank too.
-    ///
-    /// The first font to register **successfully** becomes sans-serif; later
-    /// ones are available for lookup but do not displace it.
-    pub(crate) fn ensure_registered(&self, data: &FontData) {
-        // Held across the load, not just across the membership check — see
-        // `FontRegistry`'s locking note.
-        let mut registry = self.0.registry.lock();
-        if registry.contains(data) {
-            return;
-        }
-
-        // Faces this load appends start here. Indexing rather than
-        // `faces().first()` because on native `load_system_fonts` has already
-        // filled the database, so the first face is some system font, not the
-        // one being registered now.
-        let face_base = self.0.font_system.faces().len();
-        // suzuri takes ownership, so this is the one copy of the font bytes
-        // that `FontData` cannot avoid.
-        self.0
-            .font_system
-            .load_font_binary(font_bytes(data).to_vec());
-
-        // Take the family name from the face the load produced rather than
-        // hardcoding one: swapping in a subset (or a different font) should
-        // not require editing a string here to match.
-        let Some((family, _)) = self
-            .0
-            .font_system
-            .faces()
-            .get(face_base)
-            .and_then(|face| face.families.first())
-            .cloned()
-        else {
-            // Deliberately not recorded: a font that loaded nothing must not
-            // consume the default slot, and re-offering it should retry.
-            log::error!("the registered font produced no faces; text will not render");
-            return;
-        };
-
-        registry.record(data);
-        if registry.claim_default_slot() {
-            self.0.font_system.set_sans_serif_family(family);
-        }
     }
 
     /// Look up (or rasterise-and-cache) the stencil atlas region holding

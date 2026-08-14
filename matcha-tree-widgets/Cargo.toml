@@ -28,9 +28,7 @@ bytemuck = { features = ["derive"], workspace = true }
 nalgebra = { features = ["bytemuck"], workspace = true }
 
 # image
-# `rayon` is off in the workspace dep for wasm's sake; this stack is native-only,
-# so it takes the parallel decode back.
-image = { workspace = true, features = ["rayon"] }
+image = { workspace = true }
 
 # text
 # suzuri = { workspace = true } # disabled: pins wgpu ^27 (see workspace Cargo.toml)

@@ -198,21 +198,14 @@ impl Window {
         self.window_surface.dpi()
     }
 
-    /// The format the surface is configured with. Retained even when no
-    /// surface is attached. See [`WindowSurface::surface_format`].
-    pub fn surface_format(&self) -> wgpu::TextureFormat {
-        self.window_surface.surface_format()
+    /// Returns the configured surface texture format.
+    /// The format is retained even when no surface is attached.
+    pub fn format(&self) -> wgpu::TextureFormat {
+        self.window_surface.format()
     }
 
-    /// The format render pipelines should target — not necessarily
-    /// [`surface_format`](Self::surface_format). See
-    /// [`WindowSurface::render_format`].
-    pub fn render_format(&self) -> wgpu::TextureFormat {
-        self.window_surface.render_format()
-    }
-
-    pub fn set_surface_format(&self, device: &wgpu::Device, format: wgpu::TextureFormat) {
-        self.window_surface.set_surface_format(device, format);
+    pub fn change_format(&self, device: &wgpu::Device, format: wgpu::TextureFormat) {
+        self.window_surface.change_format(device, format);
     }
 
     // --- Surface access ---

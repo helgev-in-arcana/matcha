@@ -17,7 +17,6 @@ pub mod checkbox;
 pub mod color;
 pub mod color_rect;
 pub mod easing;
-pub mod font;
 pub mod image;
 pub mod interaction;
 pub mod layout;
@@ -42,7 +41,6 @@ pub use parley;
 
 pub use anchor::Anchor;
 pub use easing::Easing;
-pub use font::{register_default_font, FontData, WithDefaultFont};
 pub use box_style::{box_node, BoxShadow, BoxStyle, Corners, Sides};
 pub use button::{Button, ButtonLabel};
 pub use checkbox::Checkbox;
