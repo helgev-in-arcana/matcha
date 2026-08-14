@@ -21,7 +21,20 @@ use bevy_ecs::resource::Resource;
 #[derive(Resource)]
 pub struct ModelResource<M: Send + Sync + 'static>(pub M);
 
-/// Cheaply-cloneable handle for mutating the model from any thread.
+/// The "wake the event loop" callback held by a [`ModelHandle`].
+///
+/// It closes over an `EventLoopProxy`, which is only `Send + Sync` on native —
+/// winit's web proxy is not, and there is no second thread on the web to send
+/// it to anyway. Spelled as two aliases rather than one `MaybeSendSync` bound
+/// because that trait is not an auto trait and so cannot appear alongside `Fn`
+/// in a trait object.
+#[cfg(not(web))]
+pub(crate) type WakeFn = Arc<dyn Fn() + Send + Sync>;
+#[cfg(web)]
+pub(crate) type WakeFn = Arc<dyn Fn()>;
+
+/// Cheaply-cloneable handle for mutating the model from any thread (native; on
+/// the web there is only the one).
 ///
 /// Queued mutations are drained on the next model-update cycle. `wake` fires
 /// at most once per cycle: it only runs when a call transitions `wake_pending`
@@ -35,8 +48,18 @@ pub struct ModelResource<M: Send + Sync + 'static>(pub M);
 pub struct ModelHandle<M: 'static> {
     sender: mpsc::Sender<Box<dyn FnOnce(&mut M) + Send>>,
     wake_pending: Arc<AtomicBool>,
-    wake: Arc<dyn Fn() + Send + Sync>,
+    wake: WakeFn,
 }
+
+// `ModelHandle` is stored as a bevy resource, so it must be `Send + Sync`, but
+// on the web its `WakeFn` captures winit's event-loop proxy, which is not.
+//
+// SAFETY: single-threaded target — see the guard in this crate's lib.rs, which
+// turns that assumption into a build failure if a threaded wasm target is used.
+#[cfg(web)]
+unsafe impl<M: 'static> Send for ModelHandle<M> {}
+#[cfg(web)]
+unsafe impl<M: 'static> Sync for ModelHandle<M> {}
 
 impl<M: 'static> Clone for ModelHandle<M> {
     fn clone(&self) -> Self {
@@ -52,7 +75,7 @@ impl<M: 'static> ModelHandle<M> {
     pub(crate) fn new(
         sender: mpsc::Sender<Box<dyn FnOnce(&mut M) + Send>>,
         wake_pending: Arc<AtomicBool>,
-        wake: Arc<dyn Fn() + Send + Sync>,
+        wake: WakeFn,
     ) -> Self {
         Self {
             sender,

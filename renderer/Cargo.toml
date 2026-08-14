@@ -22,6 +22,21 @@ parking_lot.workspace = true
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 moka.workspace = true
 
+# wgpu's types are `!Send + !Sync` on wasm unless this is on. The renderer holds
+# them behind `Send + Sync` bounds (it is shared with the render thread
+# natively), so the web build needs it. Sound on this target: single-threaded,
+# no atomics — which is exactly the condition wgpu gates the feature on.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wgpu = { workspace = true, features = ["fragile-send-sync-non-atomic-wasm"] }
+
+[features]
+# Carry the per-frame parameter block in a uniform buffer instead of immediates.
+# Implied by a wasm build (WebGPU has no push constants); exposed as a feature so
+# the exact same code path — shader rewrite, bind group index, buffer size,
+# uniform layout rules — can be exercised on a real desktop GPU, without a
+# browser. See `core_renderer/frame_params.rs` and `tests/uniform_params.rs`.
+uniform-params = []
+
 [dev-dependencies]
 futures = { workspace = true }
 

@@ -116,7 +116,7 @@ impl WindowWidgetInstance {
         let s = self.window.inner_size();
         let window_ctx = WindowCtx {
             dpi: self.window.dpi(),
-            format: self.window.format(),
+            format: self.window.render_format(),
             config: self.window.config().clone(),
             inner_size: [s[0] as f32, s[1] as f32],
         };
@@ -194,7 +194,7 @@ impl AnyWindowWidgetInstance for WindowWidgetInstance {
         let s = self.window.inner_size();
         let window_ctx = WindowCtx {
             dpi: self.window.dpi(),
-            format: self.window.format(),
+            format: self.window.render_format(),
             config: self.window.config().clone(),
             inner_size: [s[0] as f32, s[1] as f32],
         };
@@ -225,7 +225,7 @@ impl AnyWindowWidgetInstance for WindowWidgetInstance {
         let s = self.window.inner_size();
         let window_ctx = WindowCtx {
             dpi: self.window.dpi(),
-            format: self.window.format(),
+            format: self.window.render_format(),
             config: self.window.config().clone(),
             inner_size: [s[0] as f32, s[1] as f32],
         };
@@ -236,7 +236,7 @@ impl AnyWindowWidgetInstance for WindowWidgetInstance {
         };
         let render_node = self.widget.render(size, &widget_ctx);
 
-        let format = self.window.format();
+        let format = self.window.render_format();
 
         let device = &ctx.shared.gpu_device;
         let queue = &ctx.shared.gpu_queue;
@@ -268,7 +268,7 @@ impl AnyWindowWidgetInstance for WindowWidgetInstance {
         let s = self.window.inner_size();
         let window_ctx = WindowCtx {
             dpi: self.window.dpi(),
-            format: self.window.format(),
+            format: self.window.render_format(),
             config: self.window.config().clone(),
             inner_size: [s[0] as f32, s[1] as f32],
         };

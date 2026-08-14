@@ -11,6 +11,7 @@ members = [
     "matcha-ecs",
     "matcha-ecs-widgets",
     "glyph-cache",
+    "matcha-web",
 ]
 resolver = "3"
 
@@ -25,6 +26,7 @@ matcha-window = { path = "matcha-window" }
 matcha-tree-widgets = { path = "matcha-tree-widgets" }
 matcha-ecs = { path = "matcha-ecs" }
 matcha-ecs-widgets = { path = "matcha-ecs-widgets" }
+matcha-web = { path = "matcha-web" }
 shared-buffer = { path = "shared-buffer" }
 renderer = { path = "renderer" }
 utils = { path = "utils" }
@@ -64,7 +66,28 @@ bytemuck = { version = "1", features = ["derive"] }
 nalgebra = { version = "0.34", features = ["bytemuck"] }
 
 # image
-image = "0.25"
+# `default = ["rayon", "default-formats"]`, and neither is usable on wasm:
+# `rayon` is an OS thread pool, and `default-formats` includes `avif` ->
+# ravif/rav1e. Everything else in `default-formats` is pure Rust and kept, so
+# this narrows only those two rather than the format list generally.
+#
+# `rayon` is added back for native targets by the crates that consume this
+# (matcha-ecs-widgets, matcha-tree-widgets) — a wasm constraint should not cost
+# a desktop build its parallel decode.
+image = { version = "0.25", default-features = false, features = [
+    "bmp",
+    "dds",
+    "ff",
+    "gif",
+    "ico",
+    "jpeg",
+    "png",
+    "pnm",
+    "qoi",
+    "tga",
+    "tiff",
+    "webp",
+] }
 
 # font
 # Disabled: crates.io suzuri 0.2.1 pins wgpu ^27, blocking the workspace's wgpu 29

@@ -7,9 +7,12 @@ use gpu_utils::texture_atlas;
 use texture_atlas::RegionError;
 use thiserror::Error;
 
+mod frame_params;
+use frame_params::{FrameParamsBinding, prepare_wgsl};
+
 mod stages;
 use stages::{
-    BlellochPrefixSumStage, CommandStage, ComputeStage, ScatterStage, StageParams,
+    BlellochPrefixSumStage, CommandStage, ComputeStage, ScatterStage,
     VisibilityStage,
 };
 
@@ -92,6 +95,17 @@ type Mat3Columns = [[f32; 4]; 3];
 ///   of the 4x4 ever contribute; restricting to that 3x3 and inverting is exact
 ///   for any affine *or* projective transform, whereas inverting the full 4x4
 ///   would presuppose that the fragment lies on the mask's plane.
+///
+///   It maps from **physical attachment pixels**, not from UI space:
+///   `viewport_position` is in UI space, so [`ui_from_screen`] is folded in
+///   here, on the CPU, once per mask. The fragment shader has only its own
+///   `@builtin(position)` to work from, which is in attachment pixels, and the
+///   two coordinate systems coincide only when the UI extent happens to equal
+///   the attachment's size. When they do not — a display scale, or a surface
+///   not yet reconfigured — a mask built without this displaces by that ratio,
+///   *increasingly with distance from the origin*, so masked draws are eaten
+///   into from one side while unmasked ones stay fine. Pinned by
+///   `renderer/tests/mask_scale.rs`.
 /// - `inverse_exists`: 0 if the transform is degenerate. Such a mask is skipped
 ///   (treated as fully transparent to whatever it would mask), matching how
 ///   culling treats it.
@@ -109,7 +123,7 @@ type Mat3Columns = [[f32; 4]; 3];
 struct MaskData {
     /// transform vertex: {[0, 0], [0, 1], [1, 1], [1, 0]} to where the mask should be rendered
     viewport_position: nalgebra::Matrix4<f32>,
-    /// screen -> mask-local homography; see the struct docs.
+    /// attachment pixels -> mask-local homography; see the struct docs.
     mask_from_screen: Mat3Columns,
     /// 0 = sample the coverage texture. Other values are reserved.
     kind: u32,
@@ -129,7 +143,7 @@ const MASK_KIND_COVERAGE: u32 = 0;
 const _: () = {
     assert!(std::mem::size_of::<InstanceData>() == 96);
     assert!(std::mem::size_of::<MaskData>() == 144);
-    assert!(std::mem::size_of::<RenderPushConstants>() == 80);
+    assert!(std::mem::size_of::<FrameParams>() == 96);
 };
 
 /// The planar homography of a unit-quad transform: the restriction of `m` to
@@ -143,6 +157,33 @@ fn planar_homography(m: &nalgebra::Matrix4<f32>) -> nalgebra::Matrix3<f32> {
     )
 }
 
+/// The map from physical attachment pixels to UI pixels.
+///
+/// [`make_normalize_matrix`] spreads the UI extent over the whole attachment,
+/// so `screen = ui * (attachment / destination_size)` exactly, per axis, and
+/// the inverse of that is all this is. It is the identity precisely when the
+/// two agree, which is why nothing needed it until a display scale existed.
+///
+/// Derived from the attachment rather than taken as a parameter: the renderer
+/// is handed the view it is about to draw into, so it can read the authority
+/// directly instead of trusting a caller to keep a second number in step.
+///
+/// A zero-sized attachment yields the identity rather than a division by zero.
+/// Such a frame draws nothing anyway.
+fn ui_from_screen(destination_size: [f32; 2], attachment: wgpu::Extent3d) -> nalgebra::Matrix3<f32> {
+    let ratio = |ui: f32, physical: u32| {
+        if physical == 0 || !ui.is_finite() {
+            1.0
+        } else {
+            ui / physical as f32
+        }
+    };
+    nalgebra::Matrix3::new_nonuniform_scaling(&nalgebra::Vector2::new(
+        ratio(destination_size[0], attachment.width),
+        ratio(destination_size[1], attachment.height),
+    ))
+}
+
 /// Re-lay a `Matrix3` into WGSL's padded column layout.
 fn mat3_columns(m: &nalgebra::Matrix3<f32>) -> Mat3Columns {
     [
@@ -152,20 +193,43 @@ fn mat3_columns(m: &nalgebra::Matrix3<f32>) -> Mat3Columns {
     ]
 }
 
-/// Half a texel, in normalized UV units, for each atlas. Used by the render
-/// shader to inset the UV clamp bounds so that sampling at the very edge of
-/// an atlas region's usable (non-margin) rectangle can never land exactly on
-/// the boundary between the last real texel and the next (zero-initialised
-/// margin) texel — bilinear filtering would blend 50/50 with that margin
-/// texel there, bleeding the background colour into the edge of every
-/// texture/stencil sample. Insetting to the last texel's *centre* instead of
-/// its edge guarantees a pure, unblended sample.
+/// The per-frame parameter block, shared verbatim by *every* pipeline in the
+/// core renderer — the render pass and all four compaction compute stages.
+///
+/// One block for all of them, rather than a tailored struct per stage, because
+/// the web build cannot use immediates at all (WebGPU has no push constants)
+/// and has to carry these in a uniform buffer instead. A single shared layout
+/// means that path is one buffer, one bind group and one write per frame; a
+/// per-stage layout would multiply all three. Each shader declares an identical
+/// `struct Pc` and simply ignores the fields it does not need.
+///
+/// The layout is valid in both the immediate and uniform address spaces: 96
+/// bytes, 16-byte aligned, no member straddling a 16-byte boundary. **Pad with
+/// scalar `u32`s only** — a `vec3<u32>` has alignment 16 in WGSL, which would
+/// silently make the shader-side struct larger than this one.
+///
+/// **The ceiling is 128 bytes**, not 96: that is Vulkan's guaranteed minimum
+/// immediate/push-constant size, and since every pipeline here reserves this
+/// whole block, one of them exceeding it fails everywhere. There is room for
+/// two more `vec4`s, no more. (The uniform path has no such limit — this is
+/// one of the things a runtime choice between the two paths would relax.)
+///
+/// `*_half_texel` is half a texel in normalized UV units, per atlas. The render
+/// shader uses it to inset the UV clamp bounds, so that sampling at the very
+/// edge of an atlas region's usable (non-margin) rectangle can never land
+/// exactly on the boundary between the last real texel and the next
+/// (zero-initialised margin) texel — bilinear filtering would blend 50/50 with
+/// that margin texel there, bleeding the background colour into the edge of
+/// every texture/stencil sample. Insetting to the last texel's *centre*
+/// instead of its edge guarantees a pure, unblended sample.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct RenderPushConstants {
-    normalize_matrix: nalgebra::Matrix4<f32>,
-    texture_atlas_half_texel: [f32; 2],
-    stencil_atlas_half_texel: [f32; 2],
+#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct FrameParams {
+    pub normalize_matrix: nalgebra::Matrix4<f32>,
+    pub instance_count: u32,
+    pub _pad0: [u32; 3],
+    pub texture_atlas_half_texel: [f32; 2],
+    pub stencil_atlas_half_texel: [f32; 2],
 }
 
 /// A clip declared by the UI tree: a mask that applies to an entity *and
@@ -309,6 +373,13 @@ pub struct CoreRendererInner {
     texture_sampler: wgpu::Sampler,
     texture_bind_group_layout: wgpu::BindGroupLayout,
     data_bind_group_layout: wgpu::BindGroupLayout,
+    /// Read-only view of the same buffers, for the render pass. See
+    /// [`create_render_data_bind_group_layout`].
+    render_data_bind_group_layout: wgpu::BindGroupLayout,
+
+    /// How [`FrameParams`] reaches the shaders — immediates natively, a uniform
+    /// buffer on the web. See `frame_params.rs`.
+    params_binding: FrameParamsBinding,
 
     // Pipeline Layouts
     render_pipeline_layout: wgpu::PipelineLayout,
@@ -329,10 +400,17 @@ pub struct CoreRendererInner {
     draw_command_storage: wgpu::Buffer,
 }
 
-/// Bind group layout for the data buffers shared by every compute stage and
-/// the render pass. Bindings 0-4 and 7 are also visible to the render shaders;
-/// bindings 5-6 are compute-only intermediates of the order-preserving
-/// compaction (see `stages.rs`).
+/// Bind group layout for the data buffers, as the **compaction compute stages**
+/// see them: bindings 2-6 are writable, and every binding is `COMPUTE`-only
+/// (see `stages.rs`).
+///
+/// The render pass uses [`create_render_data_bind_group_layout`] instead, over
+/// the same buffers. Keeping the two apart is what lets the renderer drop the
+/// `VERTEX_WRITABLE_STORAGE` requirement: a writable storage buffer visible to
+/// the vertex stage demands that feature, which WebGPU does not expose. Note
+/// the failure mode if `VERTEX` ever creeps back into a writable entry here —
+/// the layout is rejected, every pipeline built on it is silently invalid, and
+/// the stages appear to run but produce all-zero output.
 fn create_data_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("ObjectRenderer Data Bind Group Layout"),
@@ -340,7 +418,7 @@ fn create_data_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout
             // All Instances Buffer
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,
@@ -352,7 +430,7 @@ fn create_data_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout
             // fragment's own screen position; the vertex stage never reads one.
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,
@@ -363,7 +441,7 @@ fn create_data_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout
             // Visible Instances Buffer (compacted, submission order)
             wgpu::BindGroupLayoutEntry {
                 binding: 2,
-                visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: false },
                     has_dynamic_offset: false,
@@ -421,7 +499,7 @@ fn create_data_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout
             // `mask_offset`/`mask_count` range points into.
             wgpu::BindGroupLayoutEntry {
                 binding: 7,
-                visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,
@@ -429,6 +507,44 @@ fn create_data_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout
                 },
                 count: None,
             },
+        ],
+    })
+}
+
+/// Bind group layout for the data buffers, as the **render pass** sees them:
+/// the same buffers as [`create_data_bind_group_layout`], but every binding
+/// read-only, and only the four the render shader actually declares.
+///
+/// This exists so the renderer does not require `VERTEX_WRITABLE_STORAGE`.
+/// `visible_instances` (binding 2) is written by the compaction stages but only
+/// *read* by the vertex shader; binding it writable there would demand a
+/// feature WebGPU does not expose, for no benefit. A bind group layout need not
+/// be contiguous, so the compute-only intermediates (3-6) are simply absent.
+fn create_render_data_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let read_only_storage = |binding: u32, visibility: wgpu::ShaderStages| {
+        wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }
+    };
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("ObjectRenderer Render Data Bind Group Layout"),
+        entries: &[
+            // All instances
+            read_only_storage(0, wgpu::ShaderStages::VERTEX),
+            // All masks — resolved per fragment, from the fragment's own screen
+            // position; the vertex stage never reads one.
+            read_only_storage(1, wgpu::ShaderStages::FRAGMENT),
+            // Visible instances (compacted, submission order)
+            read_only_storage(2, wgpu::ShaderStages::VERTEX),
+            // Mask chains
+            read_only_storage(7, wgpu::ShaderStages::FRAGMENT),
         ],
     })
 }
@@ -486,21 +602,40 @@ impl CoreRendererInner {
             });
 
         let data_bind_group_layout = create_data_bind_group_layout(device);
+        let render_data_bind_group_layout = create_render_data_bind_group_layout(device);
+        let params_binding = FrameParamsBinding::new(device);
 
         let compaction_stages: Vec<Box<dyn ComputeStage>> = vec![
-            Box::new(VisibilityStage::new(device, &data_bind_group_layout)),
+            Box::new(VisibilityStage::new(
+                device,
+                &data_bind_group_layout,
+                &params_binding,
+            )),
             // Swap the scan algorithm by constructing a different stage here
             // (e.g. `SingleThreadPrefixSumStage` as the naive reference).
-            Box::new(BlellochPrefixSumStage::new(device, &data_bind_group_layout)),
-            Box::new(ScatterStage::new(device, &data_bind_group_layout)),
-            Box::new(CommandStage::new(device, &data_bind_group_layout)),
+            Box::new(BlellochPrefixSumStage::new(
+                device,
+                &data_bind_group_layout,
+                &params_binding,
+            )),
+            Box::new(ScatterStage::new(
+                device,
+                &data_bind_group_layout,
+                &params_binding,
+            )),
+            Box::new(CommandStage::new(
+                device,
+                &data_bind_group_layout,
+                &params_binding,
+            )),
         ];
 
         let (render_pipeline_layout, render_pipeline_shader_module) =
             Self::create_render_pipeline_layout(
                 device,
                 &texture_bind_group_layout,
-                &data_bind_group_layout,
+                &render_data_bind_group_layout,
+                &params_binding,
             );
         trace!("CoreRenderer::new: pipeline layouts created");
 
@@ -533,6 +668,8 @@ impl CoreRendererInner {
             texture_sampler,
             texture_bind_group_layout,
             data_bind_group_layout,
+            render_data_bind_group_layout,
+            params_binding,
             render_pipeline_layout,
             render_pipeline_shader_module,
             compaction_stages,
@@ -547,20 +684,22 @@ impl CoreRendererInner {
         device: &wgpu::Device,
         texture_bind_group_layout: &wgpu::BindGroupLayout,
         data_bind_group_layout: &wgpu::BindGroupLayout,
+        params_binding: &FrameParamsBinding,
     ) -> (wgpu::PipelineLayout, wgpu::ShaderModule) {
         trace!("CoreRenderer::create_render_pipeline_layout: creating pipeline layout");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Render Shader"),
-            source: wgpu::ShaderSource::Wgsl(WGSL_RENDER.into()),
+            source: wgpu::ShaderSource::Wgsl(prepare_wgsl(WGSL_RENDER)),
         });
 
+        let layouts = params_binding.extend_layouts(&[
+            Some(texture_bind_group_layout),
+            Some(data_bind_group_layout),
+        ]);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[
-                Some(texture_bind_group_layout),
-                Some(data_bind_group_layout),
-            ],
-            immediate_size: std::mem::size_of::<RenderPushConstants>() as u32,
+            bind_group_layouts: &layouts,
+            immediate_size: params_binding.immediate_size(),
         });
 
         (pipeline_layout, module)
@@ -646,7 +785,12 @@ impl CoreRendererInner {
         // }
 
         // integrate objects into a instance array
-        let frame = create_frame(render_node, texture_atlas.format(), stencil_atlas.format())?;
+        let frame = create_frame(
+            render_node,
+            texture_atlas.format(),
+            stencil_atlas.format(),
+            ui_from_screen(destination_size, destination_view.texture().size()),
+        )?;
 
         self.render_instances(
             device,
@@ -682,11 +826,13 @@ impl CoreRendererInner {
         texture_atlas: &wgpu::Texture,
         stencil_atlas: &wgpu::Texture,
     ) -> Result<(), TextureValidationError> {
+        let ui_from_screen = ui_from_screen(destination_size, destination_view.texture().size());
         let frame = create_flat_frame(
             items,
             clips,
             texture_atlas.format(),
             stencil_atlas.format(),
+            ui_from_screen,
         )?;
 
         self.render_instances(
@@ -868,6 +1014,31 @@ impl CoreRendererInner {
             ],
         });
 
+        // The same buffers again, read-only, for the render pass. Bind groups
+        // are rebuilt every frame anyway, so this is one extra cheap object.
+        let render_data_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ObjectRenderer Render Data Bind Group"),
+            layout: &self.render_data_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: all_instance_data_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: all_mask_data_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: visible_instance_indices_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: mask_indices_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
         // already checked that instances is not empty
         queue.write_buffer(
             &all_instance_data_buffer,
@@ -897,15 +1068,14 @@ impl CoreRendererInner {
         });
         trace!("CoreRenderer::render: command encoder created");
 
-        let normalize_matrix = make_normalize_matrix(destination_size);
-        let stage_params = StageParams {
-            normalize_matrix,
-            instance_count: instances.len() as u32,
-        };
         let texture_atlas_size = texture_atlas.size();
         let stencil_atlas_size = stencil_atlas.size();
-        let render_pc = RenderPushConstants {
-            normalize_matrix,
+        // One block for the whole frame: the compaction stages and the render
+        // pass all read from this same struct.
+        let frame_params = FrameParams {
+            normalize_matrix: make_normalize_matrix(destination_size),
+            instance_count: instances.len() as u32,
+            _pad0: [0; 3],
             texture_atlas_half_texel: [
                 0.5 / texture_atlas_size.width as f32,
                 0.5 / texture_atlas_size.height as f32,
@@ -915,12 +1085,21 @@ impl CoreRendererInner {
                 0.5 / stencil_atlas_size.height as f32,
             ],
         };
+        // Once per frame, before any encoding: on the uniform path every pass
+        // below reads this one buffer, so there is nothing to alias within the
+        // submit. A no-op on the immediate path.
+        self.params_binding.write(queue, &frame_params);
 
         // Compaction pipeline: visibility -> prefix sum -> scatter -> command.
         // The stages together produce an order-preserving compaction of the
         // instance indices in `visible_instances` plus the indirect draw args.
         for stage in &self.compaction_stages {
-            stage.encode(&mut command_encoder, &data_bind_group, &stage_params);
+            stage.encode(
+                &mut command_encoder,
+                &data_bind_group,
+                &self.params_binding,
+                &frame_params,
+            );
         }
         trace!("CoreRenderer::render: compaction stages dispatched");
 
@@ -953,8 +1132,9 @@ impl CoreRendererInner {
 
             render_pass.set_pipeline(render_pipeline.as_ref());
             render_pass.set_bind_group(0, &texture_bind_group, &[]);
-            render_pass.set_bind_group(1, &data_bind_group, &[]);
-            render_pass.set_immediates(0, bytemuck::bytes_of(&render_pc));
+            render_pass.set_bind_group(1, &render_data_bind_group, &[]);
+            self.params_binding
+                .set_render(&mut render_pass, &frame_params);
             render_pass.draw_indirect(&self.draw_command, 0);
         }
         trace!("CoreRenderer::render: render pass completed");
@@ -996,13 +1176,20 @@ struct Flattener {
     max_chain_len: usize,
     /// Opacity of the item currently being walked; constant for its whole tree.
     alpha: f32,
+    /// Folded into every mask's inverse; see [`ui_from_screen`].
+    ui_from_screen: nalgebra::Matrix3<f32>,
 }
 
 impl Flattener {
-    fn new(texture_format: wgpu::TextureFormat, mask_format: wgpu::TextureFormat) -> Self {
+    fn new(
+        texture_format: wgpu::TextureFormat,
+        mask_format: wgpu::TextureFormat,
+        ui_from_screen: nalgebra::Matrix3<f32>,
+    ) -> Self {
         Self {
             texture_format,
             mask_format,
+            ui_from_screen,
             out: FlatFrame {
                 instances: Vec::new(),
                 masks: Vec::new(),
@@ -1065,7 +1252,14 @@ impl Flattener {
         // A degenerate transform has no usable inverse; the shaders treat such
         // a mask as absent rather than as fully occluding, so a widget with a
         // collapsed mask still draws instead of silently vanishing.
-        let inverse = planar_homography(&position).try_inverse();
+        //
+        // Composed with `ui_from_screen` so the result maps from the fragment's
+        // own coordinate system. `ui_from_screen` is a positive scaling and so
+        // never invertible-or-not on its own — whether an inverse exists is
+        // still entirely `position`'s business.
+        let inverse = planar_homography(&position)
+            .try_inverse()
+            .map(|ui_to_local| ui_to_local * self.ui_from_screen);
 
         self.out.masks.push(MaskData {
             viewport_position: position,
@@ -1163,8 +1357,9 @@ fn create_flat_frame(
     clips: &[MaskNode],
     texture_format: wgpu::TextureFormat,
     mask_format: wgpu::TextureFormat,
+    ui_from_screen: nalgebra::Matrix3<f32>,
 ) -> Result<FlatFrame, TextureValidationError> {
-    let mut flattener = Flattener::new(texture_format, mask_format);
+    let mut flattener = Flattener::new(texture_format, mask_format, ui_from_screen);
     let clip_chains = flattener.register_clips(clips)?;
 
     const NO_CLIP: &[u32] = &[];
@@ -1197,8 +1392,9 @@ fn create_frame(
     objects: &RenderNode,
     texture_format: wgpu::TextureFormat,
     mask_format: wgpu::TextureFormat,
+    ui_from_screen: nalgebra::Matrix3<f32>,
 ) -> Result<FlatFrame, TextureValidationError> {
-    let mut flattener = Flattener::new(texture_format, mask_format);
+    let mut flattener = Flattener::new(texture_format, mask_format, ui_from_screen);
     flattener.walk(objects, nalgebra::Matrix4::identity(), &[])?;
     Ok(flattener.out)
 }
