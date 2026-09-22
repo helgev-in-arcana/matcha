@@ -4,10 +4,14 @@
 //! `Scope`, reconcile, framework-shared components) and never the reverse —
 //! the core must stay independent of any particular widget implementation.
 //!
-//! Rendering/layout are not wired yet, so each widget's bundle carries only
-//! data components; behaviour will be added by systems later. Each widget is a
-//! distinct type (so the reconciler can tell them apart by `TypeId`) exposing a
-//! `.key(id)` builder to set its intrinsic reconciliation key.
+//! Each widget is a distinct type (so the reconciler can tell them apart by
+//! `TypeId`) exposing a `.key(id)` builder to set its intrinsic reconciliation
+//! key. A widget's bundle carries its data components plus the wiring the core
+//! reads: `LayoutDispatch::of::<..>()` for layout, `RenderItem` for drawing,
+//! `Pickable`/`OnClick` and the dispatch fn pointers for input.
+//!
+//! The systems the widgets here need are **not** registered automatically — see
+//! [`default_systems`].
 
 pub mod anchor;
 pub mod animation;
