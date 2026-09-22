@@ -1,0 +1,7 @@
+Adapter: AdapterInfo { name: "AMD Radeon RX 5700 XT", vendor: 4098, device: 29471, device_type: DiscreteGpu, device_pci_bus_id: "", driver: "AMD proprietary driver", driver_info: "26.8.1 (AMD proprietary shader compiler)", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 64, transient_saves_memory: false }
+mesh: RenderStats { prepared: 4, cache_hits: 0, draw_calls: 2, mask_passes: 0, snapshot_copies: 1, cache_bytes: 262328, evicted: 0 }
+nested-mask-popup: RenderStats { prepared: 4, cache_hits: 6, draw_calls: 3, mask_passes: 2, snapshot_copies: 2, cache_bytes: 524597, evicted: 0 }
+blur: RenderStats { prepared: 3, cache_hits: 1, draw_calls: 2, mask_passes: 0, snapshot_copies: 2, cache_bytes: 1049005, evicted: 0 }
+refraction: RenderStats { prepared: 3, cache_hits: 1, draw_calls: 2, mask_passes: 0, snapshot_copies: 2, cache_bytes: 1573413, evicted: 0 }
+fractal-mask: RenderStats { prepared: 4, cache_hits: 2, draw_calls: 2, mask_passes: 0, snapshot_copies: 1, cache_bytes: 2097825, evicted: 0 }
+final-processing: RenderStats { prepared: 5, cache_hits: 3, draw_calls: 3, mask_passes: 0, snapshot_copies: 2, cache_bytes: 2884381, evicted: 0 }

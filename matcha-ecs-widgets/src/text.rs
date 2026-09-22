@@ -9,12 +9,9 @@
 //! single call, which doesn't fit the per-glyph, cross-frame, cross-widget
 //! atlas cache this widget needs.
 //!
-//! Rendering reuses the `renderer` crate's existing (previously unused by any
-//! matcha-ecs widget) stencil-masking pipeline: a glyph is drawn as a small
-//! solid-colour "tint" quad (`texture_atlas`) masked by a per-glyph coverage
-//! bitmap (`stencil_atlas`, `R8Unorm` — the fragment shader already does
-//! `final_color = texture_color * stencil_atlas.r`, see
-//! `renderer/src/core_renderer/renderer_render.wgsl`).
+//! Rendering assembles CPU tint/coverage bitmaps into matcha-paint nodes.
+//! SceneBuilder resolves these to flat Objects and PixelMasks; the renderer
+//! owns upload, GPU residency and final source-over compositing.
 //!
 //! Word-wrap is supported, but deliberately with no shape-result caching:
 //! `measure()`, `arrange()`, and the `RenderItem` builder each independently
@@ -37,10 +34,10 @@ use bevy_ecs::{
     resource::Resource,
     world::EntityWorldMut,
 };
-use gpu_utils::texture_atlas::AtlasRegion;
+use matcha_paint::Bitmap;
 use nalgebra::{Matrix4, Vector3};
 use parking_lot::Mutex;
-use renderer::RenderNode;
+use matcha_paint::RenderNode;
 
 use matcha_ecs::{
     components::{
@@ -94,7 +91,7 @@ struct FontCtxInner {
     /// Per-glyph rasterised coverage bitmap, cached in the stencil atlas and
     /// shared across every `Text` entity/frame that draws the same glyph at
     /// the same quantized size (`suzuri::GlyphId` bundles font+glyph+size).
-    stencil_cache: Mutex<HashMap<suzuri::GlyphId, (AtlasRegion, [f32; 2]), fxhash::FxBuildHasher>>,
+    stencil_cache: Mutex<HashMap<suzuri::GlyphId, (Bitmap, [f32; 2]), fxhash::FxBuildHasher>>,
 }
 
 /// World resource wrapping the shared `suzuri::FontSystem` plus the glyph
@@ -122,10 +119,7 @@ impl FontCtx {
     pub(crate) fn stencil_region(
         &self,
         glyph_id: suzuri::GlyphId,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        atlas: &gpu_utils::texture_atlas::TextureAtlas,
-    ) -> Option<(AtlasRegion, [f32; 2])> {
+    ) -> Option<(Bitmap, [f32; 2])> {
         if let Some(cached) = self.0.stencil_cache.lock().get(&glyph_id) {
             return Some(cached.clone());
         }
@@ -137,18 +131,7 @@ impl FontCtx {
             return None;
         }
 
-        let region = match atlas.allocate(device, queue, [metrics.width as u32, metrics.height as u32])
-        {
-            Ok(region) => region,
-            Err(e) => {
-                log::error!("Text glyph stencil allocation failed: {e}");
-                return None;
-            }
-        };
-        if let Err(e) = region.write_data(queue, &bitmap) {
-            log::error!("Text glyph stencil upload failed: {e}");
-            return None;
-        }
+        let region = Bitmap::coverage([metrics.width as u32, metrics.height as u32], bitmap).ok()?;
 
         let entry = (region, [metrics.width as f32, metrics.height as f32]);
         self.0
@@ -184,7 +167,7 @@ pub(crate) fn shape(font_ctx: &FontCtx, content: &str, font_size: f32, max_width
 }
 
 /// Paint the 1x1 tint pixel every glyph's stencil is masked against.
-pub(crate) fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<AtlasRegion> {
+pub(crate) fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<Bitmap> {
     crate::color::paint_tint_region(ctx, color, "Text")
 }
 
@@ -196,15 +179,15 @@ pub(crate) fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<Atla
 /// suzuri-shaping/stencil-cache glue.
 pub(crate) fn glyph_run_nodes(
     font_ctx: &FontCtx,
-    ctx: &RenderCtx,
+    _ctx: &RenderCtx,
     layout: &suzuri::text::TextLayout<()>,
-    tint_region: &AtlasRegion,
+    tint_region: &Bitmap,
 ) -> Vec<(RenderNode, Matrix4<f32>)> {
     let mut out = Vec::new();
     for line in &layout.lines {
         for glyph in &line.glyphs {
             let Some((stencil_region, size)) =
-                font_ctx.stencil_region(glyph.glyph_id, ctx.device, ctx.queue, ctx.stencil_atlas)
+                font_ctx.stencil_region(glyph.glyph_id)
             else {
                 continue;
             };

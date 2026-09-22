@@ -6,20 +6,21 @@
 //! of `(RenderItem, transform)` into a [`RenderSnapshot`], and hands it to a
 //! [`RenderDriver`]. The default [`ThreadDriver`] forwards each snapshot to a
 //! per-window worker thread that builds the (still-deferred) render nodes, calls
-//! [`CoreRenderer::render_flat`], and presents. The `RenderItem` builders run on
+//! [`SceneRenderer::render`], and presents. The `RenderItem` builders run on
 //! that worker thread, not the main thread.
 //!
 //! [`InlineDriver`] runs the same `build_and_present` synchronously; it exists to
 //! isolate regressions between "the snapshot/extract split" and "the threading".
 
-use std::{collections::HashMap, sync::mpsc, sync::Arc, thread::JoinHandle};
+use std::{collections::HashMap, sync::Arc, sync::mpsc, thread::JoinHandle};
 
 use bevy_ecs::{entity::Entity, world::World};
-use gpu_utils::texture_atlas::TextureAtlas;
+use matcha_paint::{RenderNode, SceneBuilder};
 use matcha_window::window::WindowId;
 use nalgebra::Matrix4;
 use parking_lot::{Condvar, Mutex};
-use renderer::{CoreRenderer, FlatItem, MaskNode, RenderNode};
+use render_interface::PixelMaskIndex;
+use renderer::{SceneRenderer, SceneTarget};
 
 use crate::{
     clip::ClipArena,
@@ -75,14 +76,57 @@ pub struct RenderSnapshot {
     pub viewport_size: [f32; 2],
     pub load_color: wgpu::Color,
     pub items: Vec<RenderItemSnapshot>,
-    /// The frame's clips, already paired with their coverage image. Indices in
+    /// The frame's CPU clip geometry. Indices in
     /// [`RenderItemSnapshot::clip`] point into this.
-    pub clips: Vec<MaskNode>,
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    pub core: Arc<CoreRenderer>,
-    pub texture_atlas: Arc<TextureAtlas>,
-    pub stencil_atlas: Arc<TextureAtlas>,
+    pub clips: ClipArena,
+    pub core: Arc<Mutex<GuiRenderer>>,
+}
+
+/// The UI owns the reusable Scene; the backend owns GPU resources. Keeping the
+/// pair under one driver lock permits the existing threaded presentation path
+/// without moving Sources or sharing each Source through an Arc.
+pub struct GuiRenderer {
+    pub scene: SceneBuilder,
+    pub backend: SceneRenderer,
+}
+impl GuiRenderer {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        Self {
+            scene: SceneBuilder::new(),
+            backend: SceneRenderer::new(device, queue),
+        }
+    }
+    /// Production assembly and rendering, also usable with offscreen attachments
+    /// for visual proofs. No surface or window is needed by the Scene contract.
+    pub fn render_extracted(
+        &mut self,
+        items: &[RenderItemSnapshot],
+        clips: &ClipArena,
+        target: SceneTarget<'_>,
+    ) -> Result<(), renderer::scene_renderer::SceneError> {
+        self.scene.begin();
+        for clip in clips.as_slice() {
+            self.scene.push_clip(clip.parent, clip.transform);
+        }
+        for item in items {
+            let ctx = RenderCtx {
+                size: item.size,
+                focused: item.focused,
+                focus_within: item.focus_within,
+                hovered: item.hovered,
+                active: item.active,
+            };
+            let node = build_node(&item.cache, &item.builder, &ctx);
+            self.scene.push(
+                &node,
+                item.transform,
+                item.clip.map(PixelMaskIndex),
+                item.opacity,
+            );
+        }
+        self.scene.finish();
+        self.backend.render(self.scene.scene(), target)
+    }
 }
 
 /// Collect a window root's drawable entities and the clips enclosing them, in
@@ -151,60 +195,31 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
     let RenderSnapshot {
         window_id,
         surface_texture,
-        format,
+        format: _,
         viewport_size,
         load_color,
         items,
         clips,
-        device,
-        queue,
         core,
-        texture_atlas,
-        stencil_atlas,
     } = snapshot;
 
-    let mut nodes: Vec<FlatItem> = Vec::with_capacity(items.len());
-    for item in &items {
-        // Size and interaction state vary per item, so `RenderCtx` is built fresh per item
-        // rather than shared across the loop. Opacity is deliberately not in
-        // it: it is applied at draw time, so it never reaches a builder and
-        // never invalidates a cached node.
-        let ctx = RenderCtx {
-            device: &device,
-            queue: &queue,
-            texture_atlas: &texture_atlas,
-            stencil_atlas: &stencil_atlas,
-            size: item.size,
-            focused: item.focused,
-            focus_within: item.focus_within,
-            hovered: item.hovered,
-            active: item.active,
-        };
-        let node = build_node(&item.cache, &item.builder, &ctx);
-        nodes.push(
-            FlatItem::new(node, item.transform)
-                .with_alpha(item.opacity)
-                .with_clip(item.clip),
-        );
-    }
-
+    let mut renderer = core.lock();
     let view = surface_texture
         .texture
         .create_view(&wgpu::TextureViewDescriptor::default());
 
-    if let Err(e) = core.render_flat(
-        &device,
-        &queue,
-        format,
-        &view,
-        viewport_size,
-        &nodes,
+    if let Err(e) = renderer.render_extracted(
+        &items,
         &clips,
-        load_color,
-        &texture_atlas.texture(),
-        &stencil_atlas.texture(),
+        SceneTarget {
+            view: &view,
+            viewport: viewport_size,
+            clear: load_color,
+            initial: None,
+        },
     ) {
-        log::error!("render_flat failed for window {window_id:?}: {e}");
+        log::error!("Scene render failed for window {window_id:?}: {e}");
+        return;
     }
 
     surface_texture.present();
@@ -222,9 +237,7 @@ fn build_node(
     {
         match cache.try_lock() {
             Some(mut guard) => {
-                return guard
-                    .get_or_insert_with(|| Arc::new(builder(ctx)))
-                    .clone();
+                return guard.get_or_insert_with(|| Arc::new(builder(ctx))).clone();
             }
             None => {
                 log::warn!(

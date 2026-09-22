@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+matcha-paint.workspace = true
 # self
 matcha-ecs = { workspace = true }
 # Two vocabularies, both of which matcha-ecs *defines components in terms of*
@@ -23,9 +24,6 @@ matcha-window = { workspace = true }
 bevy_ecs = "0.18.1"
 
 # graphics (for widgets that build render nodes directly)
-renderer = { workspace = true }
-gpu-utils = { workspace = true }
-wgpu = { workspace = true }
 nalgebra = { features = ["bytemuck"], workspace = true }
 
 # text shaping/rasterization (M6)

@@ -4,6 +4,7 @@ edition = "2024"
 version.workspace = true
 
 [dependencies]
+render-interface.workspace = true
 wgpu.workspace = true
 log.workspace = true
 nalgebra.workspace = true
@@ -23,6 +24,8 @@ parking_lot.workspace = true
 moka.workspace = true
 
 [dev-dependencies]
+matcha-paint.workspace = true
+image.workspace = true
 futures = { workspace = true }
 
 [build-dependencies]

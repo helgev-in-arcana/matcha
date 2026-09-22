@@ -7,8 +7,7 @@
 //! The renderer turns a chain of those into a product of coverage masks.
 //!
 //! Everything in this module is GPU-free. A [`ClipRect`] is pure geometry; the
-//! coverage image that gives it a shape is attached later, in the one place that
-//! owns the atlas (see [`ClipMask`](crate::resources::ClipMask)). That split is
+//! coverage image is a shared CPU definition registered by SceneBuilder. This is
 //! what lets clipping be tested headlessly.
 //!
 //! [`Clip`]: crate::components::layout::Clip

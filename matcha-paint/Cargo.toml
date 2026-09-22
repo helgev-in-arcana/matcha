@@ -1,0 +1,12 @@
+[package]
+name = "matcha-paint"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
+render-interface.workspace = true
+nalgebra.workspace = true
+bytemuck.workspace = true
+
+[lints]
+workspace = true

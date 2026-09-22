@@ -3,6 +3,8 @@ pub use core_renderer::{CoreRenderer, FlatItem, MaskNode};
 pub mod pipeline_cache;
 pub mod render_node;
 pub use render_node::RenderNode;
+pub mod scene_renderer;
+pub use scene_renderer::{SceneRenderer, SceneTarget};
 
 pub mod debug_renderer;
 pub use debug_renderer::DebugRenderer;

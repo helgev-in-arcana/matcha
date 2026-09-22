@@ -5,6 +5,8 @@ edition = "2024"
 publish = false
 
 [dependencies]
+matcha-paint.workspace = true
+render-interface.workspace = true
 # self
 renderer = { workspace = true }
 gpu-utils = { workspace = true }
@@ -29,6 +31,7 @@ log = { workspace = true }
 web-time = { workspace = true }
 
 [dev-dependencies]
+image.workspace = true
 # Widget implementations are only needed by tests/examples. A dev-dependency
 # keeps the one-way crate rule (matcha-ecs-widgets -> matcha-ecs) intact.
 #

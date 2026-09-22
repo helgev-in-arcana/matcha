@@ -30,7 +30,7 @@ use matcha_window::{
     window::CursorIcon,
 };
 use nalgebra::{Matrix4, Vector3};
-use renderer::RenderNode;
+use matcha_paint::RenderNode;
 
 use matcha_ecs::{
     components::{

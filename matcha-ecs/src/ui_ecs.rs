@@ -12,8 +12,9 @@
 //! same Phase B (re-view) + redraw path as the model queue; keyboard and IME
 //! events go to the focus path instead (see [`crate::keyboard`]).
 
-use std::sync::{atomic::AtomicBool, mpsc, Arc, OnceLock};
+use std::sync::{Arc, OnceLock, atomic::AtomicBool, mpsc};
 
+use crate::render::GuiRenderer;
 use bevy_ecs::{
     entity::Entity,
     schedule::{IntoScheduleConfigs, Schedule, SystemSet},
@@ -21,10 +22,7 @@ use bevy_ecs::{
     world::World,
 };
 use bevy_tasks::{AsyncComputeTaskPool, ComputeTaskPool, TaskPoolBuilder};
-use gpu_utils::{
-    gpu::{Gpu, GpuDescriptor},
-    texture_atlas::TextureAtlas,
-};
+use gpu_utils::gpu::{Gpu, GpuDescriptor};
 use matcha_window::{
     adapter::{EventLoop, EventLoopProxy},
     application::Application,
@@ -35,7 +33,7 @@ use matcha_window::{
     },
     window::{Window as OsWindow, WindowConfig, WindowId},
 };
-use renderer::{CoreRenderer, MaskNode};
+use parking_lot::Mutex;
 
 use crate::{
     components::{
@@ -43,20 +41,20 @@ use crate::{
         view::ViewChildren,
         window::{Window as WindowComp, WindowBelonging},
     },
-    focus::{run_validate_focus, sync_focus_components, Focus, FocusConfig},
+    focus::{Focus, FocusConfig, run_validate_focus, sync_focus_components},
     input::{
-        dispatch_pointer_drag, dispatch_pointer_scroll, resolve_pointer_press,
-        set_pointer_capture, MessageQueue,
+        MessageQueue, dispatch_pointer_drag, dispatch_pointer_scroll, resolve_pointer_press,
+        set_pointer_capture,
     },
     keyboard::{dispatch_ime, dispatch_key, sync_ime_state},
     model::{ModelHandle, ModelResource},
-    pick::{update_picker, PickQuery, Picker, PickerResource},
+    pick::{PickQuery, Picker, PickerResource, update_picker},
     pointer::{self, sync_cursor, sync_pointer_components},
-    render::{build_and_present, extract_items, RenderDriver, RenderSnapshot, ThreadDriver},
+    render::{RenderDriver, RenderSnapshot, ThreadDriver, build_and_present, extract_items},
     resources::{
-        ClipMask, FrameTime, GpuResource, RedrawRequest, RenderWindowRoot, RendererResource, ui_root,
+        FrameTime, GpuResource, RedrawRequest, RenderWindowRoot, RendererResource, ui_root,
     },
-    view::{run_view, Scope},
+    view::{Scope, run_view},
 };
 
 /// The render schedule's stages, run in this order every frame.
@@ -146,13 +144,23 @@ where
     F: Fn(&M, &mut Scope) + Send + Sync + 'static,
     R: Fn(&mut M, Msg) + Send + Sync + 'static,
 {
-    /// Build a `UiEcs`: initialise the GPU, atlases and renderer, insert them
+    /// Build a `UiEcs`: initialise the GPU and Scene renderer, insert them
     /// (plus the initial model) as world resources, and wire the render
     /// schedule. `reducer` applies a `Msg` dispatched by a click (`device_event`)
     /// to the model, the same way `ModelHandle::update` applies a queued
     /// mutation.
     pub fn new(model: M, view_fn: F, reducer: R) -> Self {
-        Self::new_with_gpu(model, view_fn, reducer, GpuDescriptor::default())
+        Self::new_with_gpu(
+            model,
+            view_fn,
+            reducer,
+            GpuDescriptor {
+                // SceneRenderer uses portable uniforms and read-only vertex input;
+                // the legacy renderer's immediate/storage features are unnecessary.
+                required_features: wgpu::Features::empty(),
+                ..GpuDescriptor::default()
+            },
+        )
     }
 
     /// [`Self::new`] with an explicit GPU descriptor. Headless tests pass
@@ -176,36 +184,15 @@ where
 
         let gpu =
             futures::executor::block_on(Gpu::new(gpu_desc)).expect("GPU initialisation failed");
-        let (device, _queue) = gpu
+        let (device, queue) = gpu
             .context()
             .expect("GPU device/queue available immediately after Gpu::new");
 
-        let atlas_extent = wgpu::Extent3d {
-            width: 4096,
-            height: 4096,
-            depth_or_array_layers: 4,
-        };
-        let texture_atlas = TextureAtlas::new(
-            &device,
-            atlas_extent,
-            wgpu::TextureFormat::Rgba8UnormSrgb,
-            TextureAtlas::DEFAULT_MARGIN_PX,
-        );
-        let stencil_atlas = TextureAtlas::new(
-            &device,
-            atlas_extent,
-            wgpu::TextureFormat::R8Unorm,
-            TextureAtlas::DEFAULT_MARGIN_PX,
-        );
-        let core = Arc::new(CoreRenderer::new(&device));
+        let core = Arc::new(Mutex::new(GuiRenderer::new(&device, &queue)));
 
         let mut world = World::new();
         world.insert_resource(GpuResource { gpu });
-        world.insert_resource(RendererResource {
-            core,
-            texture_atlas,
-            stencil_atlas,
-        });
+        world.insert_resource(RendererResource { core });
         world.insert_resource(CanCreateSurface { flag: false });
         world.insert_resource(ModelResource(model));
         world.insert_resource(PickerResource::default());
@@ -472,15 +459,8 @@ where
     fn build_snapshot(&mut self, window_id: WindowId) -> Option<RenderSnapshot> {
         let root_entity = self.root_of(window_id)?;
 
-        let (device, queue) = self.world.resource::<GpuResource>().gpu.context()?;
-        let (core, texture_atlas, stencil_atlas) = {
-            let r = self.world.resource::<RendererResource>();
-            (
-                r.core.clone(),
-                r.texture_atlas.clone(),
-                r.stencil_atlas.clone(),
-            )
-        };
+        let (device, _queue) = self.world.resource::<GpuResource>().gpu.context()?;
+        let core = self.world.resource::<RendererResource>().core.clone();
 
         let window_comp = self.world.get::<WindowComp>(root_entity)?;
         let window = &window_comp.window;
@@ -498,7 +478,7 @@ where
         };
 
         let frame = extract_items(&self.world, root_entity);
-        let clips = self.resolve_clips(&frame.clips, &device, &queue, &stencil_atlas);
+        let clips = frame.clips;
 
         Some(RenderSnapshot {
             window_id,
@@ -513,58 +493,8 @@ where
             },
             items: frame.items,
             clips,
-            device,
-            queue,
             core,
-            texture_atlas,
-            stencil_atlas,
         })
-    }
-
-    /// Pair each extracted clip rectangle with the shared coverage texel,
-    /// allocating that texel on first use.
-    ///
-    /// Extraction is deliberately GPU-free (which is what makes clipping
-    /// headlessly testable), so attaching the image happens here — this is the
-    /// only place holding the device, queue and atlas. Same lazy-insert pattern
-    /// the text and image widgets use for their own caches.
-    fn resolve_clips(
-        &mut self,
-        clips: &crate::clip::ClipArena,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        stencil_atlas: &TextureAtlas,
-    ) -> Vec<MaskNode> {
-        if clips.is_empty() {
-            return Vec::new();
-        }
-
-        if self.world.get_resource::<ClipMask>().is_none() {
-            match stencil_atlas.allocate(device, queue, [1, 1]) {
-                Ok(region) => {
-                    if let Err(e) = region.write_data(queue, &[0xff]) {
-                        log::error!("failed to write the shared clip coverage texel: {e}");
-                        return Vec::new();
-                    }
-                    self.world.insert_resource(ClipMask { region });
-                }
-                Err(e) => {
-                    log::error!("failed to allocate the shared clip coverage texel: {e}");
-                    return Vec::new();
-                }
-            }
-        }
-
-        let region = self.world.resource::<ClipMask>().region.clone();
-        clips
-            .as_slice()
-            .iter()
-            .map(|rect| MaskNode {
-                parent: rect.parent,
-                transform: rect.transform,
-                region: region.clone(),
-            })
-            .collect()
     }
 
     /// Advance animation/layout and build this frame's snapshot for
@@ -616,10 +546,7 @@ where
         let _ = self.proxy_slot.set(proxy);
         // Self-heal: a `ModelHandle::update` call made before `init()` ran
         // could not reach a proxy yet, so replay the wake now if one is due.
-        if self
-            .wake_pending
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        if self.wake_pending.load(std::sync::atomic::Ordering::Acquire) {
             if let Some(proxy) = self.proxy_slot.get() {
                 proxy.send_command(UiCommand::ModelUpdated);
             }
@@ -796,7 +723,10 @@ where
         // mouse event carries. Keyboard events are excluded so an early
         // keystroke cannot claim the pointer is at the origin.
         if let DeviceEventData::MouseInput { event: mouse, .. } = event.event() {
-            let left = matches!(mouse, Some(matcha_window::event::device_event::MouseInput::Left));
+            let left = matches!(
+                mouse,
+                Some(matcha_window::event::device_event::MouseInput::Left)
+            );
             let position = (!left).then(|| event.mouse_viewport_position());
             let moved = pointer::set_position(&mut self.world, position);
             self.settle(moved);

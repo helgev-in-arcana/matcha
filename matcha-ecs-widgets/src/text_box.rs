@@ -69,7 +69,7 @@ use matcha_window::event::device_event::{ImeEvent, Key as LogicalKey, KeyInput, 
 use nalgebra::{Matrix4, Point3, Vector3};
 use parking_lot::Mutex;
 use parley::{PlainEditor, StyleProperty};
-use renderer::RenderNode;
+use matcha_paint::RenderNode;
 
 use crate::{
     live::{LiveBool, LiveF32, LiveVec},

@@ -5,11 +5,9 @@
 //! no font fallback, so mixed-script or ligature-heavy text can render
 //! incorrectly. `RichText` shapes via parley (HarfRust shaping + fontique
 //! font fallback) and rasterises glyphs via swash, but reuses the exact same
-//! GPU compositing trick `Text` already established: a 1x1 solid-colour
-//! "tint" quad (`texture_atlas`) masked by a per-glyph coverage bitmap
-//! (`stencil_atlas`, `R8Unorm`) via `RenderNode::with_stencil` — see
-//! `renderer/src/core_renderer/renderer_render.wgsl`'s
-//! `final_color = texture_color * stencil_atlas.r`.
+//! compositing model as Text: a 1x1 CPU tint bitmap and a per-glyph CPU coverage
+//! bitmap, combined by `matcha_paint::RenderNode::with_stencil`. The upstream
+//! Scene owns the upload definitions; GPU residency belongs to the backend.
 //!
 //! **CSS text-property coverage (added in a later pass, see `CLAUDE.md`'s
 //! dated entry for the full design writeup)**: `RichText` now reproduces most
@@ -57,10 +55,10 @@ use bevy_ecs::{
     resource::Resource,
     world::EntityWorldMut,
 };
-use gpu_utils::texture_atlas::AtlasRegion;
+use matcha_paint::Bitmap;
 use nalgebra::{Matrix4, Vector3};
 use parking_lot::Mutex;
-use renderer::RenderNode;
+use matcha_paint::RenderNode;
 
 use matcha_ecs::{
     components::{
@@ -468,8 +466,8 @@ struct GlyphKey {
 /// unlike `Text`'s `stencil_cache`, `RichText` is expected to draw arbitrary
 /// runtime text (timecodes, filenames, ...) where an unbounded cache would
 /// grow forever. Eviction only ever drops this map's own entry — any
-/// `AtlasRegion` already baked into a built `RenderNode` keeps itself alive
-/// via its own `Arc` clone (RAII deallocation on last drop), so evicting a
+/// `Bitmap` already baked into a built `RenderNode` keeps itself alive
+/// via its own CPU `Arc` clone, so evicting a
 /// glyph here never corrupts an already-rendered frame, only means it will
 /// be re-rasterised if drawn again later.
 const GLYPH_CACHE_CAPACITY: usize = 1024;
@@ -489,7 +487,7 @@ pub(crate) struct ParleyFontCtxInner {
     /// visible bitmap, e.g. space — caching that avoids re-rasterising them
     /// every frame), shared across every `RichText` entity/frame drawing the
     /// same glyph at the same size.
-    stencil_cache: Mutex<glyph_cache::GlyphCache<GlyphKey, Option<(AtlasRegion, [f32; 2], [i32; 2])>>>,
+    stencil_cache: Mutex<glyph_cache::GlyphCache<GlyphKey, Option<(Bitmap, [f32; 2], [i32; 2])>>>,
 }
 
 /// World resource wrapping parley's `FontContext`/`LayoutContext`, swash's
@@ -534,14 +532,11 @@ impl ParleyFontCtx {
         key: GlyphKey,
         glyph_id: swash::GlyphId,
         scaler: &mut swash::scale::Scaler,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        atlas: &gpu_utils::texture_atlas::TextureAtlas,
-    ) -> Option<(AtlasRegion, [f32; 2], [i32; 2])> {
+    ) -> Option<(Bitmap, [f32; 2], [i32; 2])> {
         self.0
             .stencil_cache
             .lock()
-            .get_or_insert_with(key, || rasterize_and_upload(glyph_id, scaler, device, queue, atlas))
+            .get_or_insert_with(key, || rasterize_bitmap(glyph_id, scaler))
             .cloned()
             .flatten()
     }
@@ -549,13 +544,10 @@ impl ParleyFontCtx {
 
 /// Rasterise `glyph_id` via swash (alpha coverage mask only — colour glyphs
 /// are skipped, see module docs) and upload it into the stencil atlas.
-fn rasterize_and_upload(
+fn rasterize_bitmap(
     glyph_id: swash::GlyphId,
     scaler: &mut swash::scale::Scaler,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    atlas: &gpu_utils::texture_atlas::TextureAtlas,
-) -> Option<(AtlasRegion, [f32; 2], [i32; 2])> {
+) -> Option<(Bitmap, [f32; 2], [i32; 2])> {
     let image = swash::scale::Render::new(&[swash::scale::Source::Outline])
         .format(swash::zeno::Format::Alpha)
         .render(scaler, glyph_id)?;
@@ -567,17 +559,7 @@ fn rasterize_and_upload(
         return None;
     }
 
-    let region = match atlas.allocate(device, queue, [image.placement.width, image.placement.height]) {
-        Ok(region) => region,
-        Err(e) => {
-            log::error!("RichText glyph stencil allocation failed: {e}");
-            return None;
-        }
-    };
-    if let Err(e) = region.write_data(queue, &image.data) {
-        log::error!("RichText glyph stencil upload failed: {e}");
-        return None;
-    }
+    let region = Bitmap::coverage([image.placement.width, image.placement.height], image.data).ok()?;
 
     Some((
         region,
@@ -718,7 +700,7 @@ fn shape(
 
 /// Paint the 1x1 tint pixel a glyph's stencil — or a decoration rule — is
 /// masked against.
-pub(crate) fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<AtlasRegion> {
+pub(crate) fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<Bitmap> {
     crate::color::paint_tint_region(ctx, color, "RichText")
 }
 
@@ -739,8 +721,8 @@ pub(crate) fn draw_parley_layout(
     // regions (one per distinct colour actually used) — deduped locally,
     // scoped to this one build, no persistent cache/eviction needed
     // (typically only a handful of colours).
-    let mut tint_regions: HashMap<[u32; 4], AtlasRegion> = HashMap::new();
-    let mut tint_for = |color: [f32; 4]| -> Option<AtlasRegion> {
+    let mut tint_regions: HashMap<[u32; 4], Bitmap> = HashMap::new();
+    let mut tint_for = |color: [f32; 4]| -> Option<Bitmap> {
         let key = [color[0].to_bits(), color[1].to_bits(), color[2].to_bits(), color[3].to_bits()];
         if let Some(region) = tint_regions.get(&key) {
             return Some(region.clone());
@@ -804,9 +786,6 @@ pub(crate) fn draw_parley_layout(
                     key,
                     glyph.id as swash::GlyphId,
                     &mut scaler,
-                    ctx.device,
-                    ctx.queue,
-                    ctx.stencil_atlas,
                 ) else {
                     continue;
                 };

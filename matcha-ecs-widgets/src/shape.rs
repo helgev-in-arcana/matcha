@@ -1,33 +1,20 @@
-//! Rasterising box shapes, and caching what comes out.
+//! CPU rasterization and caching for box coverage and tint bitmaps.
 //!
-//! This is the "how" layer under [`crate::box_style`]'s "what": one rasteriser
-//! covering every filled, ringed or blurred rounded rectangle the box model can
-//! ask for, plus the two caches that make redrawing one affordable.
+//! Rounded fills, border rings and blurred shadows are immutable CPU bitmaps.
+//! Shape and colour have separate caches so recolouring does not rerasterize
+//! coverage. A cached paint tree contains Bitmap handles, never atlas regions.
+//! SceneBuilder registers lazy upload definitions and the renderer owns GPU
+//! residency and coverage compositing. GPU eviction leaves these CPU caches valid.
 //!
-//! **How a shape is drawn.** `renderer` has no rounded-rect support:
-//! `MaskData.kind` reserves a slot for analytic SDF shapes but only coverage
-//! masks are implemented. So a rounded rect goes down the same path a glyph
-//! does — a flat tint quad from the colour atlas, masked by a CPU-rasterised
-//! coverage bitmap in the stencil atlas, composited by
-//! `RenderNode::with_stencil`.
-//!
-//! That indirection is not just expedience, it is the *correct* way to get
-//! antialiased edges here. Coverage multiplies all four channels
-//! (`renderer_render.wgsl`) and the pipeline blends premultiplied, so a
-//! half-covered edge pixel comes out correctly attenuated. Writing an
-//! antialiased RGBA bitmap into the colour atlas instead would blend as though
-//! every pixel were fully opaque, and the edges would read too bright.
-//!
-//! **Why the two caches are split the way they are.** Coverage is keyed on
-//! shape alone and tint on colour alone, so recolouring reuses the mask and
-//! resizing reuses the colour. That is what makes a hover transition affordable:
-//! it changes only which 1x1 texel the quad samples.
+//! Coverage multiplies all four premultiplied channels. An aligned self-mask
+//! can be sampled directly; arbitrary transformed mask meshes use the backend's
+//! general coverage path. Neither choice is a widget concern.
 
 use std::sync::Arc;
 
 use bevy_ecs::{resource::Resource, world::EntityWorldMut};
 use fxhash::FxHashMap;
-use gpu_utils::texture_atlas::AtlasRegion;
+use matcha_paint::Bitmap;
 use parking_lot::Mutex;
 
 use matcha_ecs::components::render::RenderCtx;
@@ -110,9 +97,9 @@ fn dequantize(v: u32) -> f32 {
 struct ShapeCtxInner {
     /// Coverage bitmaps, keyed on shape alone — deliberately independent of
     /// colour, so recolouring reuses the mask.
-    coverage: Mutex<FxHashMap<CoverageKey, AtlasRegion>>,
+    coverage: Mutex<FxHashMap<CoverageKey, Bitmap>>,
     /// 1x1 tint pixels, keyed on the premultiplied bytes actually uploaded.
-    tint: Mutex<FxHashMap<[u8; 4], AtlasRegion>>,
+    tint: Mutex<FxHashMap<[u8; 4], Bitmap>>,
 }
 
 /// World resource holding the shape caches. Lazily inserted on first use so the
@@ -137,7 +124,7 @@ impl ShapeCtx {
 
     /// Fetch (rasterising and uploading on a miss) the coverage bitmap for
     /// `key`, as a region of the stencil atlas.
-    pub fn coverage_region(&self, key: CoverageKey, ctx: &RenderCtx) -> Option<AtlasRegion> {
+    pub fn coverage_region(&self, key: CoverageKey, _ctx: &RenderCtx) -> Option<Bitmap> {
         if key.w == 0 || key.h == 0 {
             return None;
         }
@@ -146,20 +133,7 @@ impl ShapeCtx {
         }
 
         let bitmap = rasterize_box(key);
-        let region = match ctx
-            .stencil_atlas
-            .allocate(ctx.device, ctx.queue, [key.w, key.h])
-        {
-            Ok(region) => region,
-            Err(e) => {
-                log::error!("box coverage allocation failed: {e}");
-                return None;
-            }
-        };
-        if let Err(e) = region.write_data(ctx.queue, &bitmap) {
-            log::error!("box coverage upload failed: {e}");
-            return None;
-        }
+        let region = Bitmap::coverage([key.w, key.h], bitmap).ok()?;
 
         self.0.coverage.lock().insert(key, region.clone());
         Some(region)
@@ -172,7 +146,7 @@ impl ShapeCtx {
     /// region's own texel centre, so stretching it over a whole quad samples
     /// that one texel everywhere. Same trick the core's `ClipMask` uses, and
     /// it is why recolouring a box costs no rasterisation at all.
-    pub fn tint_region(&self, color: [f32; 4], ctx: &RenderCtx) -> Option<AtlasRegion> {
+    pub fn tint_region(&self, color: [f32; 4], ctx: &RenderCtx) -> Option<Bitmap> {
         // Keyed on the bytes actually uploaded, so two colours that encode
         // identically share a texel.
         let bytes = premultiplied_srgb_bytes(color);

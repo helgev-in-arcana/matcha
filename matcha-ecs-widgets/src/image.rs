@@ -8,7 +8,7 @@
 //! `RectGeometry`/`LayoutDispatch::of::<RectGeometry>()` verbatim, same as
 //! `ColorRect`/`Checkbox`.
 //!
-//! Decode+resize+upload happens synchronously inside the `RenderItem`
+//! Decode+resize happens synchronously inside the `RenderItem`
 //! builder (matching `Text`'s existing "shape on first render-item build, no
 //! async" precedent) but is cached by `(source identity, display size)` in a
 //! lazily-inserted `ImageCtx` resource — mirroring `Text`'s `FontCtx`
@@ -16,10 +16,9 @@
 //! `invalidate_on_layout_change` invalidates *every* `RenderItem` on any
 //! `LayoutOutput` change, including a pure reposition with unchanged size;
 //! without this cache, any reflow near an `Image` would force a full
-//! re-decode. Resizing before upload is also a correctness requirement, not
-//! just an optimisation: atlas pages are fixed 4096×4096, and `allocate()`
-//! fails outright above that, so a natural-resolution large photo would
-//! otherwise hard-fail.
+//! re-decode. The cached result is an immutable CPU bitmap; SceneBuilder
+//! registers a lazy upload source and the renderer owns its GPU lifetime.
+//! Fitting before upload also avoids retaining unnecessarily large textures.
 //!
 //! Object-fit: v1 supports exactly `contain` — this is
 //! `image::DynamicImage::resize`'s documented behaviour verbatim, so no
@@ -49,10 +48,10 @@ use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, resource::Resource,
     world::EntityWorldMut,
 };
-use gpu_utils::texture_atlas::AtlasRegion;
+use matcha_paint::Bitmap;
 use nalgebra::{Matrix4, Vector3};
 use parking_lot::Mutex;
-use renderer::RenderNode;
+use matcha_paint::RenderNode;
 
 use matcha_ecs::{
     components::{
@@ -173,7 +172,7 @@ impl ObjectFit {
 /// `FontCtx`'s glyph stencil cache — fine for v1, revisit only if a real app
 /// displays many distinct large images over a long session.
 #[derive(Resource, Clone)]
-struct ImageCtx(Arc<Mutex<HashMap<ImageCacheKey, (AtlasRegion, [f32; 2]), fxhash::FxBuildHasher>>>);
+struct ImageCtx(Arc<Mutex<HashMap<ImageCacheKey, (Bitmap, [f32; 2]), fxhash::FxBuildHasher>>>);
 
 impl ImageCtx {
     fn new() -> Self {
@@ -228,21 +227,17 @@ fn image_render_item(image_ctx: ImageCtx, source: ImageSource, fit: ObjectFit) -
             return node;
         }
 
-        let region = match ctx.texture_atlas.allocate(ctx.device, ctx.queue, [w, h]) {
-            Ok(region) => region,
-            Err(e) => {
-                log::error!("Image atlas allocation failed: {e}");
-                return node;
+        // Decode sRGB to linear, premultiply, then encode for source-over.
+        let mut bytes = rgba.into_raw();
+        for pixel in bytes.chunks_exact_mut(4) {
+            let alpha = pixel[3] as f32 / 255.0;
+            for channel in &mut pixel[..3] {
+                let encoded = *channel as f32 / 255.0;
+                let linear = if encoded <= 0.04045 { encoded / 12.92 } else { ((encoded + 0.055) / 1.055).powf(2.4) };
+                *channel = crate::color::linear_to_srgb_u8(linear * alpha);
             }
-        };
-        // `.to_rgba8()`'s bytes are already sRGB-gamma-encoded by convention
-        // (matching the atlas's Rgba8UnormSrgb format), unlike `ColorRect`/
-        // `Text`'s linear-float colours which need `linear_to_srgb_u8`
-        // before a raw `write_data` — no conversion needed here.
-        if let Err(e) = region.write_data(ctx.queue, rgba.as_raw()) {
-            log::error!("Image upload failed: {e}");
-            return node;
         }
+        let Some(region) = Bitmap::rgba([w, h], bytes).ok() else { return node; };
 
         let entry = (region, [w as f32, h as f32]);
         image_ctx.0.lock().insert(key, entry.clone());
@@ -256,7 +251,7 @@ fn image_render_item(image_ctx: ImageCtx, source: ImageSource, fit: ObjectFit) -
 /// This is what produces `contain`'s letterbox/pillarbox bars. For `fill` and
 /// `cover` the fitted size already equals the box, so the offset is zero and
 /// this costs nothing; for `scale-down` of a small image it centres it.
-fn compose(mut node: RenderNode, (region, fitted_size): &(AtlasRegion, [f32; 2]), box_w: f32, box_h: f32) -> RenderNode {
+fn compose(mut node: RenderNode, (region, fitted_size): &(Bitmap, [f32; 2]), box_w: f32, box_h: f32) -> RenderNode {
     let offset = Matrix4::new_translation(&Vector3::new(
         ((box_w - fitted_size[0]) / 2.0).max(0.0),
         ((box_h - fitted_size[1]) / 2.0).max(0.0),

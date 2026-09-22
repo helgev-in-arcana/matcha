@@ -2,7 +2,7 @@
 //!
 //! A widget entity that draws carries a [`RenderItem`]. It does not hold a
 //! `RenderNode` directly; instead it holds a `builder` closure that produces one
-//! given GPU resources ([`RenderCtx`]), plus a shared `cache` slot. The render
+//! given layout/interaction state ([`RenderCtx`]), plus a shared `cache` slot. The render
 //! stage lazily fills the cache on first use and reuses it on subsequent frames.
 //! Invalidation ([`RenderItem::invalidate`]) swaps the cache for a fresh empty
 //! slot so the next frame rebuilds it.
@@ -10,17 +10,12 @@
 use std::sync::Arc;
 
 use bevy_ecs::component::Component;
-use gpu_utils::texture_atlas::TextureAtlas;
+use matcha_paint::RenderNode;
 use parking_lot::Mutex;
-use renderer::RenderNode;
 
-/// GPU resources handed to a [`RenderItem`] builder so it can allocate atlas
-/// space and record draw commands while producing its [`RenderNode`].
-pub struct RenderCtx<'a> {
-    pub device: &'a wgpu::Device,
-    pub queue: &'a wgpu::Queue,
-    pub texture_atlas: &'a TextureAtlas,
-    pub stencil_atlas: &'a TextureAtlas,
+/// CPU-only state handed to a [`RenderItem`] builder. GPU work belongs in
+/// render-interface resource generators, contributed through RenderNode::custom.
+pub struct RenderCtx {
     /// The size layout allocated to this entity (`LayoutOutput::size`).
     /// Builders must draw at *this* size, not a constructor-declared one: a
     /// parent layout may allocate more than the widget asked for (e.g.

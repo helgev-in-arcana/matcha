@@ -39,6 +39,8 @@ use matcha_ecs_widgets::{
     ScrollView, Slider, Text, TextBox, Wrap,
 };
 use matcha_window::adapter::Adapter;
+#[path = "support/offscreen.rs"]
+mod offscreen;
 
 const IMAGE_BYTES: &[u8] = include_bytes!("../../matcha/src/assets/videoframe_21710.png");
 
@@ -706,20 +708,19 @@ fn view(model: &Model, s: &mut Scope) {
 
 fn main() {
     env_logger::init();
+    let model = Model {
+        count: 0, agree: false, notify: true, volume: 42.0, quality: 3.0,
+        note: String::new(), title: "press Enter to submit".to_string(),
+        overlay_open: false, show_animated: true, fetch: Fetch::Idle,
+    };
+    if std::env::args().nth(1).as_deref() == Some("--offscreen") {
+        let path = std::env::args().nth(2).unwrap_or_else(|| "target/showcase-scene.png".into());
+        offscreen::capture(|s| view(&model, s), &path, [1000, 900]);
+        return;
+    }
     Adapter::new(
         UiEcs::new(
-            Model {
-                count: 0,
-                agree: false,
-                notify: true,
-                volume: 42.0,
-                quality: 3.0,
-                note: String::new(),
-                title: "press Enter to submit".to_string(),
-                overlay_open: false,
-                show_animated: true,
-                fetch: Fetch::Idle,
-            },
+            model,
             view,
             reduce,
         )

@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
+use crate::render::GuiRenderer;
 use bevy_ecs::{entity::Entity, resource::Resource, world::World};
-use gpu_utils::texture_atlas::TextureAtlas;
-use renderer::CoreRenderer;
+use parking_lot::Mutex;
 
 use matcha_window::window::WindowId;
 
@@ -16,28 +16,10 @@ pub struct GpuResource {
     pub gpu: gpu_utils::gpu::Gpu,
 }
 
-/// Shared rendering resources: the core wgpu pipeline plus the color and stencil
-/// texture atlases. All `Arc` so future render tasks (M4) can share them.
+/// UI assembly state and backend cache, serialized across render workers.
 #[derive(Resource)]
 pub struct RendererResource {
-    pub core: Arc<CoreRenderer>,
-    pub texture_atlas: Arc<TextureAtlas>,
-    pub stencil_atlas: Arc<TextureAtlas>,
-}
-
-/// The coverage image every rectangular clip is drawn with: a single fully
-/// opaque texel, stretched over the clip's box by its own transform.
-///
-/// One texel is enough because a mask's shape comes from its transform, and the
-/// shader rejects anything outside the mask's unit square rather than clamping
-/// to its edge. So a rectangular clip of any size costs no allocation at all,
-/// and the whole application shares this one region. Non-rectangular clips will
-/// want their own coverage images, or an analytic mask kind.
-///
-/// Allocated on first use, from the one place that owns the atlas.
-#[derive(Resource, Clone)]
-pub struct ClipMask {
-    pub region: gpu_utils::texture_atlas::AtlasRegion,
+    pub core: Arc<Mutex<GuiRenderer>>,
 }
 
 /// The single UI-root window entity and its id. M1 supports one window; this is

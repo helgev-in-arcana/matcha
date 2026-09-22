@@ -1,0 +1,33 @@
+Final validation, 2026-09-23 (JST)
+Base main: a7fd3f6c58fad19934231b52ee356828ef42ebba
+Work branch: codex/render-interface
+All Cargo commands offline, -j 2.
+Workspace: 448 passed, 0 failed, 8 ignored.
+Excluded shared-buffer per repository instructions.
+test texture_atlas::atlas_simple::atlas::tests::read_and_copy_operations_return_error_when_implemented ... ignored
+test matcha-ecs\src\ui_ecs.rs - ui_ecs::UiEcs<M,Msg,F,R>::with_pre_layout_systems (line 273) ... ignored
+test matcha-ecs\src\view.rs - view (line 9) ... ignored
+test matcha-ecs-widgets\src\animation.rs - animation (line 19) ... ignored
+test matcha-ecs-widgets\src\lib.rs - default_systems (line 76) ... ignored
+test matcha-ecs-widgets\src\scroll_view.rs - scroll_view (line 33) ... ignored
+test matcha-ecs-widgets\src\text_box.rs - text_box::TextBox (line 261) ... ignored
+test matcha-ecs-widgets\src\text_box.rs - text_box::TextBox<Msg>::confirm_key (line 336) ... ignored
+
+Vulkan:
+Scene contract adapter: AdapterInfo { name: "AMD Radeon RX 5700 XT", vendor: 4098, device: 29471, device_type: DiscreteGpu, device_pci_bus_id: "", driver: "AMD proprietary driver", driver_info: "26.8.1 (AMD proprietary shader compiler)", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 64, transient_saves_memory: false }
+Legacy baseline: max channel delta 0, changed pixels 0/4096
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+
+DirectX 12:
+Scene contract adapter: AdapterInfo { name: "AMD Radeon RX 5700 XT", vendor: 4098, device: 29471, device_type: DiscreteGpu, device_pci_bus_id: "0000:03:00.0", driver: "32.0.21045.5002", driver_info: "", backend: Dx12, subgroup_min_size: 32, subgroup_max_size: 64, transient_saves_memory: false }
+Legacy baseline: max channel delta 0, changed pixels 0/4096
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.91s
+
+Production GUI offscreen:
+GUI frame 0: 4.8292958s; RenderStats { prepared: 407, cache_hits: 12215, draw_calls: 1038, draw_batches: 7, mask_passes: 3, snapshot_copies: 1, cache_bytes: 612682, evicted: 0 }
+GUI frame 1: 100.1729ms; RenderStats { prepared: 0, cache_hits: 12622, draw_calls: 1038, draw_batches: 7, mask_passes: 3, snapshot_copies: 1, cache_bytes: 612682, evicted: 0 }
+Saved target/showcase-scene.png; adapter AdapterInfo { name: "AMD Radeon RX 5700 XT", vendor: 4098, device: 29471, device_type: DiscreteGpu, device_pci_bus_id: "", driver: "AMD proprietary driver", driver_info: "26.8.1 (AMD proprietary shader compiler)", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 64, transient_saves_memory: false }; 142 UI items
+
+Native window smoke: alive after 10 seconds; test process stopped; stderr empty.
+All workspace examples built. No wasm/browser verification: matcha-web absent.
+Timings are debug + GPU validation + completion wait, not a 60-fps claim.

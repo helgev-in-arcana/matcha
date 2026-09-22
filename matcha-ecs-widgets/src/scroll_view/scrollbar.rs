@@ -23,7 +23,7 @@ use bevy_ecs::{
     hierarchy::ChildOf, world::EntityWorldMut,
 };
 use nalgebra::Matrix4;
-use renderer::RenderNode;
+use matcha_paint::RenderNode;
 
 use matcha_ecs::{
     components::{
