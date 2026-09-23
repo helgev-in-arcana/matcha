@@ -63,6 +63,11 @@ pub fn unit_quad() -> MeshSource {
 
 /// Apply placement to flat records. Phases remain absolute; only root masks
 /// inherit parent. Source conflicts fail before the destination is changed.
+///
+/// Appending A then B produces A0/B0, then A1/B1, not all of A followed by B.
+/// The resulting phase snapshot is global; sources are shared without rewriting
+/// captured coordinates. Backdrop producers must use resolved RenderCtx placement.
+/// Opacity multiplies each object, not an isolated group's composited result.
 pub fn append_scene(
     destination: &mut Scene,
     source: &Scene,

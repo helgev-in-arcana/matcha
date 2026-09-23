@@ -81,3 +81,20 @@ image cache entries carry weak input ownership to prevent naked-address identity
 See ../docs/native-render-interface-report.md and journal/2026-09-23-native-scene-stress.md for
 experiments, counterexamples and design-feedback recommendations. This main checkout still has
 no matcha-web crate. Native Vulkan/DX12 validation is not a browser compatibility claim.
+
+## Review decisions (2026-09-23)
+
+Snapshot-dependency flags and sampler/shader policy are deferred interface candidates. A snapshot
+version must account for changed draws/transforms/masks/initial content, not only resource IDs.
+Page capacities/budgets and upstream cache lifetime are implementation topics outside the core
+contract; further work is deferred (existing correctness fixes remain).
+
+Native wgpu 29 validates the diagnostic incompatible-format Copy during encoder.finish, before
+submission. The error handler runs before finish returns; scope.pop uses a ready future here.
+PrepareResult/SceneError do not collect that channel. This is not evidence that GPU execution
+must be awaited, nor that a new asynchronous interface is needed. The default wgpu handler
+panics; gpu-utils overrides it with logging. A new timing diagnostic passes on Vulkan and DX12.
+
+Local Scene composition is a framework convention: phases align globally, masks rebase, transforms
+compose, opacity multiplies each object, and resource definitions share by ID. It does not isolate
+snapshot coordinates or group opacity. See ../docs/render-interface-review-notes.md.

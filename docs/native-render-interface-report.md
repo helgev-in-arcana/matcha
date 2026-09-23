@@ -150,8 +150,12 @@ warm cache では赤が残り、cache clear 後は青になった。新しい ID
 一方で wgpu の error scope は検証エラーを返した。
 
 現在の Result は CPU 構造検証／PrepareError の経路であり、GPU 検証・完了の保証ではない。
-将来、submission receipt や非同期エラーの観測口をどう表すかを決める必要がある。
-毎回 GPU 完了を待つことで、この区別を隠す修正はしていない。
+ただし、これは検証に GPU 実行完了待ちが必要という意味ではない。追加確認した native wgpu 29 では、
+この Copy の形式検証は `encoder.finish()` 内で同期的に実行され、error scope または handler に届く。
+`copy_texture_to_texture` は `()`、`finish` は CommandBuffer を返し、検証失敗を Result で返さない。
+今回の実装がその別経路を SceneError へ接続していないことが、CPU の Ok と食い違う直接の理由。
+先の「submission receipt や非同期エラー観測口が必要」という提案は、検証と実行完了を混同していたため撤回する。
+エラーの扱いはまず renderer の責任として整理し、インターフェース本体の変更要否は別途判断する。
 
 ### 要判断：サンプリングは配置最適化ではなく描画の意味
 
@@ -241,3 +245,6 @@ debug の大きな処理時間から GPU 性能を推測しない。今回のロ
 - texture atlas は単一 mip / layer の現在の契約向け。フィルタは linear、最終合成は premultiplied source-over。
 - フレーム内の出力再利用はあるが、CPU upload staging の全体一括化、全面的な bindless / indirect draw 化は行っていない。
 - ブラウザ、実 IME・連続リサイズ、device-loss 復旧は今回の検証に含めない。main に matcha-web は存在しない。
+
+報告後の判断・検証タイミングの追加実験・ローカル Scene 合成の詳細は
+[render-interface-review-notes.md](render-interface-review-notes.md) を参照。

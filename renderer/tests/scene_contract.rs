@@ -977,6 +977,52 @@ fn diagnostic_snapshot_content_identity_must_be_updated_by_the_caller() {
 }
 
 #[test]
+fn diagnostic_gpu_validation_at_finish_does_not_wait_for_execution() {
+    // Native wgpu 29 records this copy first, then validates its formats at finish.
+    // Observe the handler synchronously: a Future-returning scope API alone would
+    // not tell us when validation happened. No queue submission/poll is needed.
+    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor(false))).expect("real GPU");
+    let (device, _queue) = gpu.context().expect("GPU");
+    let errors = Arc::new(AtomicUsize::new(0));
+    let observed = errors.clone();
+    device.on_uncaptured_error(Arc::new(move |error| {
+        assert!(matches!(error, wgpu::Error::Validation { .. }));
+        observed.fetch_add(1, Ordering::SeqCst);
+    }));
+    let texture = |format| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("validation timing diagnostic"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    };
+    let source = texture(wgpu::TextureFormat::Rgba16Float);
+    let target = texture(wgpu::TextureFormat::Rgba8Unorm);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_texture(
+        source.as_image_copy(),
+        target.as_image_copy(),
+        target.size(),
+    );
+    assert_eq!(errors.load(Ordering::SeqCst), 0);
+    let invalid_commands = encoder.finish();
+    assert_eq!(errors.load(Ordering::SeqCst), 1);
+    drop(invalid_commands);
+    eprintln!(
+        "Native validation timing: copy returned with 0 errors; finish returned with 1 validation error already delivered; no submit/poll."
+    );
+}
+
+#[test]
 fn diagnostic_gpu_validation_is_distinct_from_prepare_result() {
     let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor(false))).expect("real GPU");
     let (device, queue) = gpu.context().expect("GPU");
