@@ -1,0 +1,13 @@
+[package]
+name = "render-interface"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
+wgpu.workspace = true
+nalgebra.workspace = true
+bytemuck.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "render-interface",
     "matcha",
     "matcha-tree",
     "matcha-tree-widgets",
@@ -19,6 +20,7 @@ version = "0.0.6"
 
 [workspace.dependencies]
 # self
+render-interface = { path = "render-interface" }
 matcha = { path = "matcha" }
 matcha-tree = { path = "matcha-tree" }
 matcha-window = { path = "matcha-window" }
