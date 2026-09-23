@@ -2,8 +2,6 @@
 //! declarative `checked` state and `RenderItem`-cache-invalidation-on-patch,
 //! same GPU-free style as `tests/render_item_reuse.rs`.
 
-use std::sync::Arc;
-
 use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::components::{render::RenderItem, view::ViewChildren};
@@ -28,12 +26,11 @@ fn first_child(world: &World, root: Entity) -> Entity {
         .1
 }
 
-fn cache(world: &World, e: Entity) -> Arc<parking_lot::Mutex<Option<render_interface::Scene>>> {
+fn cache(world: &World, e: Entity) -> u64 {
     world
         .get::<RenderItem>(e)
         .expect("Checkbox carries a RenderItem")
-        .cache
-        .clone()
+        .revision
 }
 
 #[test]
@@ -43,7 +40,10 @@ fn defaults_to_a_20px_square_leaf() {
         s.leaf(Checkbox::<Msg>::new(false).on(Msg::Toggle));
     });
     let child = first_child(&world, root);
-    assert_eq!(world.get::<RectGeometry>(child).copied(), Some(RectGeometry { w: 20.0, h: 20.0 }));
+    assert_eq!(
+        world.get::<RectGeometry>(child).copied(),
+        Some(RectGeometry { w: 20.0, h: 20.0 })
+    );
 }
 
 #[test]
@@ -59,7 +59,10 @@ fn unchanged_checked_state_does_not_invalidate_cache() {
     matcha_ecs::view::run_view(&mut world, root, build);
     let after = cache(&world, child);
 
-    assert!(Arc::ptr_eq(&before, &after), "cache Arc must be unchanged when checked is re-declared identically");
+    assert!(
+        (before == after),
+        "draw revision must be unchanged when checked is re-declared identically"
+    );
 }
 
 #[test]
@@ -80,7 +83,10 @@ fn toggling_checked_invalidates_cache() {
     });
     let after = cache(&world, child);
 
-    assert!(!Arc::ptr_eq(&before, &after), "cache Arc must change when checked toggled");
+    assert!(
+        (before != after),
+        "draw revision must change when checked toggled"
+    );
 }
 
 #[test]
@@ -97,6 +103,12 @@ fn changed_size_invalidates_cache_and_updates_geometry() {
     });
     let after = cache(&world, child);
 
-    assert!(!Arc::ptr_eq(&before, &after), "cache Arc must change when size changed");
-    assert_eq!(world.get::<RectGeometry>(child).copied(), Some(RectGeometry { w: 32.0, h: 32.0 }));
+    assert!(
+        (before != after),
+        "draw revision must change when size changed"
+    );
+    assert_eq!(
+        world.get::<RectGeometry>(child).copied(),
+        Some(RectGeometry { w: 32.0, h: 32.0 })
+    );
 }

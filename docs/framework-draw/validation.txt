@@ -1,0 +1,39 @@
+Final workspace tests: 460 passed, 0 failed, 8 existing ignored.
+Workspace examples build: passed.
+
+GUI frame 0: 245.5071ms; assembly=197.8032ms, allocations=Sample { allocations: 2600, reallocations: 1077, bytes: 155994524 }, encode/submit=41.0967ms, wait=6.607ms; RenderStats { prepared: 407, cache_hits: 12215, draw_calls: 1038, draw_batches: 7, mask_passes: 3, snapshot_copies: 0, cache_bytes: 612682, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 6291456, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 8, output_texture_allocations: 119, output_buffer_allocations: 1 }
+GUI frame 1: 4.6124ms; assembly=498.5µs, allocations=Sample { allocations: 0, reallocations: 0, bytes: 0 }, encode/submit=2.3477ms, wait=1.766ms; RenderStats { prepared: 0, cache_hits: 12622, draw_calls: 1038, draw_batches: 7, mask_passes: 3, snapshot_copies: 0, cache_bytes: 612682, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 6291456, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 8, output_texture_allocations: 0, output_buffer_allocations: 0 }
+GUI frame 2: 3.4ms; assembly=454.5µs, allocations=Sample { allocations: 0, reallocations: 0, bytes: 0 }, encode/submit=1.759ms, wait=1.1865ms; RenderStats { prepared: 0, cache_hits: 12622, draw_calls: 1038, draw_batches: 7, mask_passes: 3, snapshot_copies: 0, cache_bytes: 612682, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 6291456, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 8, output_texture_allocations: 0, output_buffer_allocations: 0 }
+GUI frame 3: 3.4396ms; assembly=450.7µs, allocations=Sample { allocations: 0, reallocations: 0, bytes: 0 }, encode/submit=1.7348ms, wait=1.2544ms; RenderStats { prepared: 0, cache_hits: 12622, draw_calls: 1038, draw_batches: 7, mask_passes: 3, snapshot_copies: 0, cache_bytes: 612682, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 6291456, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 8, output_texture_allocations: 0, output_buffer_allocations: 0 }
+Saved target/framework-showcase.png; adapter AdapterInfo { name: "AMD Radeon RX 5700 XT", vendor: 4098, device: 29471, device_type: DiscreteGpu, device_pci_bus_id: "", driver: "AMD proprietary driver", driver_info: "26.8.1 (AMD proprietary shader compiler)", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 64, transient_saves_memory: false }; 142 UI items
+
+1000x900: changed 0/900000 pixels, maximum channel delta 0, mean channel delta 0.000000
+
+
+vulkan
+Adapter: AdapterInfo { name: "AMD Radeon RX 5700 XT", vendor: 4098, device: 29471, device_type: DiscreteGpu, device_pci_bus_id: "", driver: "AMD proprietary driver", driver_info: "26.8.1 (AMD proprietary shader compiler)", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 64, transient_saves_memory: false }
+GPU shape 0: max byte delta 0
+GPU shape 1: max byte delta 0
+GPU shape 2: max byte delta 0
+GPU shape 3: max byte delta 0
+GPU shape 4: max byte delta 0
+Widget frame 0: 21.1738ms, RenderStats { prepared: 25, cache_hits: 163, draw_calls: 50, draw_batches: 5, mask_passes: 0, snapshot_copies: 0, cache_bytes: 308727, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 9437184, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 3, output_texture_allocations: 15, output_buffer_allocations: 1 }
+Widget frame 1: 5.4904ms, RenderStats { prepared: 3, cache_hits: 185, draw_calls: 50, draw_batches: 5, mask_passes: 0, snapshot_copies: 0, cache_bytes: 539127, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 9437184, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 3, output_texture_allocations: 1, output_buffer_allocations: 0 }
+Widget frame 2: 5.2999ms, RenderStats { prepared: 3, cache_hits: 185, draw_calls: 50, draw_batches: 5, mask_passes: 0, snapshot_copies: 0, cache_bytes: 769527, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 9437184, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 3, output_texture_allocations: 1, output_buffer_allocations: 0 }
+Translated backdrop oracle passed; relocation without generator calls: RelocationStats { textures: 30, meshes: 1, copied_bytes: 769527, placement: PlacementStats { texture_pages: 7, texture_bytes: 1638400, mesh_pages: 1, mesh_bytes: 4096 } }
+20 failed CPU compositions stayed bounded; repaired frame reproduced the original pixels.
+Overlapping widget effects: sequential backdrop pixels, ordinary paint order, moved placement and cache-clear regeneration passed.
+
+dx12
+Adapter: AdapterInfo { name: "AMD Radeon RX 5700 XT", vendor: 4098, device: 29471, device_type: DiscreteGpu, device_pci_bus_id: "0000:03:00.0", driver: "32.0.21045.5002", driver_info: "", backend: Dx12, subgroup_min_size: 32, subgroup_max_size: 64, transient_saves_memory: false }
+GPU shape 0: max byte delta 0
+GPU shape 1: max byte delta 0
+GPU shape 2: max byte delta 0
+GPU shape 3: max byte delta 0
+GPU shape 4: max byte delta 0
+Widget frame 0: 32.7311ms, RenderStats { prepared: 25, cache_hits: 163, draw_calls: 50, draw_batches: 5, mask_passes: 0, snapshot_copies: 0, cache_bytes: 308727, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 9437184, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 3, output_texture_allocations: 15, output_buffer_allocations: 1 }
+Widget frame 1: 5.7683ms, RenderStats { prepared: 3, cache_hits: 185, draw_calls: 50, draw_batches: 5, mask_passes: 0, snapshot_copies: 0, cache_bytes: 539127, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 9437184, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 3, output_texture_allocations: 1, output_buffer_allocations: 0 }
+Widget frame 2: 4.3501ms, RenderStats { prepared: 3, cache_hits: 185, draw_calls: 50, draw_batches: 5, mask_passes: 0, snapshot_copies: 0, cache_bytes: 769527, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 9437184, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 3, output_texture_allocations: 1, output_buffer_allocations: 0 }
+Translated backdrop oracle passed; relocation without generator calls: RelocationStats { textures: 30, meshes: 1, copied_bytes: 769527, placement: PlacementStats { texture_pages: 7, texture_bytes: 1638400, mesh_pages: 1, mesh_bytes: 4096 } }
+20 failed CPU compositions stayed bounded; repaired frame reproduced the original pixels.
+Overlapping widget effects: sequential backdrop pixels, ordinary paint order, moved placement and cache-clear regeneration passed.

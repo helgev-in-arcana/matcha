@@ -192,6 +192,155 @@ fn descriptor(size: [u32; 2]) -> TextureDescriptor {
     desc
 }
 
+/// The second widget's invert must read the first widget's inverted output.
+/// Phase-index zipping would make both read red and leave cyan at x=8.
+fn verify_framework_order(device: &wgpu::Device, queue: &wgpu::Queue, directory: &str) {
+    use matcha_ecs::{clip::ClipArena, render::RenderItemSnapshot};
+    let color = |rgba: [u8; 4]| {
+        TextureSource::new(
+            TextureDescriptor::new([1, 1], wgpu::TextureFormat::Rgba8Unorm),
+            move |mut c| upload_texture(&mut c.gpu, &c.target, &rgba),
+        )
+    };
+    let red = color([255, 0, 0, 255]);
+    let blue = color([0, 0, 255, 255]);
+    let green = color([0, 255, 0, 255]);
+    let programs: Programs = Arc::new(Mutex::new(None));
+    let make_effect = |width: f32, base: Option<TextureSource>| {
+        let programs = programs.clone();
+        RenderItem::new(move |ctx, draw| {
+            if let Some(base) = &base {
+                draw.quad(base, [32., 16.], Matrix4::identity(), None);
+            }
+            let params = EffectParams {
+                transform: draw.transform(),
+                viewport_size: [32., 16., width, 16.],
+                mode: [3, 0, 0, 0],
+            };
+            let programs = programs.clone();
+            let texture = TextureSource::new(descriptor([width as u32, 16]), move |c| {
+                effect(&programs, params, c.gpu, c.target)
+            });
+            let mesh = draw.mesh(&unit_quad());
+            let texture = draw.texture(&texture);
+            draw.backdrop(Object::new(mesh, texture, rect(width, 16.)));
+        })
+    };
+    let a = make_effect(24., Some(red));
+    let b = make_effect(16., None);
+    let blue_item = RenderItem::new(move |_, draw| {
+        draw.quad(
+            &blue,
+            [8., 16.],
+            Matrix4::new_translation(&nalgebra::Vector3::new(24., 0., 0.)),
+            None,
+        )
+    });
+    let c = RenderItem::new(move |_, draw| draw.quad(&green, [4., 16.], Matrix4::identity(), None));
+    let mut world = World::new();
+    let entity = world.spawn_empty().id();
+    let mut items: Vec<_> = [a, blue_item, b, c]
+        .into_iter()
+        .map(|item| RenderItemSnapshot {
+            entity,
+            revision: item.revision,
+            builder: item.builder,
+            transform: Matrix4::identity(),
+            size: [32., 16.],
+            opacity: 1.,
+            focused: false,
+            focus_within: false,
+            hovered: false,
+            active: false,
+            clip: None,
+        })
+        .collect();
+    let output = target(device, [32, 16], false);
+    let view = output.create_view(&Default::default());
+    let mut renderer = GuiRenderer::new(device, queue);
+    for moved in [false, true] {
+        if moved {
+            items[2].transform = Matrix4::new_translation(&nalgebra::Vector3::new(8., 0., 0.));
+        }
+        renderer
+            .render_extracted(
+                &items,
+                &ClipArena::default(),
+                SceneTarget {
+                    view: &view,
+                    viewport: [32., 16.],
+                    clear: wgpu::Color::BLACK,
+                    initial: None,
+                },
+            )
+            .expect("ordered writers");
+        let pixels = read(device, queue, &output);
+        let pixel = |x: usize| &pixels[(8 * 32 + x) * 4..(8 * 32 + x) * 4 + 4];
+        assert_eq!(
+            pixel(2),
+            [0, 255, 0, 255],
+            "later ordinary paint stays on top"
+        );
+        assert_eq!(
+            pixel(8),
+            [255, 0, 0, 255],
+            "second effect reads first effect"
+        );
+        assert_eq!(
+            pixel(28),
+            [0, 0, 255, 255],
+            "ordinary paint between effects"
+        );
+        assert_eq!(
+            pixel(6),
+            if moved {
+                [0, 255, 255, 255]
+            } else {
+                [255, 0, 0, 255]
+            },
+            "moving effect rebuilds its resolved background coordinates"
+        );
+        assert_eq!(renderer.frame.scene.phases.len(), 3);
+        if moved {
+            assert_eq!(
+                renderer.backend.stats().prepared,
+                2,
+                "only backdrop outputs regenerate"
+            );
+        }
+        image::save_buffer(
+            std::path::Path::new(directory).join(if moved {
+                "paint-order-moved.png"
+            } else {
+                "paint-order.png"
+            }),
+            &pixels,
+            32,
+            16,
+            image::ColorType::Rgba8,
+        )
+        .expect("order artifact");
+        renderer.backend.clear_cache();
+        renderer
+            .backend
+            .render(
+                &renderer.frame.scene,
+                SceneTarget {
+                    view: &view,
+                    viewport: [32., 16.],
+                    clear: wgpu::Color::BLACK,
+                    initial: None,
+                },
+            )
+            .expect("cold regeneration");
+        assert_eq!(
+            pixels,
+            read(device, queue, &output),
+            "cold and warm outputs agree"
+        );
+    }
+}
+
 struct ShaderWidget {
     background: TextureSource,
     programs: Programs,
@@ -209,27 +358,15 @@ impl Widget for ShaderWidget {
         (
             RectGeometry { w: 160., h: 120. },
             LayoutDispatch::of::<RectGeometry>(),
-            RenderItem::dynamic(move |ctx, scene| {
-                scene.resources.retain_textures(|id| id == background.id());
-                for p in &mut scene.phases {
-                    p.objects.clear();
-                }
-                scene.pixel_masks.clear();
-                let mesh = scene
-                    .resources
-                    .share_mesh(&unit_quad())
-                    .expect("same shared mesh");
-                let texture = scene
-                    .resources
-                    .share_texture(&background)
-                    .expect("same shared background");
-                scene.phases.resize_with(2, Phase::default);
-                scene.phases[0].objects.push(Object {
+            RenderItem::new(move |ctx, draw| {
+                let mesh = draw.mesh(&unit_quad());
+                let texture = draw.texture(&background);
+                draw.object(Object {
                     opacity: alpha,
                     ..Object::new(mesh, texture, rect(ctx.size[0], ctx.size[1]))
                 });
                 let params = EffectParams {
-                    transform: ctx.transform,
+                    transform: draw.transform(),
                     viewport_size: [
                         ctx.viewport_size[0],
                         ctx.viewport_size[1],
@@ -240,21 +377,12 @@ impl Widget for ShaderWidget {
                 };
                 let programs = programs.clone();
                 let generated = generated.clone();
-                let texture = scene
-                    .resources
-                    .insert_texture(TextureSource::new(
-                        descriptor(ctx.size.map(|v| v as u32)),
-                        move |c| {
-                            generated.fetch_add(1, Ordering::SeqCst);
-                            effect(&programs, params, c.gpu, c.target)
-                        },
-                    ))
-                    .expect("fresh background-dependent ID");
-                scene.phases[1].objects.push(Object::new(
-                    mesh,
-                    texture,
-                    rect(ctx.size[0], ctx.size[1]),
-                ));
+                let source = TextureSource::new(descriptor(ctx.size.map(|v| v as u32)), move |c| {
+                    generated.fetch_add(1, Ordering::SeqCst);
+                    effect(&programs, params, c.gpu, c.target)
+                });
+                let texture = draw.texture(&source);
+                draw.backdrop(Object::new(mesh, texture, rect(ctx.size[0], ctx.size[1])));
             }),
         )
     }
@@ -301,18 +429,20 @@ fn main() {
             active: false,
         };
         let mask = shape.coverage_source(key, &ctx).expect("GPU shape source");
-        let mut scene = Scene::default();
+        let mut frame = matcha_ecs::scene::Frame::default();
+        frame.begin();
         push_quad(
-            &mut scene,
+            &mut frame.draw(Matrix4::identity(), None, 1.),
             &white(),
             ctx.size,
             Matrix4::identity(),
             Some(&mask),
         );
+        frame.finish().expect("shape draw");
         let output = target(&device, [key.w, key.h], false);
         backend
             .render(
-                &scene,
+                &frame.scene,
                 SceneTarget {
                     view: &output.create_view(&Default::default()),
                     viewport: ctx.size,
@@ -417,7 +547,7 @@ fn main() {
         assert_eq!(
             bg_calls.load(Ordering::SeqCst),
             1,
-            "one GPU generation shared by three independent widget Scenes"
+            "one GPU generation shared by three widget writers"
         );
         assert_eq!(
             effect_calls.load(Ordering::SeqCst),
@@ -443,11 +573,11 @@ fn main() {
     // Render phase zero as a reference, then compare the translated third
     // widget's invert output to its own backdrop in linear colour space.
     let full = read(&device, &queue, &output);
-    let effects = renderer.scene.phases.pop().expect("effect phase");
+    let effects = renderer.frame.scene.phases.pop().expect("effect phase");
     renderer
         .backend
         .render(
-            &renderer.scene,
+            &renderer.frame.scene,
             SceneTarget {
                 view: &output_view,
                 viewport: [512., 176.],
@@ -457,11 +587,11 @@ fn main() {
         )
         .expect("phase-zero reference");
     let base = read(&device, &queue, &output);
-    renderer.scene.phases.push(effects);
+    renderer.frame.scene.phases.push(effects);
     let item = frame
         .items
         .iter()
-        .filter(|i| i.rebuild_each_frame)
+        .filter(|i| i.size == [160., 120.])
         .nth(2)
         .expect("third effect widget");
     let x = item.transform[(0, 3)] as usize + 67;
@@ -496,7 +626,7 @@ fn main() {
     renderer
         .backend
         .render(
-            &renderer.scene,
+            &renderer.frame.scene,
             SceneTarget {
                 view: &output_view,
                 viewport: [512., 176.],
@@ -510,21 +640,16 @@ fn main() {
     report.push_str(&format!(
         "Translated backdrop oracle passed; relocation without generator calls: {moved:?}\n"
     ));
-    let limit = renderer.scene.resources.len();
-    let bad = RenderItem::new(|_| {
-        let mut scene = Scene::default();
-        scene.phases.push(Phase {
-            objects: vec![Object {
-                mask: Some(PixelMaskIndex(u32::MAX)),
-                ..Object::new(MeshId::new(), TextureId::new(), Matrix4::identity())
-            }],
+    let limit = renderer.frame.scene.resources.len();
+    let bad = RenderItem::new(|_, draw| {
+        draw.object(Object {
+            mask: Some(PixelMaskIndex(u32::MAX)),
+            ..Object::new(MeshId::new(), TextureId::new(), Matrix4::identity())
         });
-        scene
     });
     frame.items.push(matcha_ecs::render::RenderItemSnapshot {
         entity: root,
-        rebuild_each_frame: false,
-        cache: bad.cache,
+        revision: bad.revision,
         builder: bad.builder,
         transform: Matrix4::identity(),
         size: [1., 1.],
@@ -542,7 +667,7 @@ fn main() {
                 .is_err()
         );
         assert!(
-            renderer.scene.resources.len() <= limit,
+            renderer.frame.scene.resources.len() <= limit,
             "failed assemblies must not retain past dynamic definitions"
         );
     }
@@ -566,6 +691,8 @@ fn main() {
         .expect("retry after malformed fragment");
     assert_eq!(full, read(&device, &queue, &output));
     report.push_str("20 failed CPU compositions stayed bounded; repaired frame reproduced the original pixels.\n");
+    verify_framework_order(&device, &queue, &directory);
+    report.push_str("Overlapping widget effects: sequential backdrop pixels, ordinary paint order, moved placement and cache-clear regeneration passed.\n");
     let error = futures::executor::block_on(validation.pop());
     assert!(error.is_none(), "GPU validation: {error:?}");
     std::fs::write(

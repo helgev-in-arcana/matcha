@@ -25,8 +25,9 @@ RenderNode or UI-managed atlas is involved. Decorations are ordinary unmasked Ob
 
 ## Layout ↔ render, and what is not cached
 
-`measure`, `arrange` and the `RenderItem` builder each **independently re-shape from scratch**. The
-only value passed between stages is the resolved wrap width, through a shared atomic cell
+Layout measurement and rendering do not share their shaped result. The render writer memoizes
+its layout by wrap width; measurement shapes separately. The value passed between stages is
+the resolved wrap width, through a shared atomic cell
 (`live.rs`). That is enough to make the generic `invalidate_on_layout_change` cover text reflow with
 zero new systems, since the closure keeps re-reading the live width instead of needing a rebuild.
 
@@ -72,3 +73,10 @@ web-font notes described another branch and must not be used as current API inst
 
 CPU source definitions survive GPU eviction; the backend invokes their generators to restore
 content. Source allocation/ID reuse, glyph-cache eviction and GPU residency are independent.
+
+## Draw-writer ownership
+
+Text/RichText writers memoize shaped layouts by wrap width; replacing the writer handles changed
+content/style. Button labels shape once per writer. TextBox uses its editor layout. Layout-stage
+measurement remains separate. Tints/glyph definitions retain IDs across redraws; Object/mask
+records are emitted fresh into the framework Frame. No widget-local Scene cache remains.

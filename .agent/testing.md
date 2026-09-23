@@ -9,11 +9,11 @@ machine. `shared-buffer` is excluded for pre-existing doctest failures in the le
 
 ## The GPU-free convention
 
-**Tests in `matcha-ecs/tests/` and `matcha-ecs-widgets/tests/` never invoke a `RenderItem::builder`
-and never touch a `wgpu::Device`.** What they assert instead:
+**Tests in `matcha-ecs/tests/` and `matcha-ecs-widgets/tests/` never touch a `wgpu::Device`.**
+CPU Frame/Draw scheduling tests may invoke writers; generators must not execute. Assertions include:
 
-- `Arc::ptr_eq` on `RenderItem::cache` — did a prop change invalidate the cached node, and did a
-  no-op re-declare *not*? This is the standard widget test, one per prop.
+- `RenderItem::revision` value comparisons — changed props advance it, unchanged props preserve it.
+  Extracted frames share the immutable builder; no retained Scene cache exists.
 - `LayoutOutput` sizes and `GlobalTransform` positions.
 - Extract-level snapshot contents (order, size, opacity, clip indices).
 - Pure functions directly (`geometry`, `distribute`, `sizing`, `shape` coverage, whitespace

@@ -48,9 +48,9 @@ use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, resource::Resource,
     world::EntityWorldMut,
 };
+use matcha_ecs::scene::Draw;
 use nalgebra::{Matrix4, Vector3};
 use parking_lot::Mutex;
-use render_interface::Scene;
 use render_interface::{TextureDescriptor, TextureSource, upload_texture};
 
 use matcha_ecs::{
@@ -223,27 +223,26 @@ fn decode(source: &ImageSource) -> Option<image::DynamicImage> {
 /// `w`×`h`; CSS `object-fit: contain`), decoding/resizing/uploading at most
 /// once per distinct `(source, box size)` pair via `image_ctx`.
 fn image_render_item(image_ctx: ImageCtx, source: ImageSource, fit: ObjectFit) -> RenderItem {
-    RenderItem::new(move |ctx: &RenderCtx| {
+    RenderItem::new(move |ctx: &RenderCtx, draw| {
         let [box_w, box_h] = ctx.size;
-        let mut node = Scene::default();
         if box_w <= 0.0 || box_h <= 0.0 {
-            return node;
+            return;
         }
         let target = [box_w.ceil() as u32, box_h.ceil() as u32];
         let key = ImageCacheKey::new(&source, target, fit);
 
         if let Some(cached) = image_ctx.lookup(&key) {
-            return compose(node, &cached, box_w, box_h);
+            return compose(draw, &cached, box_w, box_h);
         }
 
         let Some(decoded) = decode(&source) else {
-            return node;
+            return;
         };
         let fitted = fit.apply(&decoded, target);
         let rgba = fitted.to_rgba8();
         let (w, h) = rgba.dimensions();
         if w == 0 || h == 0 {
-            return node;
+            return;
         }
 
         // Decode sRGB to linear, premultiply, then encode for source-over.
@@ -277,8 +276,7 @@ fn image_render_item(image_ctx: ImageCtx, source: ImageSource, fit: ObjectFit) -
                 owner,
             },
         );
-        node = compose(node, &entry, box_w, box_h);
-        node
+        compose(draw, &entry, box_w, box_h);
     })
 }
 
@@ -316,18 +314,17 @@ mod source_identity_tests {
 /// `cover` the fitted size already equals the box, so the offset is zero and
 /// this costs nothing; for `scale-down` of a small image it centres it.
 fn compose(
-    mut node: Scene,
+    draw: &mut Draw<'_>,
     (region, fitted_size): &(TextureSource, [f32; 2]),
     box_w: f32,
     box_h: f32,
-) -> Scene {
+) {
     let offset = Matrix4::new_translation(&Vector3::new(
         ((box_w - fitted_size[0]) / 2.0).max(0.0),
         ((box_h - fitted_size[1]) / 2.0).max(0.0),
         0.0,
     ));
-    matcha_ecs::scene::push_quad(&mut node, region, *fitted_size, offset, None);
-    node
+    matcha_ecs::scene::push_quad(draw, region, *fitted_size, offset, None);
 }
 
 /// The declared [`ObjectFit`], carried so `patch` can detect a change to it.

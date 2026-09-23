@@ -3,13 +3,11 @@
 //! inset-by-`border_width` arrangement, and `RenderItem`-cache-invalidation-
 //! on-patch. Same GPU-free style as `tests/layout.rs`/`tests/render_item_reuse.rs`.
 
-use std::sync::Arc;
-
 use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::{
     components::{layout::LayoutOutput, render::RenderItem, view::ViewChildren},
-    layout::{layout_root, Constraints},
+    layout::{Constraints, layout_root},
     view::run_view,
 };
 use matcha_ecs_widgets::{ColorRect, Panel};
@@ -85,16 +83,23 @@ fn child_filling_the_inner_area_sits_exactly_at_the_border_inset() {
 fn unchanged_props_do_not_invalidate_cache() {
     let (mut world, root) = setup();
     let build = |s: &mut matcha_ecs::view::Scope| {
-        s.leaf(Panel::new(100.0, 50.0).background_color([0.1, 0.1, 0.1, 1.0]).border_width(2.0));
+        s.leaf(
+            Panel::new(100.0, 50.0)
+                .background_color([0.1, 0.1, 0.1, 1.0])
+                .border_width(2.0),
+        );
     };
     run_view(&mut world, root, build);
     let child = children(&world, root)[0];
-    let before = world.get::<RenderItem>(child).unwrap().cache.clone();
+    let before = world.get::<RenderItem>(child).unwrap().revision;
 
     run_view(&mut world, root, build);
-    let after = world.get::<RenderItem>(child).unwrap().cache.clone();
+    let after = world.get::<RenderItem>(child).unwrap().revision;
 
-    assert!(Arc::ptr_eq(&before, &after), "cache Arc must be unchanged when no draw-relevant prop changed");
+    assert!(
+        (before == after),
+        "draw revision must be unchanged when no draw-relevant prop changed"
+    );
 }
 
 #[test]
@@ -104,14 +109,17 @@ fn changed_background_color_invalidates_cache() {
         s.leaf(Panel::new(100.0, 50.0).background_color([0.1, 0.1, 0.1, 1.0]));
     });
     let child = children(&world, root)[0];
-    let before = world.get::<RenderItem>(child).unwrap().cache.clone();
+    let before = world.get::<RenderItem>(child).unwrap().revision;
 
     run_view(&mut world, root, |s| {
         s.leaf(Panel::new(100.0, 50.0).background_color([0.9, 0.1, 0.1, 1.0]));
     });
-    let after = world.get::<RenderItem>(child).unwrap().cache.clone();
+    let after = world.get::<RenderItem>(child).unwrap().revision;
 
-    assert!(!Arc::ptr_eq(&before, &after), "cache Arc must change when background_color changed");
+    assert!(
+        (before != after),
+        "draw revision must change when background_color changed"
+    );
 }
 
 #[test]
@@ -121,12 +129,15 @@ fn changed_border_width_invalidates_cache_and_layout() {
         s.leaf(Panel::new(100.0, 50.0).border_width(0.0));
     });
     let child = children(&world, root)[0];
-    let before = world.get::<RenderItem>(child).unwrap().cache.clone();
+    let before = world.get::<RenderItem>(child).unwrap().revision;
 
     run_view(&mut world, root, |s| {
         s.leaf(Panel::new(100.0, 50.0).border_width(10.0));
     });
-    let after = world.get::<RenderItem>(child).unwrap().cache.clone();
+    let after = world.get::<RenderItem>(child).unwrap().revision;
 
-    assert!(!Arc::ptr_eq(&before, &after), "cache Arc must change when border_width changed");
+    assert!(
+        (before != after),
+        "draw revision must change when border_width changed"
+    );
 }

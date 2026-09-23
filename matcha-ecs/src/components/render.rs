@@ -1,21 +1,27 @@
-//! Rendering contract components: retained native Scenes and in-place per-redraw
-//! Scene writers. RenderItem owns a cached Scene with its resource definitions;
-//! the framework resolves placement and inherited clips without a paint tree.
-//! GPU generation is performed by Source callbacks through their wgpu contexts.
-//! Background-dependent content uses dynamic writers to issue fresh content IDs.
+//! Widget draw producers. Each redraw writes Objects into framework-owned storage.
+//! Providers retain expensive shaping/decoding resources, not local Scenes/phases.
+//! One shared builder per entity supports immutable in-flight extraction; Objects
+//! themselves have no Arc or retained cache. Revision tracks prop invalidation.
 
 use std::sync::Arc;
 
+use crate::scene::Draw;
 use bevy_ecs::component::Component;
-use parking_lot::Mutex;
-use render_interface::Scene;
+use std::sync::atomic::{AtomicU64, Ordering};
+static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
+fn next_revision() -> u64 {
+    NEXT_REVISION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
+        .expect("render revision space exhausted")
+}
+pub type DrawBuilder = dyn Fn(&RenderCtx, &mut Draw<'_>) + Send + Sync;
 
 /// CPU-only state handed to a [`RenderItem`] builder. GPU work belongs in
 /// render-interface resource generators contributed directly by the Scene.
 pub struct RenderCtx {
     /// Resolved widget-local -> UI transform. Background-dependent generators
     /// need this to sample their own region of the full viewport snapshot.
-    /// Scene Object transforms remain local; the driver applies placement once.
+    /// Draw accepts local transforms and resolves placement exactly once.
     pub transform: nalgebra::Matrix4<f32>,
     pub viewport_size: [f32; 2],
     /// The size layout allocated to this entity (`LayoutOutput::size`).
@@ -31,17 +37,15 @@ pub struct RenderCtx {
     /// Focus has to arrive through the context rather than being read from the
     /// world, for the same reason `size` does: a builder is a
     /// closure captured back at `bundle()`/`patch()` time and has no world
-    /// access when it runs (on the render thread, no less). The rebuild is
-    /// triggered by `focus::sync_focus_components`, which invalidates the
-    /// cached Scene of every entity whose focus state changed.
+    /// access when it runs on the render thread. Every redraw reads the extracted
+    /// focus state; focus changes also advance the draw revision.
     pub focused: bool,
     /// Whether the focus vertex is this entity or one of its descendants
     /// (CSS `:focus-within`). Always `true` when [`focused`](Self::focused) is.
     pub focus_within: bool,
     /// Whether the pointer is inside this entity's box (CSS `:hover`), whether
     /// directly or via a descendant. Arrives through the context for the same
-    /// reason `focused` does; `pointer::sync_pointer_components` invalidates
-    /// the cached node on every transition.
+    /// reason `focused` does; pointer transitions advance the draw revision.
     pub hovered: bool,
     /// Whether a held press landed inside this entity and the pointer has not
     /// left it since (CSS `:active`).
@@ -76,46 +80,21 @@ impl Default for RenderOpacity {
     }
 }
 
-/// A cached native Scene producer for one widget entity.
-///
-/// The `builder` captures the widget's draw-relevant props (color, size, …) and
-/// returns a [`Scene`] when invoked. `cache` memoises the last built Scene so
-/// unchanged entities are not re-rasterised every frame. Widgets must call
-/// [`invalidate`](Self::invalidate) from their `patch` when (and only when) a
-/// draw-relevant prop changed, since `RenderItem` cannot implement `PartialEq`.
+/// A lightweight per-redraw writer. Capture reusable provider data, not a Scene.
 #[derive(Component, Clone)]
 pub struct RenderItem {
-    pub rebuild_each_frame: bool,
-    pub cache: Arc<Mutex<Option<Scene>>>,
-    pub builder: Arc<dyn Fn(&RenderCtx, &mut Scene) + Send + Sync>,
+    pub revision: u64,
+    pub builder: Arc<DrawBuilder>,
 }
-
 impl RenderItem {
-    /// Create a `RenderItem` from a builder closure. The cache starts empty and
-    /// is filled lazily by the render stage.
-    pub fn new(builder: impl Fn(&RenderCtx) -> Scene + Send + Sync + 'static) -> Self {
+    pub fn new(builder: impl Fn(&RenderCtx, &mut Draw<'_>) + Send + Sync + 'static) -> Self {
         Self {
-            cache: Arc::new(Mutex::new(None)),
-            builder: Arc::new(move |ctx, scene| *scene = builder(ctx)),
-            rebuild_each_frame: false,
-        }
-    }
-
-    /// Mutate a retained native Scene on every redraw. Use fresh content IDs
-    /// when background/time-dependent outputs change; keep static Sources and
-    /// Vec capacities. This does not itself schedule an animation redraw.
-    pub fn dynamic(builder: impl Fn(&RenderCtx, &mut Scene) + Send + Sync + 'static) -> Self {
-        Self {
-            cache: Arc::new(Mutex::new(None)),
+            revision: next_revision(),
             builder: Arc::new(builder),
-            rebuild_each_frame: true,
         }
     }
-
-    /// Drop the cached node so the next render rebuilds it. Swaps in a fresh
-    /// cache `Arc` rather than clearing the existing one, so any in-flight reader
-    /// holding the old `Arc` is unaffected.
+    /// Notify observers of changed draw properties without allocating a cache.
     pub fn invalidate(&mut self) {
-        self.cache = Arc::new(Mutex::new(None));
+        self.revision = next_revision();
     }
 }

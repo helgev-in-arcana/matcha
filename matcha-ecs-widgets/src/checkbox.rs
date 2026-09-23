@@ -18,7 +18,7 @@
 use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, world::EntityWorldMut,
 };
-use matcha_ecs::scene::append_local;
+
 use matcha_window::window::CursorIcon;
 use nalgebra::{Matrix4, Vector3};
 
@@ -33,7 +33,7 @@ use matcha_ecs::{
     view::Widget,
 };
 
-use crate::box_style::{BoxStyle, box_scene};
+use crate::box_style::{BoxStyle, paint_box};
 use crate::shape::ShapeCtx;
 use crate::sizing::RectGeometry;
 use crate::sizing::Sizing;
@@ -161,16 +161,16 @@ fn checkbox_render_item(shape: ShapeCtx, state: CheckboxState) -> RenderItem {
     let inset = state.border_width;
     let tick = BoxStyle::fill(state.fill_color).radius((state.radius - inset).max(0.0));
 
-    RenderItem::new(move |ctx: &RenderCtx| {
+    RenderItem::new(move |ctx: &RenderCtx, draw| {
         let [w, h] = ctx.size;
-        let mut node = box_scene(ctx, &shape, [w, h], &outline);
+        paint_box(draw, ctx, &shape, [w, h], &outline);
         if state.checked {
             let fill_size = [(w - inset * 2.0).max(0.0), (h - inset * 2.0).max(0.0)];
-            let fill_node = box_scene(ctx, &shape, fill_size, &tick);
             let transform = Matrix4::new_translation(&Vector3::new(inset, inset, 0.0));
-            append_local(&mut node, fill_node, transform);
+            draw.translated(transform, |draw| {
+                paint_box(draw, ctx, &shape, fill_size, &tick)
+            });
         }
-        node
     })
 }
 

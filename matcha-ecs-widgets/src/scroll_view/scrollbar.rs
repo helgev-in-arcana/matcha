@@ -23,7 +23,6 @@ use bevy_ecs::{
     hierarchy::ChildOf, world::EntityWorldMut,
 };
 use nalgebra::Matrix4;
-use render_interface::Scene;
 
 use matcha_ecs::{
     components::{
@@ -37,7 +36,7 @@ use matcha_ecs::{
 };
 
 use crate::{
-    box_style::{BoxStyle, box_scene},
+    box_style::{BoxStyle, paint_box},
     scroll_view::{
         DragAnchor, ScrollAxes, ScrollState,
         geometry::{self, Axis, ScrollbarStyle},
@@ -135,9 +134,9 @@ fn track_render_item(shape: ShapeCtx, style: ScrollbarStyle) -> RenderItem {
     let track = style
         .track_color
         .map(|color| BoxStyle::fill(color).radius(style.radius));
-    RenderItem::new(move |ctx: &RenderCtx| match &track {
-        Some(track) => box_scene(ctx, &shape, ctx.size, track),
-        None => Scene::default(),
+    RenderItem::new(move |ctx: &RenderCtx, draw| match &track {
+        Some(track) => paint_box(draw, ctx, &shape, ctx.size, track),
+        None => {}
     })
 }
 
@@ -315,7 +314,7 @@ impl ScrollThumb {
 
 fn thumb_render_item(shape: ShapeCtx, style: ScrollbarStyle) -> RenderItem {
     let thumb = BoxStyle::fill(style.thumb_color).radius(style.radius);
-    RenderItem::new(move |ctx: &RenderCtx| box_scene(ctx, &shape, ctx.size, &thumb))
+    RenderItem::new(move |ctx: &RenderCtx, draw| paint_box(draw, ctx, &shape, ctx.size, &thumb))
 }
 
 /// Pressing the thumb records where it was grabbed. The drag itself is handled

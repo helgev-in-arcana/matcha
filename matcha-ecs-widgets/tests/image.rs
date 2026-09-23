@@ -28,12 +28,11 @@ fn first_child(world: &World, root: Entity) -> Entity {
         .1
 }
 
-fn cache(world: &World, e: Entity) -> Arc<parking_lot::Mutex<Option<render_interface::Scene>>> {
+fn cache(world: &World, e: Entity) -> u64 {
     world
         .get::<RenderItem>(e)
         .expect("Image carries a RenderItem")
-        .cache
-        .clone()
+        .revision
 }
 
 #[test]
@@ -44,7 +43,10 @@ fn size_is_the_mandatory_constructor_box_not_a_natural_image_size() {
         s.leaf(Image::from_bytes(bytes.clone(), 200.0, 150.0));
     });
     let child = first_child(&world, root);
-    assert_eq!(world.get::<RectGeometry>(child).copied(), Some(RectGeometry { w: 200.0, h: 150.0 }));
+    assert_eq!(
+        world.get::<RectGeometry>(child).copied(),
+        Some(RectGeometry { w: 200.0, h: 150.0 })
+    );
 }
 
 #[test]
@@ -62,8 +64,8 @@ fn re_declaring_the_same_arc_bytes_does_not_invalidate_cache() {
     let after = cache(&world, child);
 
     assert!(
-        Arc::ptr_eq(&before, &after),
-        "cache Arc must be unchanged when the same Arc<[u8]> (same pointer identity) is re-declared"
+        (before == after),
+        "draw revision must be unchanged when the same Arc<[u8]> (same pointer identity) is re-declared"
     );
 }
 
@@ -85,8 +87,8 @@ fn a_different_arc_with_identical_byte_content_still_invalidates_cache() {
     let after = cache(&world, child);
 
     assert!(
-        !Arc::ptr_eq(&before, &after),
-        "cache Arc must change for a different Arc allocation, even with identical byte content"
+        (before != after),
+        "draw revision must change for a different Arc allocation, even with identical byte content"
     );
 }
 
@@ -104,7 +106,10 @@ fn changed_path_invalidates_cache() {
     });
     let after = cache(&world, child);
 
-    assert!(!Arc::ptr_eq(&before, &after), "cache Arc must change when the path changed");
+    assert!(
+        (before != after),
+        "draw revision must change when the path changed"
+    );
 }
 
 #[test]
@@ -121,5 +126,8 @@ fn changed_size_invalidates_cache() {
     });
     let after = cache(&world, child);
 
-    assert!(!Arc::ptr_eq(&before, &after), "cache Arc must change when the display size changed");
+    assert!(
+        (before != after),
+        "draw revision must change when the display size changed"
+    );
 }

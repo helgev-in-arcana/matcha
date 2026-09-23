@@ -39,7 +39,7 @@ use matcha_ecs::{
 
 use crate::{
     animation::Easing,
-    box_style::{BoxStyle, Corners, box_scene},
+    box_style::{BoxStyle, Corners, paint_box},
     color_rect::RectColor,
     interaction::{ColorCell, InteractionColors, interaction_cell},
     shape::ShapeCtx,
@@ -246,9 +246,9 @@ const FOCUS_RING_WIDTH: f32 = 2.0;
 /// builder without a rebuild of the closure itself.
 ///
 /// When the button holds focus (`ctx.focused`) the box is drawn as a ring in
-/// `focus_ring_color` with the normal fill inset inside it. `focus.rs`'s
-/// `sync_focus_components` invalidates the cached node on every focus
-/// transition, so this is re-evaluated exactly when it changes.
+/// `focus_ring_color` with the normal fill inset inside it.
+/// The writer reads extracted focus state each redraw. The shaped label and
+/// tint source are retained independently of these draw records.
 #[allow(clippy::too_many_arguments)]
 fn button_render_item(
     font_ctx: FontCtx,
@@ -260,10 +260,13 @@ fn button_render_item(
     focus_ring_color: [f32; 4],
     radius: f32,
 ) -> RenderItem {
-    RenderItem::new(move |ctx: &RenderCtx| {
+    // Keep shaping on the render worker, but perform it only once per writer.
+    let layout = parking_lot::Mutex::new(None);
+    let tint_cache = parking_lot::Mutex::new(None);
+    RenderItem::new(move |ctx: &RenderCtx, draw| {
         let [w, h] = ctx.size;
         // Read live: `advance_interaction_colors` writes this between frames
-        // and invalidates the cached node, so each rebuild sees the current
+        // and advances the draw revision, so each redraw sees the current
         // step of the hover/press transition.
         let box_color = box_color.get();
 
@@ -273,21 +276,20 @@ fn button_render_item(
         if ctx.focused {
             style = style.border(FOCUS_RING_WIDTH, focus_ring_color);
         }
-        let mut node = box_scene(ctx, &shape_ctx, [w, h], &style);
+        paint_box(draw, ctx, &shape_ctx, [w, h], &style);
 
-        let layout = shape(&font_ctx, &label, font_size, f32::MAX);
-        let Some(tint_source) = solid_source(ctx, label_color) else {
-            return node;
-        };
+        let mut layout = layout.lock();
+        let layout = layout.get_or_insert_with(|| shape(&font_ctx, &label, font_size, f32::MAX));
+        let mut cached = tint_cache.lock();
+        let tint_source =
+            cached.get_or_insert_with(|| solid_source(ctx, label_color).expect("solid tint"));
 
         let offset = Matrix4::new_translation(&Vector3::new(
             ((w - layout.total_width) / 2.0).max(0.0),
             ((h - layout.total_height) / 2.0).max(0.0),
             0.0,
         ));
-        draw_glyph_run(&mut node, &font_ctx, &layout, &tint_source, offset);
-
-        node
+        draw_glyph_run(draw, &font_ctx, &layout, &tint_source, offset);
     })
 }
 

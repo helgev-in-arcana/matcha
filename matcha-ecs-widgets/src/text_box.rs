@@ -49,7 +49,7 @@ use bevy_ecs::{
     system::{Query, Res, ResMut, ScheduleSystem},
     world::EntityWorldMut,
 };
-use matcha_ecs::scene::{append_local, textured_quad};
+
 use matcha_ecs::{
     components::{
         focus::{FocusDispatch, FocusPolicy, Focused},
@@ -72,9 +72,9 @@ use parking_lot::Mutex;
 use parley::{PlainEditor, StyleProperty};
 
 use crate::{
-    box_style::{BoxStyle, box_scene},
+    box_style::{BoxStyle, paint_box},
     live::{LiveBool, LiveF32, LiveVec},
-    rich_text::{ParleyFontCtx, RichTextBrush, draw_parley_layout, solid_source},
+    rich_text::{ParleyFontCtx, RichTextBrush, draw_parley_layout},
     sizing::Sizing,
 };
 
@@ -100,7 +100,7 @@ const CARET_WIDTH: f32 = 1.5;
 ///    hands out `&World`.
 ///
 /// The main thread must not hold this lock while the render thread might build
-/// a node — the same invariant `RenderItem::cache` already documents.
+/// drawing records. The editor owns its expensive layout independently of Draw.
 #[derive(Component, Clone)]
 pub struct TextEditor(Arc<Mutex<PlainEditor<RichTextBrush>>>);
 
@@ -1070,8 +1070,9 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
             .clone()
     });
     let shape_ctx = crate::shape::ShapeCtx::get(entity);
+    let text_tints = crate::shape::ShapeCtx::default();
 
-    RenderItem::new(move |ctx: &RenderCtx| {
+    RenderItem::new(move |ctx: &RenderCtx, draw| {
         let [w, h] = ctx.size;
         let border = style.border_width;
 
@@ -1080,7 +1081,8 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
         } else {
             style.border_color
         };
-        let mut node = box_scene(
+        paint_box(
+            draw,
             ctx,
             &shape_ctx,
             [w, h],
@@ -1092,7 +1094,7 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
 
         let editor = editor.lock();
         let Some(layout) = editor.try_layout() else {
-            return node;
+            return;
         };
 
         let place = |x: f32, y: f32| {
@@ -1102,42 +1104,31 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
         // Selection sits under the glyphs.
         for (rect, _line) in editor.selection_geometry() {
             let y0 = rect.y0 as f32;
-            let Some(tint) = solid_source(ctx, style.selection_color) else {
+            let Some(tint) = shape_ctx.tint_source(style.selection_color, ctx) else {
                 continue;
             };
-            let selection = textured_quad(
-                tint,
+            draw.quad(
+                &tint,
                 [rect.width() as f32, rect.height() as f32],
-                Matrix4::identity(),
+                place(rect.x0 as f32, y0),
                 None,
             );
-            append_local(&mut node, selection, place(rect.x0 as f32, y0));
         }
-
-        append_local(
-            &mut node,
-            draw_parley_layout(&font_ctx, ctx, layout),
-            place(0.0, 0.0),
-        );
+        draw.translated(place(0., 0.), |draw| {
+            draw_parley_layout(draw, &font_ctx, ctx, layout, &text_tints)
+        });
 
         if ctx.focused && live.caret_visible() {
             if let Some(caret) = editor.cursor_geometry(CARET_WIDTH)
-                && let Some(tint) = solid_source(ctx, style.caret_color)
+                && let Some(tint) = shape_ctx.tint_source(style.caret_color, ctx)
             {
-                let caret_node = textured_quad(
-                    tint,
+                draw.quad(
+                    &tint,
                     [caret.width() as f32, caret.height() as f32],
-                    Matrix4::identity(),
-                    None,
-                );
-                append_local(
-                    &mut node,
-                    caret_node,
                     place(caret.x0 as f32, caret.y0 as f32),
+                    None,
                 );
             }
         }
-
-        node
     })
 }

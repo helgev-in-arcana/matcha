@@ -14,12 +14,10 @@
 //! runs inside MaskSource::prepare only when the renderer needs the content.
 //! Colours are GPU-generated TextureSources. No RenderNode or Bitmap bridge.
 //!
-//! Word-wrap is supported, but deliberately with no shape-result caching:
-//! `measure()`, `arrange()`, and the `RenderItem` builder each independently
-//! (re)run `FontSystem::layout_text` from scratch. The only value threaded
-//! between layout and render is the resolved wrap width (a single `f32`,
-//! shared via `TextWrapWidth`'s `Arc<LiveF32>`) — passing the actual shaped
-//! glyph list between stages is left as a future optimisation.
+//! The render writer retains a shaped layout keyed by resolved wrap width and a
+//! stable tint source. Changing declared content/style replaces the writer.
+//! Layout measurement still shapes separately; sharing that result across the
+//! layout/render thread boundary is a separate optimization.
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -27,9 +25,9 @@ use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, entity::Entity,
     resource::Resource, world::EntityWorldMut,
 };
+use matcha_ecs::scene::Draw;
 use nalgebra::{Matrix4, Vector3};
 use parking_lot::Mutex;
-use render_interface::Scene;
 use render_interface::{MaskDescriptor, MaskSource, TextureSource, upload_texture};
 
 use matcha_ecs::{
@@ -179,7 +177,7 @@ pub(crate) fn solid_source(ctx: &RenderCtx, color: [f32; 4]) -> Option<TextureSo
 /// to draw a shaped single-style glyph run without duplicating the
 /// suzuri-shaping/stencil-cache glue.
 pub(crate) fn draw_glyph_run(
-    scene: &mut Scene,
+    scene: &mut Draw<'_>,
     font_ctx: &FontCtx,
     layout: &suzuri::text::TextLayout<()>,
     tint: &TextureSource,
@@ -196,7 +194,7 @@ pub(crate) fn draw_glyph_run(
     }
 }
 
-/// Build a `RenderItem` that shapes `content` fresh every rebuild (reading
+/// Build a writer retaining its shaped layout at the live wrap width (reading
 /// the live wrap width from `wrap_width`) and draws each glyph as a
 /// tint-texture quad masked by its cached stencil coverage bitmap.
 fn text_render_item(
@@ -206,25 +204,20 @@ fn text_render_item(
     font_size: f32,
     color: [f32; 4],
 ) -> RenderItem {
-    RenderItem::new(move |ctx: &RenderCtx| {
-        let mut node = Scene::default();
-
+    let cached = parking_lot::Mutex::new(None);
+    let tint = parking_lot::Mutex::new(None);
+    RenderItem::new(move |ctx: &RenderCtx, draw| {
         let max_width = wrap_width.get();
-        let layout = shape(&font_ctx, &content, font_size, max_width);
+        let mut cached = cached.lock();
+        if cached.as_ref().is_none_or(|(width, _)| *width != max_width) {
+            *cached = Some((max_width, shape(&font_ctx, &content, font_size, max_width)));
+        }
+        let layout = &cached.as_ref().expect("shaped width").1;
 
-        let Some(tint_source) = solid_source(ctx, color) else {
-            return node;
-        };
+        let mut tint = tint.lock();
+        let tint_source = tint.get_or_insert_with(|| solid_source(ctx, color).expect("solid tint"));
 
-        draw_glyph_run(
-            &mut node,
-            &font_ctx,
-            &layout,
-            &tint_source,
-            Matrix4::identity(),
-        );
-
-        node
+        draw_glyph_run(draw, &font_ctx, &layout, &tint_source, Matrix4::identity());
     })
 }
 
@@ -245,7 +238,7 @@ impl Layout for TextStyle {
         // its min/max-content widths off the layout it already built, whereas
         // suzuri/fontdue has no such API: deriving the pair here would mean
         // two extra full shaping passes per measure, on the widget that has
-        // no shape cache at all and is kept as the reference/fallback
+        // no layout-stage shape cache and is kept as the reference/fallback
         // implementation. A `Text` in a shrinking row therefore will not go
         // below the width it wrapped to; `RichText` will.
         let shaped = [layout.total_width, layout.total_height];

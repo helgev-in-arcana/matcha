@@ -77,7 +77,7 @@ pub enum MatchaSet {
     Layout,
     /// Settle the extract contract now that layout is known: the components
     /// extract reads (`RenderOpacity`, …) and the validity of each entity's
-    /// cached render node. Open to registered systems; the core registers the
+    /// draw revision. Open to registered systems; the core registers the
     /// invalidation, picking and focus plumbing here.
     PreExtract,
     /// Core: collect the frame's drawable entities into a snapshot.
@@ -285,7 +285,7 @@ where
 
     /// Register systems into [`MatchaSet::PreExtract`] — the stage that settles
     /// the extract contract (the components extract reads, and the validity of
-    /// each entity's cached render node) once layout is known. Same semantics
+    /// each entity's draw revision) once layout is known. Same semantics
     /// as [`Self::with_pre_layout_systems`].
     pub fn with_pre_extract_systems<Marker>(
         mut self,

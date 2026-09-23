@@ -7,13 +7,11 @@
 //! `wgpu::Device` and is therefore left to manual/demo verification, matching
 //! the rest of this test suite's established GPU-free approach.
 
-use std::sync::Arc;
-
 use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::{
     components::{layout::LayoutOutput, render::RenderItem, view::ViewChildren},
-    layout::{layout_root, Constraints},
+    layout::{Constraints, layout_root},
     view::run_view,
 };
 use matcha_ecs_widgets::{Easing, Text};
@@ -62,12 +60,20 @@ fn narrow_constraint_wraps_to_a_taller_block_than_a_wide_one() {
 
     let (mut world_wide, root_wide) = setup();
     run_view(&mut world_wide, root_wide, build);
-    layout_root(&mut world_wide, root_wide, Constraints::from_max_size([2000.0, 2000.0]));
+    layout_root(
+        &mut world_wide,
+        root_wide,
+        Constraints::from_max_size([2000.0, 2000.0]),
+    );
     let wide = output(&world_wide, first_child(&world_wide, root_wide));
 
     let (mut world_narrow, root_narrow) = setup();
     run_view(&mut world_narrow, root_narrow, build);
-    layout_root(&mut world_narrow, root_narrow, Constraints::from_max_size([60.0, 2000.0]));
+    layout_root(
+        &mut world_narrow,
+        root_narrow,
+        Constraints::from_max_size([60.0, 2000.0]),
+    );
     let narrow = output(&world_narrow, first_child(&world_narrow, root_narrow));
 
     assert!(
@@ -87,23 +93,30 @@ fn narrow_constraint_wraps_to_a_taller_block_than_a_wide_one() {
 fn unchanged_props_do_not_invalidate_cache() {
     let (mut world, root) = setup();
     run_view(&mut world, root, |s| {
-        s.leaf(Text::new("hello").font_size(16.0).color([0.0, 0.0, 0.0, 1.0]));
+        s.leaf(
+            Text::new("hello")
+                .font_size(16.0)
+                .color([0.0, 0.0, 0.0, 1.0]),
+        );
     });
     let child = first_child(&world, root);
     let cache_before = world
         .get::<RenderItem>(child)
         .expect("Text carries a RenderItem")
-        .cache
-        .clone();
+        .revision;
 
     run_view(&mut world, root, |s| {
-        s.leaf(Text::new("hello").font_size(16.0).color([0.0, 0.0, 0.0, 1.0]));
+        s.leaf(
+            Text::new("hello")
+                .font_size(16.0)
+                .color([0.0, 0.0, 0.0, 1.0]),
+        );
     });
-    let cache_after = world.get::<RenderItem>(child).unwrap().cache.clone();
+    let cache_after = world.get::<RenderItem>(child).unwrap().revision;
 
     assert!(
-        Arc::ptr_eq(&cache_before, &cache_after),
-        "cache Arc must be unchanged when no draw-relevant prop changed"
+        (cache_before == cache_after),
+        "draw revision must be unchanged when no draw-relevant prop changed"
     );
 }
 
@@ -114,16 +127,16 @@ fn changed_content_invalidates_cache() {
         s.leaf(Text::new("hello"));
     });
     let child = first_child(&world, root);
-    let cache_before = world.get::<RenderItem>(child).unwrap().cache.clone();
+    let cache_before = world.get::<RenderItem>(child).unwrap().revision;
 
     run_view(&mut world, root, |s| {
         s.leaf(Text::new("goodbye"));
     });
-    let cache_after = world.get::<RenderItem>(child).unwrap().cache.clone();
+    let cache_after = world.get::<RenderItem>(child).unwrap().revision;
 
     assert!(
-        !Arc::ptr_eq(&cache_before, &cache_after),
-        "cache Arc must change when content changed"
+        (cache_before != cache_after),
+        "draw revision must change when content changed"
     );
 }
 
@@ -134,16 +147,16 @@ fn changed_font_size_invalidates_cache() {
         s.leaf(Text::new("hello").font_size(16.0));
     });
     let child = first_child(&world, root);
-    let cache_before = world.get::<RenderItem>(child).unwrap().cache.clone();
+    let cache_before = world.get::<RenderItem>(child).unwrap().revision;
 
     run_view(&mut world, root, |s| {
         s.leaf(Text::new("hello").font_size(24.0));
     });
-    let cache_after = world.get::<RenderItem>(child).unwrap().cache.clone();
+    let cache_after = world.get::<RenderItem>(child).unwrap().revision;
 
     assert!(
-        !Arc::ptr_eq(&cache_before, &cache_after),
-        "cache Arc must change when font_size changed"
+        (cache_before != cache_after),
+        "draw revision must change when font_size changed"
     );
 }
 
@@ -154,16 +167,16 @@ fn changed_color_invalidates_cache() {
         s.leaf(Text::new("hello").color([1.0, 0.0, 0.0, 1.0]));
     });
     let child = first_child(&world, root);
-    let cache_before = world.get::<RenderItem>(child).unwrap().cache.clone();
+    let cache_before = world.get::<RenderItem>(child).unwrap().revision;
 
     run_view(&mut world, root, |s| {
         s.leaf(Text::new("hello").color([0.0, 1.0, 0.0, 1.0]));
     });
-    let cache_after = world.get::<RenderItem>(child).unwrap().cache.clone();
+    let cache_after = world.get::<RenderItem>(child).unwrap().revision;
 
     assert!(
-        !Arc::ptr_eq(&cache_before, &cache_after),
-        "cache Arc must change when color changed"
+        (cache_before != cache_after),
+        "draw revision must change when color changed"
     );
 }
 
@@ -173,9 +186,13 @@ fn enter_fade_builder_starts_from_transparent() {
 
     let (mut world, root) = setup();
     run_view(&mut world, root, |s| {
-        s.leaf(Text::new("hello").enter_fade(std::time::Duration::from_millis(200), Easing::Linear));
+        s.leaf(
+            Text::new("hello").enter_fade(std::time::Duration::from_millis(200), Easing::Linear),
+        );
     });
     let child = first_child(&world, root);
-    let opacity = world.get::<RenderOpacity>(child).expect("RenderOpacity present");
+    let opacity = world
+        .get::<RenderOpacity>(child)
+        .expect("RenderOpacity present");
     assert_eq!(*opacity, RenderOpacity(0.0));
 }

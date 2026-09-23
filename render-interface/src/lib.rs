@@ -7,7 +7,7 @@
 //! A changed animation/background input requires a new ID. Regeneration with an
 //! existing ID must reproduce its content, regardless of cache eviction.
 //! Source::clone shares the immutable generator allocation (Arc<Prepare> in place
-//! of Box<Prepare>) so independently retained widget Scenes can share definitions.
+//! of Box<Prepare>) so provider caches and the submitted pool can share definitions.
 //! Explicit pool composition deduplicates IDs; direct duplicate insertions remain
 //! errors. Closure pointer equality is not a substitute for logical content identity.
 //!

@@ -40,16 +40,16 @@
 //! caching (matching `Text`: `measure`/`arrange`/the `RenderItem` builder
 //! each independently re-shape from scratch).
 
-use std::{collections::HashMap, num::NonZeroUsize, ops::Range, sync::Arc, time::Duration};
+use std::{num::NonZeroUsize, ops::Range, sync::Arc, time::Duration};
 
 use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, entity::Entity,
     resource::Resource, world::EntityWorldMut,
 };
+use matcha_ecs::scene::Draw;
 use nalgebra::{Matrix4, Vector3};
 use parking_lot::Mutex;
-use render_interface::Scene;
-use render_interface::{MaskDescriptor, MaskSource, TextureSource, upload_texture};
+use render_interface::{MaskDescriptor, MaskSource, upload_texture};
 
 use matcha_ecs::{
     components::{
@@ -461,10 +461,9 @@ struct GlyphKey {
 /// `GlyphCache` (see the `glyph-cache` crate) rather than an unbounded map:
 /// unlike `Text`'s `stencil_cache`, `RichText` is expected to draw arbitrary
 /// runtime text (timecodes, filenames, ...) where an unbounded cache would
-/// grow forever. Eviction only ever drops this map's own entry — any
-/// A MaskSource in a retained widget Scene shares its generator, so evicting a
-/// glyph here never corrupts an already-rendered frame, only means it will
-/// be re-rasterised if drawn again later.
+/// grow forever. Eviction drops the provider entry; definitions already imported
+/// by the framework remain alive through the submitted frame. A later miss may
+/// rasterize again and receive a new content ID.
 const GLYPH_CACHE_CAPACITY: usize = 1024;
 
 /// parley's per-glyph "paint" type — wraps a resolved RGBA colour. `Default`
@@ -505,15 +504,8 @@ impl ParleyFontCtx {
         }))
     }
 
-    /// Marks the start of a new eviction-protection batch. Called once per
-    /// `RenderItem` builder invocation (see `rich_text_render_item`) — not
-    /// once per rendered frame, since a `RenderItem` is only rebuilt when a
-    /// draw-relevant prop actually changes (`RenderItem::invalidate`), which
-    /// can be far less often than every frame. A "batch" is therefore one
-    /// full shape-and-draw pass over one `RichText` entity's glyphs: this
-    /// protects every glyph that pass touches from being evicted by a later
-    /// glyph in the *same* pass, while still allowing eviction across
-    /// different (unrelated, or later) rebuilds.
+    /// Protect one writer's glyph run from eviction during that traversal.
+    /// This runs each redraw; shaping itself is cached separately by wrap width.
     pub(crate) fn begin_glyph_batch(&self) {
         self.0.stencil_cache.lock().new_batch();
     }
@@ -527,13 +519,12 @@ impl ParleyFontCtx {
     fn glyph_source(
         &self,
         key: GlyphKey,
-        glyph_id: swash::GlyphId,
-        scaler: &mut swash::scale::Scaler,
+        build: impl FnOnce() -> Option<(MaskSource, [f32; 2], [i32; 2])>,
     ) -> Option<(MaskSource, [f32; 2], [i32; 2])> {
         self.0
             .stencil_cache
             .lock()
-            .get_or_insert_with(key, || rasterize_bitmap(glyph_id, scaler))
+            .get_or_insert_with(key, build)
             .cloned()
             .flatten()
     }
@@ -747,12 +738,6 @@ fn shape(
     layout
 }
 
-/// Paint the 1x1 tint pixel a glyph's stencil — or a decoration rule — is
-/// masked against.
-pub(crate) fn solid_source(ctx: &RenderCtx, color: [f32; 4]) -> Option<TextureSource> {
-    crate::color::solid_source(ctx, color, "RichText")
-}
-
 /// Composite a shaped parley layout into a `Scene`: one stencil-masked
 /// quad per glyph, plus any underline/strikethrough the run carries.
 ///
@@ -760,31 +745,13 @@ pub(crate) fn solid_source(ctx: &RenderCtx, color: [f32; 4]) -> Option<TextureSo
 /// same `Layout` type (`PlainEditor::layout()` returns one too), so the drawing
 /// pass is identical and there is no reason to grow a second copy of it.
 pub(crate) fn draw_parley_layout(
+    draw: &mut Draw<'_>,
     font_ctx: &ParleyFontCtx,
     ctx: &RenderCtx,
     layout: &parley::Layout<RichTextBrush>,
-) -> Scene {
-    let mut node = Scene::default();
-
-    // Per-span colour means a single build can need several distinct tint
-    // regions (one per distinct colour actually used) — deduped locally,
-    // scoped to this one build, no persistent cache/eviction needed
-    // (typically only a handful of colours).
-    let mut tint_sources: HashMap<[u32; 4], TextureSource> = HashMap::new();
-    let mut tint_for = |color: [f32; 4]| -> Option<TextureSource> {
-        let key = [
-            color[0].to_bits(),
-            color[1].to_bits(),
-            color[2].to_bits(),
-            color[3].to_bits(),
-        ];
-        if let Some(region) = tint_sources.get(&key) {
-            return Some(region.clone());
-        }
-        let region = solid_source(ctx, color)?;
-        tint_sources.insert(key, region.clone());
-        Some(region)
-    };
+    tints: &crate::shape::ShapeCtx,
+) {
+    let tint_for = |color| tints.tint_source(color, ctx);
 
     font_ctx.begin_glyph_batch();
     let mut scale_cx = font_ctx.0.scale_cx.lock();
@@ -804,13 +771,6 @@ pub(crate) fn draw_parley_layout(
             else {
                 continue;
             };
-            let mut scaler = scale_cx
-                .builder(font_ref)
-                .size(font_size_px)
-                .hint(true)
-                .normalized_coords(coords)
-                .build();
-
             let font_size_bits = (font_size_px * SUB_PIXEL_QUANTIZE).round() as u32;
             let coords_hash = fxhash::hash64(coords);
 
@@ -838,9 +798,17 @@ pub(crate) fn draw_parley_layout(
                     coords_hash,
                 };
 
-                let Some((glyph_source, size, placement)) =
-                    font_ctx.glyph_source(key, glyph.id as swash::GlyphId, &mut scaler)
-                else {
+                let Some((glyph_source, size, placement)) = font_ctx.glyph_source(key, || {
+                    // Creating a scaler can allocate and initialize font programs.
+                    // Warm draw writers only need the existing glyph definition.
+                    let mut scaler = scale_cx
+                        .builder(font_ref)
+                        .size(font_size_px)
+                        .hint(true)
+                        .normalized_coords(coords)
+                        .build();
+                    rasterize_bitmap(glyph.id as swash::GlyphId, &mut scaler)
+                }) else {
                     continue;
                 };
 
@@ -848,7 +816,7 @@ pub(crate) fn draw_parley_layout(
                 let py = gy.floor() - placement[1] as f32;
                 let transform = Matrix4::new_translation(&Vector3::new(px, py, 0.0));
                 matcha_ecs::scene::push_quad(
-                    &mut node,
+                    draw,
                     &tint_source,
                     size,
                     transform,
@@ -887,7 +855,7 @@ pub(crate) fn draw_parley_layout(
                 let deco_transform =
                     Matrix4::new_translation(&Vector3::new(glyph_run.offset(), y, 0.0));
                 matcha_ecs::scene::push_quad(
-                    &mut node,
+                    draw,
                     &deco_tint,
                     [glyph_run.advance(), size],
                     deco_transform,
@@ -896,11 +864,9 @@ pub(crate) fn draw_parley_layout(
             }
         }
     }
-
-    node
 }
 
-/// Build a `RenderItem` that shapes `content` fresh every rebuild, reading the
+/// Build a writer that retains a shaped layout keyed by the
 /// live wrap width from `wrap_width`.
 fn rich_text_render_item(
     font_ctx: ParleyFontCtx,
@@ -908,14 +874,26 @@ fn rich_text_render_item(
     content: RichTextContent,
     style: RichTextStyle,
 ) -> RenderItem {
-    RenderItem::new(move |ctx: &RenderCtx| {
+    let cached = Mutex::new(None);
+    // Declared span colors live with this writer, not forever in the font context.
+    let tints = crate::shape::ShapeCtx::default();
+    RenderItem::new(move |ctx: &RenderCtx, draw| {
         if content.text.is_empty() {
-            return Scene::default();
+            return;
         }
 
         let max_width = wrap_width.get();
-        let layout = shape(&font_ctx, &content, &style, max_width);
-        draw_parley_layout(&font_ctx, ctx, &layout)
+        let mut cached = cached.lock();
+        if cached.as_ref().is_none_or(|(width, _)| *width != max_width) {
+            *cached = Some((max_width, shape(&font_ctx, &content, &style, max_width)));
+        }
+        draw_parley_layout(
+            draw,
+            &font_ctx,
+            ctx,
+            &cached.as_ref().expect("shaped width").1,
+            &tints,
+        )
     })
 }
 

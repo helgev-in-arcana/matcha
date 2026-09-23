@@ -5,7 +5,7 @@
 //! render schedule, acquires the window's `SurfaceTexture`, extracts a flat list
 //! of `(RenderItem, transform)` into a [`RenderSnapshot`], and hands it to a
 //! [`RenderDriver`]. The default [`ThreadDriver`] forwards each snapshot to a
-//! per-window worker thread that builds the (still-deferred) render nodes, calls
+//! per-window worker thread that invokes lightweight draw writers, calls
 //! [`SceneRenderer::render`], and presents. The `RenderItem` builders run on
 //! that worker thread, not the main thread.
 //!
@@ -19,11 +19,8 @@ use matcha_window::window::WindowId;
 use nalgebra::Matrix4;
 use parking_lot::{Condvar, Mutex};
 use render_interface::PixelMaskIndex;
-use render_interface::{
-    MaskDescriptor, MaskId, MaskSource, MeshId, MeshSource, PixelMask, Scene, TextureId,
-};
+use render_interface::{MaskDescriptor, MaskSource, MeshSource, PixelMask};
 use renderer::{SceneRenderer, SceneTarget};
-use std::collections::HashSet;
 
 use crate::{
     clip::ClipArena,
@@ -36,19 +33,18 @@ use crate::{
     traversal,
 };
 
-/// One drawable entity captured for a frame: the shared node cache, its deferred
+/// One drawable entity captured for a frame: its revision and shared deferred
 /// builder, its window-space transform (already composed by M3 layout), the size
 /// layout allocated to it (`LayoutOutput::size` — what the builder must draw at),
 /// its current opacity (`1.0` if the entity has no `RenderOpacity`), and its
 /// focus and pointer state.
 pub struct RenderItemSnapshot {
-    pub rebuild_each_frame: bool,
     /// Which entity this was extracted from. Nothing on the render path reads
     /// it — it is here so a frame can be traced back to the tree that produced
     /// it, by a debugger or a test asserting on paint order.
     pub entity: Entity,
-    pub cache: Arc<Mutex<Option<Scene>>>,
-    pub builder: Arc<dyn Fn(&RenderCtx, &mut Scene) + Send + Sync>,
+    pub revision: u64,
+    pub builder: Arc<crate::components::render::DrawBuilder>,
     pub transform: Matrix4<f32>,
     pub size: [f32; 2],
     pub opacity: f32,
@@ -90,13 +86,10 @@ pub struct RenderSnapshot {
 /// pair under one driver lock permits the existing threaded presentation path
 /// without moving Sources or sharing each Source through an Arc.
 pub struct GuiRenderer {
-    pub scene: Scene,
+    pub frame: crate::scene::Frame,
     pub backend: SceneRenderer,
     quad: MeshSource,
     clip: MaskSource,
-    meshes: HashSet<MeshId>,
-    textures: HashSet<TextureId>,
-    masks: HashSet<MaskId>,
 }
 impl GuiRenderer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
@@ -122,17 +115,14 @@ impl GuiRenderer {
             Ok(())
         });
         Self {
-            scene: Scene::default(),
+            frame: crate::scene::Frame::default(),
             backend: SceneRenderer::new(device, queue),
             quad: crate::scene::unit_quad(),
             clip,
-            meshes: HashSet::new(),
-            textures: HashSet::new(),
-            masks: HashSet::new(),
         }
     }
-    /// Merge complete widget Scenes. Unreferenced definitions supplied by a
-    /// widget remain retention hints; no paint-tree or bitmap conversion occurs.
+    /// Invoke widget writers in paint order. The framework owns phase scheduling.
+    /// Unused resource registrations remain optional retention hints.
     pub fn render_extracted(
         &mut self,
         items: &[RenderItemSnapshot],
@@ -140,9 +130,9 @@ impl GuiRenderer {
         target: SceneTarget<'_>,
     ) -> Result<(), renderer::scene_renderer::SceneError> {
         self.assemble(items, clips, target.viewport)?;
-        self.backend.render(&self.scene, target)
+        self.backend.render(&self.frame.scene, target)
     }
-    /// Resolve retained widget Scenes into one complete interface submission.
+    /// Write Objects directly into one complete interface submission.
     /// Separate from GPU recording so construction costs can be measured directly.
     pub fn assemble(
         &mut self,
@@ -150,29 +140,14 @@ impl GuiRenderer {
         clips: &ClipArena,
         viewport: [f32; 2],
     ) -> Result<(), renderer::scene_renderer::SceneError> {
-        for phase in &mut self.scene.phases {
-            phase.objects.clear();
-        }
-        self.scene.pixel_masks.clear();
-        self.meshes.clear();
-        self.textures.clear();
-        self.masks.clear();
-        self.meshes.insert(self.quad.id());
-        self.masks.insert(self.clip.id());
-        if self.scene.resources.mesh(self.quad.id()).is_none() {
-            self.scene
-                .resources
-                .insert_mesh(self.quad.clone())
-                .expect("new shared quad");
-        }
-        if self.scene.resources.mask(self.clip.id()).is_none() {
-            self.scene
-                .resources
-                .insert_mask(self.clip.clone())
-                .expect("new shared clip");
+        self.frame.begin();
+        {
+            let mut draw = self.frame.draw(Matrix4::identity(), None, 1.);
+            draw.mesh(&self.quad);
+            draw.mask_source(&self.clip);
         }
         for clip in clips.as_slice() {
-            self.scene.pixel_masks.push(PixelMask {
+            self.frame.scene.pixel_masks.push(PixelMask {
                 mesh: self.quad.id(),
                 texture: self.clip.id(),
                 transform: clip.transform,
@@ -189,43 +164,14 @@ impl GuiRenderer {
                 hovered: item.hovered,
                 active: item.active,
             };
-            let mut cache = item.cache.lock();
-            let rebuild = cache.is_none() || item.rebuild_each_frame;
-            let source = cache.get_or_insert_with(Scene::default);
-            if rebuild {
-                (item.builder)(&ctx, source);
-            }
-            self.meshes.extend(source.resources.mesh_ids());
-            self.textures.extend(source.resources.texture_ids());
-            self.masks.extend(source.resources.mask_ids());
-            if let Err(error) = crate::scene::append_scene(
-                &mut self.scene,
-                &source,
-                item.transform,
-                item.clip.map(PixelMaskIndex),
-                item.opacity,
-            ) {
-                // Failed redraws must not accumulate fresh dynamic definitions
-                // from the widgets visited before the malformed fragment.
-                self.retain_submitted_sources();
-                return Err(renderer::scene_renderer::SceneError::Invalid(
-                    error.to_string(),
-                ));
-            }
+            let mut draw =
+                self.frame
+                    .draw(item.transform, item.clip.map(PixelMaskIndex), item.opacity);
+            (item.builder)(&ctx, &mut draw);
         }
-        self.retain_submitted_sources();
-        Ok(())
-    }
-    fn retain_submitted_sources(&mut self) {
-        self.scene
-            .resources
-            .retain_meshes(|id| self.meshes.contains(&id));
-        self.scene
-            .resources
-            .retain_textures(|id| self.textures.contains(&id));
-        self.scene
-            .resources
-            .retain_masks(|id| self.masks.contains(&id));
+        self.frame
+            .finish()
+            .map_err(renderer::scene_renderer::SceneError::Invalid)
     }
 }
 
@@ -273,8 +219,7 @@ fn extract_one(
             .unwrap_or(1.0);
         out.items.push(RenderItemSnapshot {
             entity,
-            rebuild_each_frame: item.rebuild_each_frame,
-            cache: item.cache.clone(),
+            revision: item.revision,
             builder: item.builder.clone(),
             transform,
             size,
@@ -290,7 +235,7 @@ fn extract_one(
     own_clip
 }
 
-/// Build each item's (cached) render node and present the frame. Shared by both
+/// Invoke each item's draw writer and present the frame. Shared by both
 /// drivers; runs on the worker thread under [`ThreadDriver`].
 pub fn build_and_present(snapshot: RenderSnapshot) {
     let RenderSnapshot {

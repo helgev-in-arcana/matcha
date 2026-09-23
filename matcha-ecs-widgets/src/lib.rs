@@ -32,8 +32,8 @@ pub mod rich_text;
 pub mod scroll_view;
 pub mod shape;
 mod shape_gpu;
-pub mod slider;
 pub mod sizing;
+pub mod slider;
 pub mod text;
 pub mod text_box;
 
@@ -45,11 +45,11 @@ pub mod text_box;
 pub use parley;
 
 pub use anchor::Anchor;
-pub use easing::Easing;
-pub use box_style::{box_scene, BoxShadow, BoxStyle, Corners, Sides};
+pub use box_style::{BoxShadow, BoxStyle, Corners, Sides, paint_box};
 pub use button::{Button, ButtonLabel};
 pub use checkbox::Checkbox;
 pub use color_rect::{ColorRect, RectColor};
+pub use easing::Easing;
 pub use image::{Image, ImageSource, ObjectFit};
 pub use interaction::{ColorCell, InteractionColors};
 pub use layout::{AlignItems, Column, Container, Gap, JustifyContent, LayoutKind, Row, Wrap};
@@ -61,7 +61,7 @@ pub use padding::{Padding, PaddingLayout};
 pub use panel::{Panel, PanelLayout};
 pub use rich_text::{RichSpan, RichText, RichTextContent, TextTransform, WhiteSpace};
 pub use scroll_view::{
-    scroll_view, Axis, Overflow, ScrollState, ScrollView, ScrollViewLayout, ScrollbarStyle,
+    Axis, Overflow, ScrollState, ScrollView, ScrollViewLayout, ScrollbarStyle, scroll_view,
 };
 pub use sizing::{Length, RectGeometry, Sizing};
 pub use slider::{Slider, SliderRange};

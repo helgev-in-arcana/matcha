@@ -1,7 +1,8 @@
 # レンダリングインターフェース報告後の整理 — 2026-09-23
 
-対象は `codex/render-interface` の native Scene 実装。今回の変更は記録・説明の訂正と診断テスト。
-描画動作や公開フィールドは変更しない。
+対象は `codex/render-interface` の native Scene 実装。以下はレビュー時点の合意と検討履歴。
+後続でフレームワーク所有の Frame/Draw に移行した。現在の実装・検証結果は
+[framework-draw-report.md](framework-draw-report.md) を参照。
 
 ## 後回しにする項目
 

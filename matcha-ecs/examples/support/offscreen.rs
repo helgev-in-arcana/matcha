@@ -1,5 +1,7 @@
 //! Reproducible native GPU visual verification using production extraction and
 //! GuiRenderer. Run `showcase --offscreen target/showcase.png` without a window.
+#[path = "allocations.rs"]
+mod allocations;
 use bevy_ecs::world::World;
 use gpu_utils::gpu::{Gpu, GpuDescriptor};
 use matcha_ecs::{
@@ -45,15 +47,16 @@ pub fn capture(view: impl FnOnce(&mut Scope), path: &str, size: [u32; 2]) {
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let allocation = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let start = std::time::Instant::now();
-        renderer
-            .assemble(&frame.items, &frame.clips, size.map(|v| v as f32))
-            .expect("native Scene assembly");
+        let (assembled, allocations) = allocations::measure(|| {
+            renderer.assemble(&frame.items, &frame.clips, size.map(|v| v as f32))
+        });
+        assembled.expect("native Scene assembly");
         let assembly_elapsed = start.elapsed();
         let encode_start = std::time::Instant::now();
         renderer
             .backend
             .render(
-                &renderer.scene,
+                &renderer.frame.scene,
                 renderer::SceneTarget {
                     view: &target_view,
                     viewport: size.map(|v| v as f32),
@@ -77,7 +80,7 @@ pub fn capture(view: impl FnOnce(&mut Scope), path: &str, size: [u32; 2]) {
         let error = futures::executor::block_on(validation.pop());
         assert!(error.is_none(), "GPU validation failed: {error:?}");
         println!(
-            "GUI frame {i}: {:?}; assembly={assembly_elapsed:?}, encode/submit={encode_elapsed:?}, wait={:?}; {:?}",
+            "GUI frame {i}: {:?}; assembly={assembly_elapsed:?}, allocations={allocations:?}, encode/submit={encode_elapsed:?}, wait={:?}; {:?}",
             start.elapsed(),
             wait_start.elapsed(),
             renderer.backend.stats()

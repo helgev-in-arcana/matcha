@@ -3,13 +3,11 @@
 //! order, per-item transforms, and that the extracted cache `Arc` is shared with
 //! the source entity's `RenderItem`. Same style as `tests/layout.rs`.
 
-use std::sync::Arc;
-
 use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::{
     components::{render::RenderItem, view::ViewChildren},
-    layout::{layout_root, Constraints},
+    layout::{Constraints, layout_root},
     render::extract_items,
     view::run_view,
 };
@@ -47,7 +45,11 @@ fn extract_collects_leaves_in_paint_order_with_window_space_transforms() {
     let items = extract_items(&world, root).items;
 
     // (a) paint order: containers contribute nothing, three leaves in DFS order.
-    assert_eq!(items.len(), 3, "only the three ColorRect leaves are drawable");
+    assert_eq!(
+        items.len(),
+        3,
+        "only the three ColorRect leaves are drawable"
+    );
 
     // (b) transforms are window-space (composed through the ancestor chain).
     let translation = |i: usize| {
@@ -58,11 +60,9 @@ fn extract_collects_leaves_in_paint_order_with_window_space_transforms() {
     assert_eq!(translation(1), (0.0, 120.0)); // B: row origin (0,120) + local (0,0)
     assert_eq!(translation(2), (120.0, 120.0)); // C: row origin + local (120,0)
 
-    // (c) the extracted cache Arc is the *same* Arc as the source entity's, so an
-    // invalidate that swaps the entity's cache is observed by later frames and the
-    // node built on the render thread is shared, not deep-copied.
-    let entity_cache = |e: Entity| world.get::<RenderItem>(e).unwrap().cache.clone();
-    assert!(Arc::ptr_eq(&items[0].cache, &entity_cache(rect_a)));
-    assert!(Arc::ptr_eq(&items[1].cache, &entity_cache(rect_b)));
-    assert!(Arc::ptr_eq(&items[2].cache, &entity_cache(rect_c)));
+    // (c) extraction captures the entity's value revision. No Scene cache is shared.
+    let entity_cache = |e: Entity| world.get::<RenderItem>(e).unwrap().revision;
+    assert!((items[0].revision == entity_cache(rect_a)));
+    assert!((items[1].revision == entity_cache(rect_b)));
+    assert!((items[2].revision == entity_cache(rect_c)));
 }

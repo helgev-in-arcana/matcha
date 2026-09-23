@@ -5,7 +5,7 @@
 //!
 //! The core hands widgets `:hover`/`:active` as markers and as
 //! [`RenderCtx`](matcha_ecs::components::render::RenderCtx) flags, and
-//! invalidates the cached node on every transition. A widget that only wants to
+//! advances the draw revision on every transition. A widget that only wants to
 //! *snap* between two colours therefore needs nothing from this module — it can
 //! branch on `ctx.hovered` inside its own builder, exactly as `Button` already
 //! branches on `ctx.focused` to draw its focus ring.

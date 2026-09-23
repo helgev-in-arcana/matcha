@@ -1,19 +1,16 @@
 # Architecture — `matcha-ecs` core
 
-The framework core. Rendering contracts live upstream in render-interface; widgets own native local Scenes. Read this before touching anything in `matcha-ecs/src/`, and before writing a
+The framework core. Rendering contracts live upstream in render-interface; the framework owns the final Scene and widgets write Objects. Read this before touching anything in `matcha-ecs/src/`, and before writing a
 widget.
 
-## Rendering ownership direction (review 2026-09-23)
+## Rendering ownership (2026-09-23)
 
-The current implementation still retains widget-local Scenes. The agreed direction is to remove
-widget ownership of Scene phases: the framework must resolve paint/backdrop semantics into final
-phases. Neither zipping local phases nor concatenating whole widget Scenes is generally correct.
-Widgets should supply draw content and reusable resources through lightweight construction.
-Do not introduce Scene clones or per-Object Arc/reference wrappers as the default optimization;
-compare lightweight Object construction with retention on representative widgets first. Preserve
-content IDs across unchanged outputs so CPU reconstruction does not imply GPU regeneration.
-See ../docs/render-interface-review-notes.md for decisions and measurement criteria. This direction
-is documented, not yet implemented; the module map below describes the current code.
+RenderItem writers receive RenderCtx and Draw, never a local Scene or phases. Frame owns the
+reusable final Scene and resource pool. Draw::backdrop means "read preceding paint"; Frame
+inserts a phase boundary before that Object. Ordinary objects retain UI traversal order.
+No per-Object Arc or Scene cache exists. A single builder Arc per entity is shared with extracted
+frames; invalidation advances a value revision without allocating. Providers retain expensive
+shaped layouts, decoded images and native resource definitions with stable content IDs.
 
 ## The one dependency rule
 
@@ -35,7 +32,7 @@ Every one of these has real `//!` docs. Read the module, not a summary of it.
 | `ui_ecs.rs` | `UiEcs<M, Msg, F, R>` — the `Application` driver: world, schedules, window/surface lifecycle, event entry points, the builder (`with_*`) surface |
 | `view.rs` | `Widget` trait, `Scope`, reconciliation. **Do not change these semantics casually** |
 | `layout.rs` | `Constraints`, `Measured`, `Layout`, `LayoutDispatch`, `LayoutCtx`, `layout_root`/`run_layout` |
-| `scene.rs` | Flat Scene composition, shared source imports, mask validation/rebasing |
+| `scene.rs` | Frame/Draw writers, framework phase scheduling, resource registration and mask scopes |
 | `render.rs` | Extract → `RenderSnapshot` → `RenderDriver` (`ThreadDriver` default, `InlineDriver` fallback and web) |
 | `clip.rs` | `Clip` markers → the renderer's clip arena. GPU-free by design |
 | `traversal.rs` | **The one order** painting and picking both walk, plus `ZIndex` stacking |
@@ -69,7 +66,7 @@ update, focus sync). Apps and widget crates register via `UiEcs::with_pre_layout
 is forbidden.
 
 Then: acquire the surface texture on the main thread, extract, hand the snapshot to the
-`RenderDriver`, which builds or updates native widget Scenes, assembles a borrowed window Scene, records GPU work and presents (on a worker thread by default).
+`RenderDriver`, which invokes draw writers into a reusable window Scene, records GPU work and presents (on a worker thread by default).
 
 ## Event → pixels
 
@@ -107,14 +104,14 @@ Rules that are easy to get wrong:
 - **`bundle()` returns one fixed type.** `Option<T>` is not a `Bundle`. Anything conditional
   (a marker like `Clip`, a tween, a component that depends on a resource) is inserted in
   `after_spawn`/`patch` instead.
-- **`patch` should `set_if_neq`** so a no-op re-declare does not invalidate a cached Scene.
+- **`patch` should `set_if_neq`** so a no-op re-declare does not advance the draw revision.
   Exception: fn-pointer fields, where comparison is meaningless — assign them outright.
 - **Widgets are declarative.** The app passes current state every `view()` call and the widget holds
   none. `TextBox` is the single, necessary exception (see [text.md](text.md)).
 - Layout is wired by including `(XxxLayout, LayoutDispatch::of::<XxxLayout>())` in the bundle. There
   is **no registration step and no registry.**
-- A widget that draws carries a `RenderItem`: a *builder closure* plus a shared cache slot.
-  `RenderItem::invalidate()` swaps the cache so the next frame rebuilds.
+- A widget that draws carries a `RenderItem`: a shared writer plus a value revision.
+  `RenderItem::invalidate()` advances the revision; each redraw invokes the writer.
 
 ## How a value reaches a `RenderItem` builder
 
@@ -151,21 +148,12 @@ wanting to, the answer is route 1 or 2.
 
 ## Rendering boundary
 
-RenderItem::new builds a retained native Scene until invalidated. RenderItem::dynamic mutates its
-retained Scene on each redraw, permitting fresh IDs for backdrop/time-dependent content without
-reallocating all drawing arrays. The cache owns Scene directly inside its mutex; no Arc<Scene>
-wrapper or paint tree. Snapshot extraction shares only the cache slot and builder.
+RenderItem::new accepts Fn(&RenderCtx, &mut Draw). Writers emit Objects and masks directly into
+reusable frame storage every redraw. Shaping and decoding caches belong to providers. Source
+registration retains existing definitions on matching IDs, and finish prunes definitions absent
+from this submission even after assembly failure. See scene.rs for scheduling/ownership docs.
 
-RenderCtx has CPU layout/interaction state plus resolved transform and viewport_size. It has no
-Device/Queue fields; source preparation receives native wgpu recording contexts. Providers may
-cache private GPU programs. Final texture/mesh placement remains renderer-owned.
-
-GuiRenderer::assemble validates/rebases local mask indices, applies placement/opacity and imports
-source definitions, including unused retention candidates. Dead definitions are pruned on failed
-assemblies too. GuiRenderer::render_extracted adds the backend call; offscreen proofs use the same
-assembly path. The GuiRenderer mutex serializes shared-window assembly/recording.
-
-ClipReset in components/layout.rs resets the inherited clipping chain in clip::descend. Both
-picking and extraction call that function. It does not change placement or ZIndex. Arbitrary Scene
-phases can change paint order beyond the default UI traversal; applications must align picking
-policy when exploiting that freedom.
+RenderCtx contains resolved placement/viewport and interaction state, no Device or Queue. Native
+GPU preparation remains in Source callbacks. Draw scopes apply geometry, inherited masks and
+opacity exactly once. ClipReset resets inherited clips for both extraction and picking; Draw
+does not expose phase indices that could reorder objects independently of picking.

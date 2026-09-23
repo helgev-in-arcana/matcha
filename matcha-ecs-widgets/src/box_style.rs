@@ -4,7 +4,7 @@
 //! Before this, `Panel`, `Button`, `Checkbox` and `TextBox` each open-coded the
 //! same "border-coloured box with an inset fill on top" trick against
 //! `solid_rect_node`, and the scrollbar had a rounded-rect path of its own that
-//! none of them could reach. [`box_scene`] replaces all of it, and adds the
+//! none of them could reach. [`paint_box`] replaces all of it, and adds the
 //! decorations none of them could express.
 //!
 //! # How each layer is drawn, and why it differs
@@ -36,9 +36,9 @@
 //! `background-clip`/`background-origin` (the background always fills the
 //! border box, CSS's default).
 
-use matcha_ecs::scene::{append_local, textured_quad};
+use matcha_ecs::scene::Draw;
 use nalgebra::{Matrix4, Vector3};
-use render_interface::Scene;
+use render_interface::{MaskSource, TextureSource};
 
 use matcha_ecs::components::render::RenderCtx;
 
@@ -220,35 +220,84 @@ impl BoxStyle {
 
 /// Paint `style` over a `size` box, back to front: shadow, background, border.
 ///
-/// Returns an empty node for a degenerate size, so a caller never has to branch
+/// Emits nothing for a degenerate size, so a caller never has to branch
 /// on "is there anything to draw". Children are painted afterwards by the
 /// extract stage, which is why a container's own decoration sits underneath
 /// them without any ordering work here.
-pub fn box_scene(ctx: &RenderCtx, shape: &ShapeCtx, size: [f32; 2], style: &BoxStyle) -> Scene {
-    let mut node = Scene::default();
+pub fn paint_box(
+    draw: &mut Draw<'_>,
+    ctx: &RenderCtx,
+    shape: &ShapeCtx,
+    size: [f32; 2],
+    style: &BoxStyle,
+) {
     if size[0] < 0.5 || size[1] < 0.5 {
-        return node;
+        return;
     }
-
     if let Some(shadow) = style.shadow {
-        if let Some((child, offset)) = shadow_node(ctx, shape, size, style, &shadow) {
-            append_local(&mut node, child, translation(offset));
+        if let Some((quad, offset)) = shadow_node(ctx, shape, size, style, &shadow) {
+            quad.paint(draw, translation(offset));
         }
     }
-
-    if style.background[3] > 0.0 {
-        if let Some(child) = background_node(ctx, shape, size, style) {
-            append_local(&mut node, child, Matrix4::identity());
+    if style.background[3] > 0. {
+        if let Some(quad) = background_node(ctx, shape, size, style) {
+            quad.paint(draw, Matrix4::identity());
         }
     }
-
-    if !style.border.is_zero() && style.border_color[3] > 0.0 {
-        for (child, offset) in border_nodes(ctx, shape, size, style) {
-            append_local(&mut node, child, translation(offset));
+    if !style.border.is_zero() && style.border_color[3] > 0. {
+        if !style.radius.is_zero() {
+            if let Some(quad) = border_node(ctx, shape, size, style) {
+                quad.paint(draw, Matrix4::identity());
+            }
+        } else {
+            let Sides {
+                top,
+                right,
+                bottom,
+                left,
+            } = style.border;
+            let mid_h = (size[1] - top - bottom).max(0.);
+            for (size, offset) in [
+                ([size[0], top], [0., 0.]),
+                ([size[0], bottom], [0., size[1] - bottom]),
+                ([left, mid_h], [0., top]),
+                ([right, mid_h], [size[0] - right, top]),
+            ] {
+                if let Some(quad) = tint_quad(ctx, shape, size, style.border_color) {
+                    quad.paint(draw, translation(offset));
+                }
+            }
         }
     }
-
-    node
+}
+struct Quad {
+    texture: TextureSource,
+    size: [f32; 2],
+    transform: Matrix4<f32>,
+    mask: Option<MaskSource>,
+}
+impl Quad {
+    fn paint(self, draw: &mut Draw<'_>, placement: Matrix4<f32>) {
+        draw.quad(
+            &self.texture,
+            self.size,
+            placement * self.transform,
+            self.mask.as_ref(),
+        );
+    }
+}
+fn textured_quad(
+    texture: TextureSource,
+    size: [f32; 2],
+    transform: Matrix4<f32>,
+    mask: Option<MaskSource>,
+) -> Quad {
+    Quad {
+        texture,
+        size,
+        transform,
+        mask,
+    }
 }
 
 fn translation(offset: [f32; 2]) -> Matrix4<f32> {
@@ -256,7 +305,7 @@ fn translation(offset: [f32; 2]) -> Matrix4<f32> {
 }
 
 /// A flat quad of `color` at `size`, sampling one shared tint texel.
-fn tint_quad(ctx: &RenderCtx, shape: &ShapeCtx, size: [f32; 2], color: [f32; 4]) -> Option<Scene> {
+fn tint_quad(ctx: &RenderCtx, shape: &ShapeCtx, size: [f32; 2], color: [f32; 4]) -> Option<Quad> {
     if size[0] < 0.5 || size[1] < 0.5 {
         return None;
     }
@@ -269,10 +318,9 @@ fn background_node(
     shape: &ShapeCtx,
     size: [f32; 2],
     style: &BoxStyle,
-) -> Option<Scene> {
-    let quad = tint_quad(ctx, shape, size, style.background)?;
+) -> Option<Quad> {
     if style.radius.is_zero() {
-        return Some(quad);
+        return tint_quad(ctx, shape, size, style.background);
     }
 
     // Rasterised at whole pixels and drawn at that same size, so the coverage
@@ -293,60 +341,25 @@ fn background_node(
     ))
 }
 
-/// The border, as `(node, offset)` pairs.
-///
-/// A square border is up to four plain quads; a rounded one is a single ring
-/// mask. Both are exact — the split is purely about what is cheaper.
-fn border_nodes(
+/// A rounded border is one ring mask; square sides are emitted directly.
+fn border_node(
     ctx: &RenderCtx,
     shape: &ShapeCtx,
     size: [f32; 2],
     style: &BoxStyle,
-) -> Vec<(Scene, [f32; 2])> {
-    let color = style.border_color;
-    let Sides {
-        top,
-        right,
-        bottom,
-        left,
-    } = style.border;
-
-    if !style.radius.is_zero() {
-        let key = CoverageKey::ring(
-            size[0].round().max(1.0) as u32,
-            size[1].round().max(1.0) as u32,
-            style.radius.as_array(),
-            style.border.as_array(),
-        );
-        let drawn = [key.w as f32, key.h as f32];
-        let (Some(tint), Some(coverage)) = (
-            shape.tint_source(color, ctx),
-            shape.coverage_source(key, ctx),
-        ) else {
-            return Vec::new();
-        };
-        return vec![(
-            textured_quad(tint, drawn, Matrix4::identity(), Some(coverage)),
-            [0.0; 2],
-        )];
-    }
-
-    // Corners belong to one side each; giving the full width to the horizontal
-    // bars and insetting the vertical ones is the simplest split that leaves no
-    // gap and no double-painted corner (invisible for an opaque colour,
-    // visible for a translucent one).
-    let mid_h = (size[1] - top - bottom).max(0.0);
-    let sides = [
-        ([size[0], top], [0.0, 0.0]),
-        ([size[0], bottom], [0.0, size[1] - bottom]),
-        ([left, mid_h], [0.0, top]),
-        ([right, mid_h], [size[0] - right, top]),
-    ];
-
-    sides
-        .into_iter()
-        .filter_map(|(quad_size, offset)| Some((tint_quad(ctx, shape, quad_size, color)?, offset)))
-        .collect()
+) -> Option<Quad> {
+    let key = CoverageKey::ring(
+        size[0].round().max(1.) as u32,
+        size[1].round().max(1.) as u32,
+        style.radius.as_array(),
+        style.border.as_array(),
+    );
+    Some(textured_quad(
+        shape.tint_source(style.border_color, ctx)?,
+        [key.w as f32, key.h as f32],
+        Matrix4::identity(),
+        Some(shape.coverage_source(key, ctx)?),
+    ))
 }
 
 /// The shadow, as `(node, offset)`.
@@ -360,7 +373,7 @@ fn shadow_node(
     size: [f32; 2],
     style: &BoxStyle,
     shadow: &BoxShadow,
-) -> Option<(Scene, [f32; 2])> {
+) -> Option<(Quad, [f32; 2])> {
     if shadow.color[3] <= 0.0 {
         return None;
     }

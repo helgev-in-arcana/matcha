@@ -10,18 +10,16 @@
 //! GPU-free, per this suite's convention: `RenderItem::builder` is never
 //! invoked, only `cache` identity and `LayoutOutput` are inspected.
 
-use std::sync::Arc;
-
 use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::{
     components::{layout::LayoutOutput, render::RenderItem, view::ViewChildren},
-    layout::{layout_root, Constraints},
-    view::{run_view, Scope},
+    layout::{Constraints, layout_root},
+    view::{Scope, run_view},
 };
 use matcha_ecs_widgets::{
-    box_style::{BoxShadow, BoxStyle, Corners, Sides},
     Button, Checkbox, ColorRect, Panel,
+    box_style::{BoxShadow, BoxStyle, Corners, Sides},
 };
 
 const WINDOW: [f32; 2] = [800.0, 600.0];
@@ -39,12 +37,8 @@ fn children(world: &World, e: Entity) -> Vec<Entity> {
         .unwrap_or_default()
 }
 
-fn cache_of(world: &World, e: Entity) -> Arc<parking_lot::Mutex<Option<render_interface::Scene>>> {
-    world
-        .get::<RenderItem>(e)
-        .expect("entity draws")
-        .cache
-        .clone()
+fn cache_of(world: &World, e: Entity) -> u64 {
+    world.get::<RenderItem>(e).expect("entity draws").revision
 }
 
 /// Declare `build` twice and report whether the second pass dropped the cached
@@ -59,7 +53,7 @@ fn rebuilds_between(
     let before = cache_of(&world, target);
 
     run_view(&mut world, root, second);
-    !Arc::ptr_eq(&before, &cache_of(&world, target))
+    before != cache_of(&world, target)
 }
 
 #[test]
@@ -144,7 +138,11 @@ fn changing_a_panels_shadow_rebuilds_it() {
             s.leaf(Panel::new(100.0, 100.0));
         },
         |s| {
-            s.leaf(Panel::new(100.0, 100.0).shadow(BoxShadow::drop(4.0, 12.0, [0.0, 0.0, 0.0, 0.5])));
+            s.leaf(Panel::new(100.0, 100.0).shadow(BoxShadow::drop(
+                4.0,
+                12.0,
+                [0.0, 0.0, 0.0, 0.5],
+            )));
         },
     ));
 }

@@ -1,13 +1,13 @@
 # Native rendering interface and GPU placement
 
 Read render-interface/src/lib.rs for the contract. matcha-paint has been removed. Current widgets
-emit native Scene values/updates with Object, PixelMask and Source definitions. No RenderNode or
+emit Object/PixelMask records through Draw into a framework-owned Scene. No RenderNode or
 Bitmap adapter exists on the ECS path. The legacy renderer/tree stack remains unchanged.
 
 ## Code map
 
-- matcha-ecs/src/components/render.rs: retained Scene builders and in-place dynamic Scene writers.
-- matcha-ecs/src/scene.rs: flat Scene embedding, source sharing, mask-index validation/rebasing.
+- matcha-ecs/src/components/render.rs: lightweight per-redraw Draw writers and value revisions.
+- matcha-ecs/src/scene.rs: Frame/Draw, phase scheduling, source sharing and scoped masks.
 - matcha-ecs/src/render.rs: extract, assemble, borrow into backend, submit/present coordination.
 - matcha-ecs-widgets/src/shape_gpu.rs + .wgsl: native SDF/ring/three-box shadow generators.
 - renderer/src/scene_resources.rs: texture rectangle leases and shared mesh-buffer intervals.
@@ -19,7 +19,7 @@ Bitmap adapter exists on the ECS path. The legacy renderer/tree stack remains un
 
 Scene and resource definitions are CPU-side application data. Source fields/maps stay private.
 Source cloning shares one Arc<Prepare> allocation, replacing Box<Prepare>; no Arc<Source> wrapper.
-Separate retained widget Scenes can share definitions. ResourcePool::import/share_* explicitly
+Provider caches and the framework resource pool share definitions. ResourcePool::import/share_* explicitly
 compose content IDs; public insert_* still rejects duplicate definitions in a single pool.
 Import checks descriptor compatibility, not closure pointer equality. Semantic equality remains
 part of the immutable-content-ID contract. Reconstructing an equivalent generator is legitimate.
@@ -66,10 +66,10 @@ errors are a separate wgpu error channel. CPU Ok is not GPU validation/completio
 
 ## UI integration constraints
 
-RenderCtx supplies resolved placement and viewport size for backdrop producers. Object/mask
-records in widget Scenes are local and are embedded once. Standard local sources ignore placement;
-view/background/time-dependent definitions use RenderItem::dynamic to refresh content IDs while
-reusing Scene storage. It schedules no redraw itself. ClipReset resets ancestor clipping for both
+RenderCtx supplies resolved placement and viewport size for backdrop producers. Draw transforms
+local Object/mask records once while writing the final Frame. Standard sources ignore placement;
+background/time-dependent writers refresh content IDs on redraw. Draw::backdrop requests the
+preceding paint result; Frame owns the phase boundary. Writers do not schedule redraws themselves. ClipReset resets ancestor clipping for both
 paint extraction and picking. It changes neither geometry nor ZIndex; custom Phase paint order
 is not automatically an input order.
 
@@ -95,13 +95,11 @@ PrepareResult/SceneError do not collect that channel. This is not evidence that 
 must be awaited, nor that a new asynchronous interface is needed. The default wgpu handler
 panics; gpu-utils overrides it with logging. A new timing diagnostic passes on Vulkan and DX12.
 
-Local Scene composition is a framework convention: phases align globally, masks rebase, transforms
-compose, opacity multiplies each object, and resource definitions share by ID. It does not isolate
-snapshot coordinates or group opacity. See ../docs/render-interface-review-notes.md.
-
-Subsequent review rejects widget-local phase ownership as the future design: the framework must
-own global phase scheduling using defined paint/backdrop semantics. Resource reuse does not
-justify exposing phases to widgets. Prefer investigating lightweight Object construction with
-stable resource IDs before adding retained Object ownership wrappers; performance is unmeasured.
-Current code has not yet migrated. Async wgpu error notification belongs to application/event-loop
-handling, not a promise made by the rendering interface's synchronous Result.
+Frame/Draw now implements framework-owned phase scheduling. Widgets cannot access phase indices
+through Draw. Draw::backdrop samples all preceding paint, including earlier widget effects;
+ordinary draws following an effect remain in paint order. Shared-resource correctness still
+requires fresh IDs for changed snapshot inputs; the deferred dependency flag is not implemented.
+Nested Draw::masked/translated scopes replace local Scene composition. No Scene cache or
+per-Object ownership wrapper remains. Source Arc<Prepare> still shares provider definitions with
+the final pool; this is distinct from retaining Objects. Error notification remains application/
+event-loop responsibility, not a synchronous interface guarantee.

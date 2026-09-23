@@ -10,7 +10,7 @@
 //! Almost everything. The drag is `PointerDispatch` plus the pointer capture a
 //! press establishes (`matcha_ecs::input::PointerCapture`), which is what makes
 //! a drag keep working once the cursor leaves the track — the same mechanism
-//! that fixed the scrollbar thumb. Painting is three [`box_scene`] calls, so a
+//! that fixed the scrollbar thumb. Painting is three [`paint_box`] calls, so a
 //! rounded track and a round knob cost nothing this crate did not already have.
 //! Keyboard support is `KeyDispatch` on a `FocusPolicy::Normal` entity, so
 //! arrows work as soon as it is tabbed to.
@@ -24,13 +24,12 @@
 use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, world::EntityWorldMut,
 };
-use matcha_ecs::scene::append_local;
+
 use matcha_window::{
     event::device_event::{Key as LogicalKey, KeyInput, NamedKey},
     window::CursorIcon,
 };
 use nalgebra::{Matrix4, Vector3};
-use render_interface::Scene;
 
 use matcha_ecs::{
     components::{
@@ -47,7 +46,7 @@ use matcha_ecs::{
 };
 
 use crate::{
-    box_style::{BoxStyle, box_scene},
+    box_style::{BoxStyle, paint_box},
     shape::ShapeCtx,
     sizing::{RectGeometry, Sizing},
 };
@@ -242,45 +241,39 @@ fn slider_render_item(shape: ShapeCtx, style: SliderStyle, range: SliderRange) -
     let knob = BoxStyle::fill(style.knob_color).radius(style.knob_radius);
     let ring = BoxStyle::fill(style.focus_ring_color).radius(style.knob_radius + 2.0);
 
-    RenderItem::new(move |ctx: &RenderCtx| {
+    RenderItem::new(move |ctx: &RenderCtx, draw| {
         let [w, h] = ctx.size;
-        let mut node = Scene::default();
 
         let track_y = ((h - style.track_height) / 2.0).max(0.0);
         let (start, span) = travel(w, style.knob_radius);
         let knob_x = start + span * range.fraction();
 
-        append_local(
-            &mut node,
-            box_scene(ctx, &shape, [w, style.track_height], &track),
+        draw.translated(
             Matrix4::new_translation(&Vector3::new(0.0, track_y, 0.0)),
+            |draw| paint_box(draw, ctx, &shape, [w, style.track_height], &track),
         );
-        append_local(
-            &mut node,
-            box_scene(ctx, &shape, [knob_x, style.track_height], &fill),
+        draw.translated(
             Matrix4::new_translation(&Vector3::new(0.0, track_y, 0.0)),
+            |draw| paint_box(draw, ctx, &shape, [knob_x, style.track_height], &fill),
         );
 
         // The focus ring goes under the knob so the knob stays crisp.
         let d = style.knob_radius * 2.0;
         if ctx.focused {
             let rd = d + 4.0;
-            append_local(
-                &mut node,
-                box_scene(ctx, &shape, [rd, rd], &ring),
+            draw.translated(
                 Matrix4::new_translation(&Vector3::new(knob_x - rd / 2.0, (h - rd) / 2.0, 0.0)),
+                |draw| paint_box(draw, ctx, &shape, [rd, rd], &ring),
             );
         }
-        append_local(
-            &mut node,
-            box_scene(ctx, &shape, [d, d], &knob),
+        draw.translated(
             Matrix4::new_translation(&Vector3::new(
                 knob_x - style.knob_radius,
                 (h - d) / 2.0,
                 0.0,
             )),
+            |draw| paint_box(draw, ctx, &shape, [d, d], &knob),
         );
-        node
     })
 }
 
