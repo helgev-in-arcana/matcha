@@ -1,5 +1,15 @@
 //! The upstream rendering contract, independent of Matcha's UI and backend.
 //!
+//! Deferred extension candidates (not adopted or implemented):
+//! - Snapshot-dependency flag: let a source declare that it reads the snapshot;
+//!   leave invalidation/regeneration policy to the renderer. The relation to
+//!   immutable content IDs and snapshot versions still needs a contract.
+//! - Sampler policy: explicit sampling semantics, notably nearest versus linear,
+//!   independent of atlas placement. Fields and defaults remain undecided.
+//! - Other shader/draw settings beyond sampler policy, such as blend policy:
+//!   the useful settings, their scope and their representation remain undecided.
+//! These notes do not change the current contract described below.
+//!
 //! A caller owns and may reuse a complete [`Scene`]. A renderer borrows it only
 //! during `render`; CPU callbacks finish before that call returns, GPU work need
 //! not. Sources are stored directly, not behind an additional Arc. IDs identify

@@ -86,6 +86,8 @@ no matcha-web crate. Native Vulkan/DX12 validation is not a browser compatibilit
 
 Snapshot-dependency flags and sampler/shader policy are deferred interface candidates. A snapshot
 version must account for changed draws/transforms/masks/initial content, not only resource IDs.
+The three candidate categories are recorded at the top of render-interface/src/lib.rs; they are
+notes for future design, not adopted fields or changes to the current contract.
 Page capacities/budgets and upstream cache lifetime are implementation topics outside the core
 contract; further work is deferred (existing correctness fixes remain).
 
