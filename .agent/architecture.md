@@ -3,6 +3,18 @@
 The framework core. Rendering contracts live upstream in render-interface; widgets own native local Scenes. Read this before touching anything in `matcha-ecs/src/`, and before writing a
 widget.
 
+## Rendering ownership direction (review 2026-09-23)
+
+The current implementation still retains widget-local Scenes. The agreed direction is to remove
+widget ownership of Scene phases: the framework must resolve paint/backdrop semantics into final
+phases. Neither zipping local phases nor concatenating whole widget Scenes is generally correct.
+Widgets should supply draw content and reusable resources through lightweight construction.
+Do not introduce Scene clones or per-Object Arc/reference wrappers as the default optimization;
+compare lightweight Object construction with retention on representative widgets first. Preserve
+content IDs across unchanged outputs so CPU reconstruction does not imply GPU regeneration.
+See ../docs/render-interface-review-notes.md for decisions and measurement criteria. This direction
+is documented, not yet implemented; the module map below describes the current code.
+
 ## The one dependency rule
 
 `matcha-ecs-widgets` → `matcha-ecs`, **never the reverse**. The core names no widget, no layout

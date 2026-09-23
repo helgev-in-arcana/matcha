@@ -98,3 +98,10 @@ panics; gpu-utils overrides it with logging. A new timing diagnostic passes on V
 Local Scene composition is a framework convention: phases align globally, masks rebase, transforms
 compose, opacity multiplies each object, and resource definitions share by ID. It does not isolate
 snapshot coordinates or group opacity. See ../docs/render-interface-review-notes.md.
+
+Subsequent review rejects widget-local phase ownership as the future design: the framework must
+own global phase scheduling using defined paint/backdrop semantics. Resource reuse does not
+justify exposing phases to widgets. Prefer investigating lightweight Object construction with
+stable resource IDs before adding retained Object ownership wrappers; performance is unmeasured.
+Current code has not yet migrated. Async wgpu error notification belongs to application/event-loop
+handling, not a promise made by the rendering interface's synchronous Result.
