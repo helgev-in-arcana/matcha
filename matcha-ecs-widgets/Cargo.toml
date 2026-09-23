@@ -5,7 +5,9 @@ edition = "2024"
 publish = false
 
 [dependencies]
-matcha-paint.workspace = true
+render-interface.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
 # self
 matcha-ecs = { workspace = true }
 # Two vocabularies, both of which matcha-ecs *defines components in terms of*

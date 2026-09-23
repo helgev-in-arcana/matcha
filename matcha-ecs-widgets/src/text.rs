@@ -9,9 +9,10 @@
 //! single call, which doesn't fit the per-glyph, cross-frame, cross-widget
 //! atlas cache this widget needs.
 //!
-//! Rendering assembles CPU tint/coverage bitmaps into matcha-paint nodes.
-//! SceneBuilder resolves these to flat Objects and PixelMasks; the renderer
-//! owns upload, GPU residency and final source-over compositing.
+//! Rendering writes Objects and PixelMasks directly into a native Scene.
+//! Fontdue glyph bounds are queried during Scene construction; rasterization
+//! runs inside MaskSource::prepare only when the renderer needs the content.
+//! Colours are GPU-generated TextureSources. No RenderNode or Bitmap bridge.
 //!
 //! Word-wrap is supported, but deliberately with no shape-result caching:
 //! `measure()`, `arrange()`, and the `RenderItem` builder each independently
@@ -20,24 +21,16 @@
 //! shared via `TextWrapWidth`'s `Arc<LiveF32>`) — passing the actual shaped
 //! glyph list between stages is left as a future optimisation.
 
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use bevy_ecs::{
-    bundle::Bundle,
-    change_detection::DetectChangesMut,
-    component::Component,
-    entity::Entity,
-    resource::Resource,
-    world::EntityWorldMut,
+    bundle::Bundle, change_detection::DetectChangesMut, component::Component, entity::Entity,
+    resource::Resource, world::EntityWorldMut,
 };
-use matcha_paint::Bitmap;
 use nalgebra::{Matrix4, Vector3};
 use parking_lot::Mutex;
-use matcha_paint::RenderNode;
+use render_interface::Scene;
+use render_interface::{MaskDescriptor, MaskSource, TextureSource, upload_texture};
 
 use matcha_ecs::{
     components::{
@@ -48,9 +41,9 @@ use matcha_ecs::{
     view::Widget,
 };
 
+use crate::animation::{Easing, ExitFade, OpacityTween};
 use crate::live::LiveF32;
 use crate::sizing::Sizing;
-use crate::animation::{Easing, ExitFade, OpacityTween};
 
 /// The displayed string.
 #[derive(Component, Clone, PartialEq, Eq, Debug)]
@@ -91,7 +84,7 @@ struct FontCtxInner {
     /// Per-glyph rasterised coverage bitmap, cached in the stencil atlas and
     /// shared across every `Text` entity/frame that draws the same glyph at
     /// the same quantized size (`suzuri::GlyphId` bundles font+glyph+size).
-    stencil_cache: Mutex<HashMap<suzuri::GlyphId, (Bitmap, [f32; 2]), fxhash::FxBuildHasher>>,
+    stencil_cache: Mutex<HashMap<suzuri::GlyphId, (MaskSource, [f32; 2]), fxhash::FxBuildHasher>>,
 }
 
 /// World resource wrapping the shared `suzuri::FontSystem` plus the glyph
@@ -113,31 +106,34 @@ impl FontCtx {
         }))
     }
 
-    /// Look up (or rasterise-and-cache) the stencil atlas region holding
+    /// Look up the native MaskSource defining
     /// `glyph_id`'s coverage bitmap, plus its pixel size. Returns `None` for
     /// glyphs with no visible bitmap (e.g. space) or on allocation failure.
-    pub(crate) fn stencil_region(
-        &self,
-        glyph_id: suzuri::GlyphId,
-    ) -> Option<(Bitmap, [f32; 2])> {
+    pub(crate) fn glyph_source(&self, glyph_id: suzuri::GlyphId) -> Option<(MaskSource, [f32; 2])> {
         if let Some(cached) = self.0.stencil_cache.lock().get(&glyph_id) {
             return Some(cached.clone());
         }
 
         let font = self.0.font_system.font(glyph_id.font_id())?;
-        let (metrics, bitmap) =
-            font.rasterize_indexed(glyph_id.glyph_index(), glyph_id.font_size());
+        let metrics = font.metrics_indexed(glyph_id.glyph_index(), glyph_id.font_size());
         if metrics.width == 0 || metrics.height == 0 {
             return None;
         }
 
-        let region = Bitmap::coverage([metrics.width as u32, metrics.height as u32], bitmap).ok()?;
+        let region = MaskSource::new(
+            MaskDescriptor::new(
+                [metrics.width as u32, metrics.height as u32],
+                wgpu::TextureFormat::R8Unorm,
+            ),
+            move |mut c| {
+                let (_, bytes) =
+                    font.rasterize_indexed(glyph_id.glyph_index(), glyph_id.font_size());
+                upload_texture(&mut c.gpu, &c.target, &bytes)
+            },
+        );
 
         let entry = (region, [metrics.width as f32, metrics.height as f32]);
-        self.0
-            .stencil_cache
-            .lock()
-            .insert(glyph_id, entry.clone());
+        self.0.stencil_cache.lock().insert(glyph_id, entry.clone());
         Some(entry)
     }
 }
@@ -145,7 +141,12 @@ impl FontCtx {
 /// Shape `content` fresh (no caching — see module docs) at `font_size`,
 /// word-wrapping at `max_width`. Returns an empty layout if no matching font
 /// is found rather than panicking.
-pub(crate) fn shape(font_ctx: &FontCtx, content: &str, font_size: f32, max_width: f32) -> suzuri::text::TextLayout<()> {
+pub(crate) fn shape(
+    font_ctx: &FontCtx,
+    content: &str,
+    font_size: f32,
+    max_width: f32,
+) -> suzuri::text::TextLayout<()> {
     let mut data = suzuri::text::TextData::<()>::new();
     if let Some((font_id, _font)) = font_ctx.0.font_system.query(&suzuri::fontdb::Query {
         families: &[suzuri::fontdb::Family::SansSerif],
@@ -167,38 +168,32 @@ pub(crate) fn shape(font_ctx: &FontCtx, content: &str, font_size: f32, max_width
 }
 
 /// Paint the 1x1 tint pixel every glyph's stencil is masked against.
-pub(crate) fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<Bitmap> {
-    crate::color::paint_tint_region(ctx, color, "Text")
+pub(crate) fn solid_source(ctx: &RenderCtx, color: [f32; 4]) -> Option<TextureSource> {
+    crate::color::solid_source(ctx, color, "Text")
 }
 
 /// Composite `layout`'s glyphs into `(node, local_translation)` pairs, each a
 /// tint-texture quad masked by its cached stencil coverage bitmap, tinted
-/// uniformly by `tint_region` (see `paint_tint_region`). Shared by `Text`'s
+/// uniformly by `tint_source` (see `solid_source`). Shared by `Text`'s
 /// own render item and by any other widget (e.g. `Button`'s label) that needs
 /// to draw a shaped single-style glyph run without duplicating the
 /// suzuri-shaping/stencil-cache glue.
-pub(crate) fn glyph_run_nodes(
+pub(crate) fn draw_glyph_run(
+    scene: &mut Scene,
     font_ctx: &FontCtx,
-    _ctx: &RenderCtx,
     layout: &suzuri::text::TextLayout<()>,
-    tint_region: &Bitmap,
-) -> Vec<(RenderNode, Matrix4<f32>)> {
-    let mut out = Vec::new();
+    tint: &TextureSource,
+    offset: Matrix4<f32>,
+) {
     for line in &layout.lines {
         for glyph in &line.glyphs {
-            let Some((stencil_region, size)) =
-                font_ctx.stencil_region(glyph.glyph_id)
-            else {
-                continue;
-            };
-            let transform = Matrix4::new_translation(&Vector3::new(glyph.x, glyph.y, 0.0));
-            let glyph_node = RenderNode::new()
-                .with_texture(tint_region.clone(), size, Matrix4::identity())
-                .with_stencil(stencil_region, size, Matrix4::identity());
-            out.push((glyph_node, transform));
+            if let Some((mask, size)) = font_ctx.glyph_source(glyph.glyph_id) {
+                let transform =
+                    offset * Matrix4::new_translation(&Vector3::new(glyph.x, glyph.y, 0.));
+                matcha_ecs::scene::push_quad(scene, tint, size, transform, Some(&mask));
+            }
         }
     }
-    out
 }
 
 /// Build a `RenderItem` that shapes `content` fresh every rebuild (reading
@@ -212,18 +207,22 @@ fn text_render_item(
     color: [f32; 4],
 ) -> RenderItem {
     RenderItem::new(move |ctx: &RenderCtx| {
-        let mut node = RenderNode::new();
+        let mut node = Scene::default();
 
         let max_width = wrap_width.get();
         let layout = shape(&font_ctx, &content, font_size, max_width);
 
-        let Some(tint_region) = paint_tint_region(ctx, color) else {
+        let Some(tint_source) = solid_source(ctx, color) else {
             return node;
         };
 
-        for (glyph_node, transform) in glyph_run_nodes(&font_ctx, ctx, &layout, &tint_region) {
-            node.push_child(glyph_node, transform);
-        }
+        draw_glyph_run(
+            &mut node,
+            &font_ctx,
+            &layout,
+            &tint_source,
+            Matrix4::identity(),
+        );
 
         node
     })
@@ -326,13 +325,20 @@ impl Text {
     /// cell. Shared by `after_spawn` and `patch`, the two places a `Text`
     /// entity's `RenderItem` gets (re)built.
     fn rebuild_render_item(&self, entity: &mut EntityWorldMut) -> RenderItem {
-        let font_ctx = entity.world_scope(|world| world.get_resource_or_insert_with(FontCtx::new).clone());
+        let font_ctx =
+            entity.world_scope(|world| world.get_resource_or_insert_with(FontCtx::new).clone());
         let wrap_width = entity
             .get::<TextWrapWidth>()
             .expect("bundle() inserted TextWrapWidth")
             .0
             .clone();
-        text_render_item(font_ctx, wrap_width, self.content.clone(), self.font_size, self.color)
+        text_render_item(
+            font_ctx,
+            wrap_width,
+            self.content.clone(),
+            self.font_size,
+            self.color,
+        )
     }
 }
 
@@ -417,7 +423,7 @@ mod tests {
     use bevy_ecs::world::World;
     use matcha_ecs::{
         components::view::ViewChildren,
-        layout::{layout_root, Constraints},
+        layout::{Constraints, layout_root},
         view::run_view,
     };
 
@@ -435,7 +441,9 @@ mod tests {
         let child = world.get::<ViewChildren>(root).unwrap().slots[0].1;
         let stored_width = world.get::<TextWrapWidth>(child).unwrap().0.get();
 
-        let out = world.get::<matcha_ecs::components::layout::LayoutOutput>(child).unwrap();
+        let out = world
+            .get::<matcha_ecs::components::layout::LayoutOutput>(child)
+            .unwrap();
         assert_eq!(
             stored_width, out.size[0],
             "TextWrapWidth must hold exactly the width arrange() resolved this entity to"

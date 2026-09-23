@@ -6,10 +6,14 @@
 //! immutable logical content, never GPU placement, revisions or drawing order.
 //! A changed animation/background input requires a new ID. Regeneration with an
 //! existing ID must reproduce its content, regardless of cache eviction.
+//! Source::clone shares the immutable generator allocation (Arc<Prepare> in place
+//! of Box<Prepare>) so independently retained widget Scenes can share definitions.
+//! Explicit pool composition deduplicates IDs; direct duplicate insertions remain
+//! errors. Closure pointer equality is not a substitute for logical content identity.
 //!
 //! Phases and objects are composited in array order, using premultiplied linear
 //! RGBA and source-over. Vertex positions are object-local, Y-down; transforms
-//! map them to viewport UI pixels. UVs are normalized and clamp to the texture.
+//! map them to viewport UI pixels. UVs are normalized, clamped and linearly filtered.
 //! The fixed vertex ABI is intentional: arbitrary byte layouts without shared
 //! attribute semantics do not constitute an interoperable rendering interface.
 //!
@@ -28,6 +32,12 @@
 //! They must initialize it, never mutate the snapshot, retain borrowed handles,
 //! destroy resources or submit work themselves. Errors abort the frame. Exposing
 //! raw wgpu handles is a trusted extension contract, not a security sandbox.
+//! A logical output need not be a fresh allocation: it can be reused after its
+//! commands and placement copy have been recorded. Never retain its identity or
+//! depend on previous contents. A snapshot can likewise alias the accumulation
+//! image if command order puts all generation reads before that phase's writes.
+//! PrepareResult reports CPU recording errors; wgpu validation/device errors use
+//! wgpu's error model and are not implied absent by an Ok return.
 
 pub use nalgebra::Matrix4;
 use std::{
@@ -188,10 +198,11 @@ pub struct MaskPrepareContext<'a> {
 macro_rules! source {
     ($name:ident, $id:ident, $desc:ident, $ctx:ident, $prepare:ident) => {
         pub type $prepare = dyn for<'a> Fn($ctx<'a>) -> PrepareResult + Send + Sync + 'static;
+        #[derive(Clone)]
         pub struct $name {
             id: $id,
             desc: $desc,
-            prepare: Box<$prepare>,
+            prepare: std::sync::Arc<$prepare>,
         }
         impl $name {
             pub fn new(
@@ -210,7 +221,7 @@ macro_rules! source {
                 Self {
                     id,
                     desc,
-                    prepare: Box::new(prepare),
+                    prepare: std::sync::Arc::new(prepare),
                 }
             }
             pub fn id(&self) -> $id {
@@ -221,6 +232,9 @@ macro_rules! source {
             }
             pub fn prepare(&self, ctx: $ctx<'_>) -> PrepareResult {
                 (self.prepare)(ctx)
+            }
+            fn same_definition(&self, other: &Self) -> bool {
+                self.id == other.id && self.desc == other.desc
             }
         }
     };
@@ -277,6 +291,81 @@ macro_rules! pool {
     };
 }
 impl ResourcePool {
+    pub fn share_mesh(&mut self, source: &MeshSource) -> Result<MeshId, DuplicateResource> {
+        if let Some(existing) = self.mesh(source.id()) {
+            if !source.same_definition(existing) {
+                return Err(DuplicateResource(source.id().get()));
+            }
+            return Ok(source.id());
+        }
+        self.insert_mesh(source.clone())
+    }
+    pub fn share_texture(
+        &mut self,
+        source: &TextureSource,
+    ) -> Result<TextureId, DuplicateResource> {
+        if let Some(existing) = self.texture(source.id()) {
+            if !source.same_definition(existing) {
+                return Err(DuplicateResource(source.id().get()));
+            }
+            return Ok(source.id());
+        }
+        self.insert_texture(source.clone())
+    }
+    pub fn share_mask(&mut self, source: &MaskSource) -> Result<MaskId, DuplicateResource> {
+        if let Some(existing) = self.mask(source.id()) {
+            if !source.same_definition(existing) {
+                return Err(DuplicateResource(source.id().get()));
+            }
+            return Ok(source.id());
+        }
+        self.insert_mask(source.clone())
+    }
+    /// Merge references contributed by independently cached scenes under the
+    /// immutable-content-ID contract. Descriptor conflicts fail; closure semantic
+    /// equivalence remains the producer's responsibility, not pointer identity.
+    /// Public insert_* still rejects duplicates within one pool. This explicit
+    /// composition operation materializes one definition per ID. No source
+    /// clones/allocations occur on an existing entry.
+    /// A closure uses one Arc allocation (replacing Box), not Arc<Source> + Box.
+    pub fn import(&mut self, other: &Self) -> Result<(), DuplicateResource> {
+        macro_rules! check {
+            ($map:ident) => {
+                for (id, source) in &other.$map {
+                    if self
+                        .$map
+                        .get(id)
+                        .is_some_and(|existing| !source.same_definition(existing))
+                    {
+                        return Err(DuplicateResource(id.get()));
+                    }
+                }
+            };
+        }
+        check!(meshes);
+        check!(textures);
+        check!(masks);
+        macro_rules! merge {
+            ($map:ident) => {
+                for (id, source) in &other.$map {
+                    self.$map.entry(*id).or_insert_with(|| source.clone());
+                }
+            };
+        }
+        merge!(meshes);
+        merge!(textures);
+        merge!(masks);
+        Ok(())
+    }
+    pub fn mesh_ids(&self) -> impl Iterator<Item = MeshId> + '_ {
+        self.meshes.keys().copied()
+    }
+    pub fn texture_ids(&self) -> impl Iterator<Item = TextureId> + '_ {
+        self.textures.keys().copied()
+    }
+    pub fn mask_ids(&self) -> impl Iterator<Item = MaskId> + '_ {
+        self.masks.keys().copied()
+    }
     pool!(insert_mesh, mesh, retain_meshes, meshes, MeshId, MeshSource);
     pool!(
         insert_texture,

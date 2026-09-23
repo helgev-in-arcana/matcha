@@ -142,3 +142,67 @@ pub fn fractal(size: [u32; 2]) -> MaskSource {
     desc.usages = wgpu::TextureUsages::STORAGE_BINDING;
     MaskSource::new(desc, move |mut c| compute_image(&mut c.gpu, &c.target, 2))
 }
+
+/// A deforming strip with many GPU-generated triangles. Phase is immutable
+/// source content, so another animation sample is another MeshId.
+pub fn ribbon(segments: u32, phase: f32) -> MeshSource {
+    use wgpu::util::DeviceExt;
+    assert!(segments > 0);
+    let mut desc = MeshDescriptor::triangles(segments.checked_mul(6).expect("mesh count"), 0);
+    desc.usages = wgpu::BufferUsages::STORAGE;
+    desc.bounds = Some([[0., 0., 0.], [1., 1., 0.]]);
+    desc.non_overlapping = true;
+    MeshSource::new(desc, move |c| {
+        let shader=c.gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {label:Some("GPU deforming strip"),source:wgpu::ShaderSource::Wgsl(r#"
+struct Params {count:u32,phase:f32,pad:vec2<u32>};
+@group(0) @binding(0) var<storage,read_write> vertices:array<f32>;
+@group(0) @binding(1) var<uniform> p:Params;
+fn put(i:u32,pos:vec2<f32>,uv:vec2<f32>) {let j=i*5u;vertices[j]=pos.x;vertices[j+1u]=pos.y;vertices[j+2u]=0.;vertices[j+3u]=uv.x;vertices[j+4u]=uv.y;}
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id:vec3<u32>) {
+    let i=id.x;if i>=p.count {return;}
+    let a=f32(i)/f32(p.count);let b=f32(i+1u)/f32(p.count);
+    let ya=0.5+0.2*sin(a*12.56637+p.phase);let yb=0.5+0.2*sin(b*12.56637+p.phase);let d=0.045;let n=i*6u;
+    put(n,vec2<f32>(a,ya-d),vec2<f32>(a,0.));put(n+1u,vec2<f32>(a,ya+d),vec2<f32>(a,1.));put(n+2u,vec2<f32>(b,yb+d),vec2<f32>(b,1.));
+    put(n+3u,vec2<f32>(a,ya-d),vec2<f32>(a,0.));put(n+4u,vec2<f32>(b,yb+d),vec2<f32>(b,1.));put(n+5u,vec2<f32>(b,yb-d),vec2<f32>(b,0.));
+}
+"#.into())});
+        let pipeline = c
+            .gpu
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: None,
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let params = c
+            .gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&[segments, phase.to_bits(), 0, 0]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let group = c.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: c.target.vertices.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: params.as_entire_binding(),
+                },
+            ],
+        });
+        let mut pass = c.gpu.encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(segments.div_ceil(64), 1, 1);
+        Ok(())
+    })
+}

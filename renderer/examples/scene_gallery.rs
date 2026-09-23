@@ -2,6 +2,10 @@
 //! All images come from the public Scene API on a real GPU, not CPU mockups.
 #[path = "support/effects.rs"]
 mod effects;
+#[path = "support/private_3d.rs"]
+mod private_3d;
+#[path = "support/sources.rs"]
+mod sources;
 use gpu_utils::gpu::{Gpu, GpuDescriptor};
 use render_interface::*;
 use renderer::{SceneRenderer, SceneTarget};
@@ -64,7 +68,7 @@ fn main() {
     });
     let view = target.create_view(&Default::default());
     let mut report = format!("Adapter: {:?}\n", gpu.adapter().get_info());
-    let mut sheet = image::RgbaImage::new(256 * 3, 256 * 2);
+    let mut sheet = image::RgbaImage::new(256 * 4, 256 * 2);
     for (index, name) in [
         "mesh",
         "nested-mask-popup",
@@ -72,6 +76,8 @@ fn main() {
         "refraction",
         "fractal-mask",
         "final-processing",
+        "deforming-ribbon",
+        "private-3d-depth",
     ]
     .iter()
     .enumerate()
@@ -79,7 +85,7 @@ fn main() {
         let mut scene = Scene::default();
         let quad = scene
             .resources
-            .insert_mesh(matcha_paint::unit_quad())
+            .insert_mesh(sources::unit_quad())
             .expect("quad");
         let mut bytes = Vec::new();
         for y in 0..256 {
@@ -92,12 +98,14 @@ fn main() {
                 });
             }
         }
-        let checker = matcha_paint::Bitmap::rgba([256, 256], bytes)
-            .expect("checker")
-            .register_texture(&mut scene.resources);
-        let white = matcha_paint::Bitmap::rgba([1, 1], vec![245, 160, 42, 255])
-            .expect("solid")
-            .register_texture(&mut scene.resources);
+        let checker = scene
+            .resources
+            .insert_texture(sources::rgba([256, 256], bytes))
+            .expect("checker");
+        let white = scene
+            .resources
+            .insert_texture(sources::rgba([1, 1], vec![245, 160, 42, 255]))
+            .expect("solid");
         scene.phases.push(Phase {
             objects: vec![Object::new(quad, checker, rect(0., 0., 256., 256.))],
         });
@@ -114,9 +122,10 @@ fn main() {
                 ));
             }
             1 => {
-                let mask = matcha_paint::Bitmap::coverage([1, 1], vec![190])
-                    .expect("coverage")
-                    .register_mask(&mut scene.resources);
+                let mask = scene
+                    .resources
+                    .insert_mask(sources::coverage([1, 1], vec![190]))
+                    .expect("coverage");
                 scene.pixel_masks = vec![
                     PixelMask {
                         mesh: quad,
@@ -173,6 +182,24 @@ fn main() {
                     });
                 }
             }
+            6 => {
+                let mesh = scene
+                    .resources
+                    .insert_mesh(effects::ribbon(256, 0.6))
+                    .expect("GPU ribbon");
+                scene.phases[0]
+                    .objects
+                    .push(Object::new(mesh, white, rect(0., 0., 256., 256.)));
+            }
+            7 => {
+                let texture = scene
+                    .resources
+                    .insert_texture(private_3d::cube([256, 256], 0.4))
+                    .expect("private 3D render");
+                scene.phases[0]
+                    .objects
+                    .push(Object::new(quad, texture, rect(0., 0., 256., 256.)));
+            }
             _ => unreachable!(),
         }
         renderer
@@ -193,8 +220,8 @@ fn main() {
         image::imageops::replace(
             &mut sheet,
             &tile,
-            ((index % 3) * 256) as i64,
-            ((index / 3) * 256) as i64,
+            ((index % 4) * 256) as i64,
+            ((index / 4) * 256) as i64,
         );
         report.push_str(&format!("{name}: {:?}\n", renderer.stats()));
     }

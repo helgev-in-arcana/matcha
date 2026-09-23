@@ -16,8 +16,8 @@
 //! `invalidate_on_layout_change` invalidates *every* `RenderItem` on any
 //! `LayoutOutput` change, including a pure reposition with unchanged size;
 //! without this cache, any reflow near an `Image` would force a full
-//! re-decode. The cached result is an immutable CPU bitmap; SceneBuilder
-//! registers a lazy upload source and the renderer owns its GPU lifetime.
+//! re-decode. The cached result is a native TextureSource owning decoded pixels; it
+//! records a lazy upload and the renderer owns its GPU lifetime.
 //! Fitting before upload also avoids retaining unnecessarily large textures.
 //!
 //! Object-fit: v1 supports exactly `contain` — this is
@@ -48,10 +48,10 @@ use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, resource::Resource,
     world::EntityWorldMut,
 };
-use matcha_paint::Bitmap;
 use nalgebra::{Matrix4, Vector3};
 use parking_lot::Mutex;
-use matcha_paint::RenderNode;
+use render_interface::Scene;
+use render_interface::{TextureDescriptor, TextureSource, upload_texture};
 
 use matcha_ecs::{
     components::{
@@ -62,8 +62,8 @@ use matcha_ecs::{
     view::Widget,
 };
 
-use crate::sizing::Sizing;
 use crate::sizing::RectGeometry;
+use crate::sizing::Sizing;
 
 /// Where an `Image`'s bytes come from. Identity (not content) is what
 /// matters for change-detection and cache keying — see `PartialEq`/
@@ -172,11 +172,30 @@ impl ObjectFit {
 /// `FontCtx`'s glyph stencil cache — fine for v1, revisit only if a real app
 /// displays many distinct large images over a long session.
 #[derive(Resource, Clone)]
-struct ImageCtx(Arc<Mutex<HashMap<ImageCacheKey, (Bitmap, [f32; 2]), fxhash::FxBuildHasher>>>);
+struct ImageCtx(Arc<Mutex<HashMap<ImageCacheKey, CachedImage, fxhash::FxBuildHasher>>>);
+
+#[derive(Clone)]
+struct CachedImage {
+    value: (TextureSource, [f32; 2]),
+    // Keep address identity tied to its allocation and remove entries whose
+    // input owner died. A naked (ptr,len) cache key can otherwise identify an
+    // unrelated later image when the allocator reuses that address.
+    owner: Option<std::sync::Weak<[u8]>>,
+}
 
 impl ImageCtx {
     fn new() -> Self {
         Self(Arc::new(Mutex::new(HashMap::default())))
+    }
+    fn lookup(&self, key: &ImageCacheKey) -> Option<(TextureSource, [f32; 2])> {
+        let mut cache = self.0.lock();
+        cache.retain(|_, entry| {
+            entry
+                .owner
+                .as_ref()
+                .is_none_or(|owner| owner.strong_count() > 0)
+        });
+        cache.get(key).map(|entry| entry.value.clone())
     }
 }
 
@@ -206,15 +225,15 @@ fn decode(source: &ImageSource) -> Option<image::DynamicImage> {
 fn image_render_item(image_ctx: ImageCtx, source: ImageSource, fit: ObjectFit) -> RenderItem {
     RenderItem::new(move |ctx: &RenderCtx| {
         let [box_w, box_h] = ctx.size;
-        let mut node = RenderNode::new();
+        let mut node = Scene::default();
         if box_w <= 0.0 || box_h <= 0.0 {
             return node;
         }
         let target = [box_w.ceil() as u32, box_h.ceil() as u32];
         let key = ImageCacheKey::new(&source, target, fit);
 
-        if let Some(cached) = image_ctx.0.lock().get(&key) {
-            return compose(node, cached, box_w, box_h);
+        if let Some(cached) = image_ctx.lookup(&key) {
+            return compose(node, &cached, box_w, box_h);
         }
 
         let Some(decoded) = decode(&source) else {
@@ -233,17 +252,62 @@ fn image_render_item(image_ctx: ImageCtx, source: ImageSource, fit: ObjectFit) -
             let alpha = pixel[3] as f32 / 255.0;
             for channel in &mut pixel[..3] {
                 let encoded = *channel as f32 / 255.0;
-                let linear = if encoded <= 0.04045 { encoded / 12.92 } else { ((encoded + 0.055) / 1.055).powf(2.4) };
+                let linear = if encoded <= 0.04045 {
+                    encoded / 12.92
+                } else {
+                    ((encoded + 0.055) / 1.055).powf(2.4)
+                };
                 *channel = crate::color::linear_to_srgb_u8(linear * alpha);
             }
         }
-        let Some(region) = Bitmap::rgba([w, h], bytes).ok() else { return node; };
+        let region = TextureSource::new(
+            TextureDescriptor::new([w, h], wgpu::TextureFormat::Rgba8UnormSrgb),
+            move |mut c| upload_texture(&mut c.gpu, &c.target, &bytes),
+        );
 
         let entry = (region, [w as f32, h as f32]);
-        image_ctx.0.lock().insert(key, entry.clone());
+        let owner = match &source {
+            ImageSource::Bytes(bytes) => Some(Arc::downgrade(bytes)),
+            ImageSource::Path(_) => None,
+        };
+        image_ctx.0.lock().insert(
+            key,
+            CachedImage {
+                value: entry.clone(),
+                owner,
+            },
+        );
         node = compose(node, &entry, box_w, box_h);
         node
     })
+}
+
+#[cfg(test)]
+mod source_identity_tests {
+    use super::*;
+    #[test]
+    fn byte_address_cache_expires_with_its_input_owner() {
+        let cache = ImageCtx::new();
+        let bytes: Arc<[u8]> = Arc::from([1u8, 2, 3, 4]);
+        let source = ImageSource::Bytes(bytes.clone());
+        let key = ImageCacheKey::new(&source, [1, 1], ObjectFit::Contain);
+        let texture = TextureSource::new(
+            TextureDescriptor::new([1, 1], wgpu::TextureFormat::Rgba8Unorm),
+            |_| Ok(()),
+        );
+        cache.0.lock().insert(
+            key.clone(),
+            CachedImage {
+                value: (texture, [1., 1.]),
+                owner: Some(Arc::downgrade(&bytes)),
+            },
+        );
+        assert!(cache.lookup(&key).is_some());
+        drop(source);
+        drop(bytes);
+        assert!(cache.lookup(&key).is_none());
+        assert!(cache.0.lock().is_empty());
+    }
 }
 
 /// Centre `(region, fitted_size)` within its box.
@@ -251,14 +315,18 @@ fn image_render_item(image_ctx: ImageCtx, source: ImageSource, fit: ObjectFit) -
 /// This is what produces `contain`'s letterbox/pillarbox bars. For `fill` and
 /// `cover` the fitted size already equals the box, so the offset is zero and
 /// this costs nothing; for `scale-down` of a small image it centres it.
-fn compose(mut node: RenderNode, (region, fitted_size): &(Bitmap, [f32; 2]), box_w: f32, box_h: f32) -> RenderNode {
+fn compose(
+    mut node: Scene,
+    (region, fitted_size): &(TextureSource, [f32; 2]),
+    box_w: f32,
+    box_h: f32,
+) -> Scene {
     let offset = Matrix4::new_translation(&Vector3::new(
         ((box_w - fitted_size[0]) / 2.0).max(0.0),
         ((box_h - fitted_size[1]) / 2.0).max(0.0),
         0.0,
     ));
-    let image_node = RenderNode::new().with_texture(region.clone(), *fitted_size, Matrix4::identity());
-    node.push_child(image_node, offset);
+    matcha_ecs::scene::push_quad(&mut node, region, *fitted_size, offset, None);
     node
 }
 
@@ -336,7 +404,8 @@ impl Image {
     }
 
     fn rebuild_render_item(&self, entity: &mut EntityWorldMut) -> RenderItem {
-        let image_ctx = entity.world_scope(|world| world.get_resource_or_insert_with(ImageCtx::new).clone());
+        let image_ctx =
+            entity.world_scope(|world| world.get_resource_or_insert_with(ImageCtx::new).clone());
         image_render_item(image_ctx, self.source.clone(), self.fit)
     }
 }

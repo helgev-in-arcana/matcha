@@ -39,7 +39,7 @@ fn children(world: &World, e: Entity) -> Vec<Entity> {
         .unwrap_or_default()
 }
 
-fn cache_of(world: &World, e: Entity) -> Arc<parking_lot::Mutex<Option<Arc<matcha_paint::RenderNode>>>> {
+fn cache_of(world: &World, e: Entity) -> Arc<parking_lot::Mutex<Option<render_interface::Scene>>> {
     world
         .get::<RenderItem>(e)
         .expect("entity draws")

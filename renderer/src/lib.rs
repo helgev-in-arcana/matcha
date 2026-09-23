@@ -4,6 +4,7 @@ pub mod pipeline_cache;
 pub mod render_node;
 pub use render_node::RenderNode;
 pub mod scene_renderer;
+mod scene_resources;
 pub use scene_renderer::{SceneRenderer, SceneTarget};
 
 pub mod debug_renderer;

@@ -1,0 +1,62 @@
+Native rendering interface validation, 2026-09-23 JST
+Branch: codex/render-interface; previous implementation: 0088c26
+All Cargo operations offline, -j 2.
+Final workspace: 457 passed, 0 failed, 8 existing ignored. shared-buffer excluded by repository convention.
+All workspace examples built.
+
+Vulkan contract/stress (negative diagnostics intentionally exercise invalid producers):
+Atlas stress: small=PlacementStats { texture_pages: 7, texture_bytes: 46468, mesh_pages: 16, mesh_bytes: 8192 }; relocation=RelocationStats { textures: 65, meshes: 64, copied_bytes: 52780, placement: PlacementStats { texture_pages: 2, texture_bytes: 196608, mesh_pages: 1, mesh_bytes: 8192 } }; refill=RenderStats { prepared: 64, cache_hits: 64, draw_calls: 64, draw_batches: 2, mask_passes: 0, snapshot_copies: 0, cache_bytes: 11088, evicted: 0, placement: PlacementStats { texture_pages: 1, texture_bytes: 65536, mesh_pages: 1, mesh_bytes: 8192 }, bind_groups: 2, output_texture_allocations: 1, output_buffer_allocations: 1 }
+Design diagnostic: callback Ok/CPU render Ok did not imply GPU validation success; wgpu error scope reported the invalid copy.
+Design diagnostic: pixel art is expressible with texel geometry, but efficient nearest-vs-linear sampling needs an explicit drawing-semantic decision.
+Design diagnostic: reusing a background-dependent ID produced warm/cold disagreement; fresh ID restored the invariant.
+GPU animated mesh: 1536 generated vertices/frame, clipping and relocation exact; RelocationStats { textures: 2, meshes: 4, copied_bytes: 92285, placement: PlacementStats { texture_pages: 2, texture_bytes: 5120, mesh_pages: 1, mesh_bytes: 131072 } }
+Legacy baseline: max channel delta 0, changed pixels 0/4096
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.24s
+
+DX12 contract/stress:
+Atlas stress: small=PlacementStats { texture_pages: 7, texture_bytes: 46468, mesh_pages: 16, mesh_bytes: 8192 }; relocation=RelocationStats { textures: 65, meshes: 64, copied_bytes: 52780, placement: PlacementStats { texture_pages: 2, texture_bytes: 196608, mesh_pages: 1, mesh_bytes: 8192 } }; refill=RenderStats { prepared: 64, cache_hits: 64, draw_calls: 64, draw_batches: 2, mask_passes: 0, snapshot_copies: 0, cache_bytes: 11088, evicted: 0, placement: PlacementStats { texture_pages: 1, texture_bytes: 65536, mesh_pages: 1, mesh_bytes: 8192 }, bind_groups: 2, output_texture_allocations: 1, output_buffer_allocations: 1 }
+Design diagnostic: callback Ok/CPU render Ok did not imply GPU validation success; wgpu error scope reported the invalid copy.
+Design diagnostic: pixel art is expressible with texel geometry, but efficient nearest-vs-linear sampling needs an explicit drawing-semantic decision.
+Design diagnostic: reusing a background-dependent ID produced warm/cold disagreement; fresh ID restored the invariant.
+GPU animated mesh: 1536 generated vertices/frame, clipping and relocation exact; RelocationStats { textures: 2, meshes: 4, copied_bytes: 92285, placement: PlacementStats { texture_pages: 2, texture_bytes: 5120, mesh_pages: 1, mesh_bytes: 131072 } }
+Legacy baseline: max channel delta 0, changed pixels 0/4096
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.65s
+
+Native widget/generator example: Vulkan
+GPU shape 0: max byte delta 0
+GPU shape 1: max byte delta 0
+GPU shape 2: max byte delta 0
+GPU shape 3: max byte delta 0
+GPU shape 4: max byte delta 0
+Widget frame 0: 30.4803ms, RenderStats { prepared: 25, cache_hits: 163, draw_calls: 50, draw_batches: 3, mask_passes: 0, snapshot_copies: 0, cache_bytes: 308727, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 9437184, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 3, output_texture_allocations: 15, output_buffer_allocations: 1 }
+Widget frame 1: 5.6037ms, RenderStats { prepared: 3, cache_hits: 185, draw_calls: 50, draw_batches: 3, mask_passes: 0, snapshot_copies: 0, cache_bytes: 539127, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 9437184, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 3, output_texture_allocations: 1, output_buffer_allocations: 0 }
+Widget frame 2: 4.6324ms, RenderStats { prepared: 3, cache_hits: 185, draw_calls: 50, draw_batches: 3, mask_passes: 0, snapshot_copies: 0, cache_bytes: 769527, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 9437184, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 3, output_texture_allocations: 1, output_buffer_allocations: 0 }
+Translated backdrop oracle passed; relocation without generator calls: RelocationStats { textures: 30, meshes: 1, copied_bytes: 769527, placement: PlacementStats { texture_pages: 7, texture_bytes: 1638400, mesh_pages: 1, mesh_bytes: 4096 } }
+20 failed CPU compositions stayed bounded; repaired frame reproduced the original pixels.
+
+Native widget/generator example: DX12
+GPU shape 0: max byte delta 0
+GPU shape 1: max byte delta 0
+GPU shape 2: max byte delta 0
+GPU shape 3: max byte delta 0
+GPU shape 4: max byte delta 0
+Widget frame 0: 36.2913ms, RenderStats { prepared: 25, cache_hits: 163, draw_calls: 50, draw_batches: 3, mask_passes: 0, snapshot_copies: 0, cache_bytes: 308727, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 9437184, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 3, output_texture_allocations: 15, output_buffer_allocations: 1 }
+Widget frame 1: 4.8103ms, RenderStats { prepared: 3, cache_hits: 185, draw_calls: 50, draw_batches: 3, mask_passes: 0, snapshot_copies: 0, cache_bytes: 539127, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 9437184, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 3, output_texture_allocations: 1, output_buffer_allocations: 0 }
+Widget frame 2: 4.6292ms, RenderStats { prepared: 3, cache_hits: 185, draw_calls: 50, draw_batches: 3, mask_passes: 0, snapshot_copies: 0, cache_bytes: 769527, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 9437184, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 3, output_texture_allocations: 1, output_buffer_allocations: 0 }
+Translated backdrop oracle passed; relocation without generator calls: RelocationStats { textures: 30, meshes: 1, copied_bytes: 769527, placement: PlacementStats { texture_pages: 7, texture_bytes: 1638400, mesh_pages: 1, mesh_bytes: 4096 } }
+20 failed CPU compositions stayed bounded; repaired frame reproduced the original pixels.
+
+Final optimized showcase (wall time, not GPU timestamp queries):
+GUI frame 0: 247.4606ms; assembly=201.4755ms, encode/submit=39.4989ms, wait=6.4862ms; RenderStats { prepared: 407, cache_hits: 12215, draw_calls: 1038, draw_batches: 7, mask_passes: 3, snapshot_copies: 0, cache_bytes: 612682, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 6291456, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 8, output_texture_allocations: 119, output_buffer_allocations: 1 }
+GUI frame 1: 4.1064ms; assembly=132.4µs, encode/submit=2.1973ms, wait=1.7767ms; RenderStats { prepared: 0, cache_hits: 12622, draw_calls: 1038, draw_batches: 7, mask_passes: 3, snapshot_copies: 0, cache_bytes: 612682, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 6291456, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 8, output_texture_allocations: 0, output_buffer_allocations: 0 }
+GUI frame 2: 3.0288ms; assembly=126.1µs, encode/submit=1.7132ms, wait=1.1895ms; RenderStats { prepared: 0, cache_hits: 12622, draw_calls: 1038, draw_batches: 7, mask_passes: 3, snapshot_copies: 0, cache_bytes: 612682, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 6291456, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 8, output_texture_allocations: 0, output_buffer_allocations: 0 }
+GUI frame 3: 3.0339ms; assembly=125.5µs, encode/submit=1.6645ms, wait=1.2438ms; RenderStats { prepared: 0, cache_hits: 12622, draw_calls: 1038, draw_batches: 7, mask_passes: 3, snapshot_copies: 0, cache_bytes: 612682, evicted: 0, placement: PlacementStats { texture_pages: 3, texture_bytes: 6291456, mesh_pages: 1, mesh_bytes: 262144 }, bind_groups: 8, output_texture_allocations: 0, output_buffer_allocations: 0 }
+Saved target/showcase-native-release.png; adapter AdapterInfo { name: "AMD Radeon RX 5700 XT", vendor: 4098, device: 29471, device_type: DiscreteGpu, device_pci_bus_id: "", driver: "AMD proprietary driver", driver_info: "26.8.1 (AMD proprietary shader compiler)", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 64, transient_saves_memory: false }; 142 UI items
+
+Pixel comparison to previous committed showcase:
+1000x900: changed 0/900000 pixels, maximum channel delta 0, mean channel delta 0.000000
+
+No browser/wasm, continuous resize, real IME or device-loss recovery claim.
+Placement byte counts are page/buffer capacity estimates, not driver VRAM allocation measurements.
+
+Final native release window smoke: alive for 10 seconds; test-owned process stopped; stderr empty.

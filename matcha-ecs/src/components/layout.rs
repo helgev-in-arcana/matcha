@@ -1,7 +1,7 @@
 use bevy_ecs::component::Component;
 
 /// Absolute placement + scale of an entity in window (UI) space, applied by the
-/// render stage as the transform for the entity's `RenderNode`.
+/// render stage as placement for the entity's native Scene.
 #[derive(Component, Clone, Copy, PartialEq)]
 pub struct GlobalTransform {
     pub affine: nalgebra::Matrix4<f32>,
@@ -29,6 +29,11 @@ impl Default for GlobalTransform {
 /// does not paint outside.
 #[derive(Component, Clone, Copy)]
 pub struct Clip;
+
+/// Start a new clipping scope, e.g. for a popup placed above a scroll container.
+/// Affects both extraction and picking. Does not change placement or ZIndex.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct ClipReset;
 
 /// Marker: this entity and its subtree are absent — CSS `display: none`.
 ///

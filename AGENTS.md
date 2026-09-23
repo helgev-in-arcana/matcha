@@ -32,12 +32,11 @@ Two stacks live side by side:
 | Crate | Role |
 |---|---|
 | `render-interface` | **Upstream rendering contract.** Borrowed `Scene`, typed content IDs, private resource definitions, GPU preparation contexts. Depends on no Matcha implementation crate. |
-| `matcha-paint` | **CPU paint assembly.** Immutable bitmaps and UI-local paint trees resolve into the flat rendering contract. No dependency on `renderer` or `gpu-utils`. |
 | `matcha-ecs` | **Framework core.** `UiEcs` driver, `Widget`/`Scope`/reconcile, layout protocol, picking, focus, keyboard/IME routing, clipping, render dispatch. Depends on no widget crate and no text engine. |
 | `matcha-ecs-widgets` | **Widget implementations** and everything policy-shaped: containers, box decoration, sizing/flex, text widgets, scroll view, animation and interaction plugins. One-way dependency on `matcha-ecs`. |
 | `matcha-web` | The wasm entry point — the whole page as one `<canvas>`. A **binary** crate (Trunk builds `--bin`), also runnable natively. Owns the embedded font. |
 | `matcha-window` | Windowing abstraction over winit (default) and baseview, plus a `headless` backend for tests. Owns `WindowSurface`, input/IME event types, clipboard backends. |
-| `renderer` | `SceneRenderer` executes the current contract and owns GPU resources. `CoreRenderer` and the atlas/tree API remain for the legacy stack and regression comparisons. |
+| `renderer` | `SceneRenderer` owns resident texture pages, mesh arenas and composition. Generators record native wgpu work into leased logical outputs. `CoreRenderer` remains for the legacy stack and regression comparisons. |
 | `gpu-utils` | `Gpu` context and `TextureAtlas`. |
 | `glyph-cache` | Generic fixed-capacity LRU with per-batch eviction protection. wgpu-free. |
 | `matcha`, `matcha-tree`, `matcha-tree-widgets`, `shared-buffer`, `utils` | Legacy tree stack and its support crates. Reference only. |
@@ -54,7 +53,7 @@ the code; follow its pointers into module `//!` docs for detail.
 | [.agent/layout.md](.agent/layout.md) | Working on `Layout` impls, `Constraints`/`Measured`, sizing, flex distribution, clipping or scrolling |
 | [.agent/input.md](.agent/input.md) | Working on picking, focus, keyboard/IME, pointer/hover/drag, tab order or the clipboard |
 | [.agent/text.md](.agent/text.md) | Working on `Text`/`RichText`/`TextBox`, glyph rasterisation, or fonts |
-| [.agent/rendering.md](.agent/rendering.md) | Touching `renderer/`, WGSL, atlases, mask chains, or upgrading wgpu |
+| [.agent/rendering.md](.agent/rendering.md) | Touching `render-interface`, `renderer/`, native widget GPU generation, WGSL, atlases or mask chains |
 | [.agent/web.md](.agent/web.md) | Building or debugging the wasm/WebGPU target, or touching anything with a `wasm32` cfg |
 | [.agent/testing.md](.agent/testing.md) | Writing or running tests, or verifying something visual |
 | [.agent/gaps.md](.agent/gaps.md) | Asking "is X supported / why isn't X done / what's next" |
@@ -80,6 +79,8 @@ The wasm command applies only to checkouts containing `matcha-web`; it is absent
 main-based branch. Current renderer proofs: `cargo test -p renderer --test scene_contract -j 2`,
 `cargo run -p renderer --example scene_gallery -- target`, and
 `cargo run -p matcha-ecs --example showcase -- --offscreen target/showcase-scene.png`.
+Native widget/interface stress: `cargo run -p matcha-ecs --example interface_stress -- target`.
+Set `MATCHA_TEST_BACKEND=dx12` for the contract tests and interface stress to exercise DirectX 12.
 
 Machine- and repo-specific quirks that will otherwise cost a debugging cycle:
 
@@ -93,8 +94,8 @@ Machine- and repo-specific quirks that will otherwise cost a debugging cycle:
   leaves the staging directory broken. Recovery: stop trunk, delete `dist/`, restart.
 - `cargo test --workspace` occasionally flakes one `renderer` GPU test when several test binaries
   grab the adapter at once. It passes in isolation and on re-run.
-- Examples: `matcha-ecs/examples/showcase.rs` is the single demo (it replaced ten per-feature ones).
-  Run it to check anything visual.
+- `matcha-ecs/examples/showcase.rs` is the interactive demo. `interface_stress` and the renderer's
+  examples are reproducible offscreen proofs. See `.agent/testing.md` for their assertions.
 
 ## Fails silently — check these first
 
@@ -116,7 +117,7 @@ Symptoms with no error message, no log line, and no compile failure:
 ## Coordinate System
 
 UI logic is **Y-down**, origin top-left, unit = **UI pixels** (physical pixels ÷ `UiScale`).
-`CoreRenderer` converts UI space → NDC. **Never flip the Y axis inside a widget or a layout.**
+`SceneRenderer` converts UI space → NDC. **Never flip the Y axis inside a widget or a layout.**
 
 ## Coding Guidelines
 

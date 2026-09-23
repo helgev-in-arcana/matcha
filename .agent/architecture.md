@@ -1,6 +1,6 @@
 # Architecture — `matcha-ecs` core
 
-The framework core. Rendering contracts live upstream in render-interface; CPU paint trees live in matcha-paint. Read this before touching anything in `matcha-ecs/src/`, and before writing a
+The framework core. Rendering contracts live upstream in render-interface; widgets own native local Scenes. Read this before touching anything in `matcha-ecs/src/`, and before writing a
 widget.
 
 ## The one dependency rule
@@ -23,6 +23,7 @@ Every one of these has real `//!` docs. Read the module, not a summary of it.
 | `ui_ecs.rs` | `UiEcs<M, Msg, F, R>` — the `Application` driver: world, schedules, window/surface lifecycle, event entry points, the builder (`with_*`) surface |
 | `view.rs` | `Widget` trait, `Scope`, reconciliation. **Do not change these semantics casually** |
 | `layout.rs` | `Constraints`, `Measured`, `Layout`, `LayoutDispatch`, `LayoutCtx`, `layout_root`/`run_layout` |
+| `scene.rs` | Flat Scene composition, shared source imports, mask validation/rebasing |
 | `render.rs` | Extract → `RenderSnapshot` → `RenderDriver` (`ThreadDriver` default, `InlineDriver` fallback and web) |
 | `clip.rs` | `Clip` markers → the renderer's clip arena. GPU-free by design |
 | `traversal.rs` | **The one order** painting and picking both walk, plus `ZIndex` stacking |
@@ -56,7 +57,7 @@ update, focus sync). Apps and widget crates register via `UiEcs::with_pre_layout
 is forbidden.
 
 Then: acquire the surface texture on the main thread, extract, hand the snapshot to the
-`RenderDriver`, which builds CPU paint nodes, assembles a borrowed Scene, records GPU work and presents (on a worker thread by default).
+`RenderDriver`, which builds or updates native widget Scenes, assembles a borrowed window Scene, records GPU work and presents (on a worker thread by default).
 
 ## Event → pixels
 
@@ -94,7 +95,7 @@ Rules that are easy to get wrong:
 - **`bundle()` returns one fixed type.** `Option<T>` is not a `Bundle`. Anything conditional
   (a marker like `Clip`, a tween, a component that depends on a resource) is inserted in
   `after_spawn`/`patch` instead.
-- **`patch` should `set_if_neq`** so a no-op re-declare does not invalidate a cached render node.
+- **`patch` should `set_if_neq`** so a no-op re-declare does not invalidate a cached Scene.
   Exception: fn-pointer fields, where comparison is meaningless — assign them outright.
 - **Widgets are declarative.** The app passes current state every `view()` call and the widget holds
   none. `TextBox` is the single, necessary exception (see [text.md](text.md)).
@@ -138,7 +139,21 @@ wanting to, the answer is route 1 or 2.
 
 ## Rendering boundary
 
-RenderCtx has no GPU fields. Bitmap caches are CPU-owned; GPU eviction never invalidates them.
-RenderNode::custom contributes arbitrary resource generators, Objects and Phases through the same
-RenderItem path. GuiRenderer::render_extracted is shared by window presentation and offscreen proof.
-See rendering.md and the module docs in render-interface and matcha-paint.
+RenderItem::new builds a retained native Scene until invalidated. RenderItem::dynamic mutates its
+retained Scene on each redraw, permitting fresh IDs for backdrop/time-dependent content without
+reallocating all drawing arrays. The cache owns Scene directly inside its mutex; no Arc<Scene>
+wrapper or paint tree. Snapshot extraction shares only the cache slot and builder.
+
+RenderCtx has CPU layout/interaction state plus resolved transform and viewport_size. It has no
+Device/Queue fields; source preparation receives native wgpu recording contexts. Providers may
+cache private GPU programs. Final texture/mesh placement remains renderer-owned.
+
+GuiRenderer::assemble validates/rebases local mask indices, applies placement/opacity and imports
+source definitions, including unused retention candidates. Dead definitions are pruned on failed
+assemblies too. GuiRenderer::render_extracted adds the backend call; offscreen proofs use the same
+assembly path. The GuiRenderer mutex serializes shared-window assembly/recording.
+
+ClipReset in components/layout.rs resets the inherited clipping chain in clip::descend. Both
+picking and extraction call that function. It does not change placement or ZIndex. Arbitrary Scene
+phases can change paint order beyond the default UI traversal; applications must align picking
+policy when exploiting that freedom.

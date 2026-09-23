@@ -41,14 +41,19 @@ pub fn capture(view: impl FnOnce(&mut Scope), path: &str, size: [u32; 2]) {
     });
     let target_view = target.create_view(&Default::default());
     let mut renderer = GuiRenderer::new(&device, &queue);
-    for i in 0..2 {
+    for i in 0..4 {
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let allocation = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let start = std::time::Instant::now();
         renderer
-            .render_extracted(
-                &frame.items,
-                &frame.clips,
+            .assemble(&frame.items, &frame.clips, size.map(|v| v as f32))
+            .expect("native Scene assembly");
+        let assembly_elapsed = start.elapsed();
+        let encode_start = std::time::Instant::now();
+        renderer
+            .backend
+            .render(
+                &renderer.scene,
                 renderer::SceneTarget {
                     view: &target_view,
                     viewport: size.map(|v| v as f32),
@@ -62,6 +67,8 @@ pub fn capture(view: impl FnOnce(&mut Scope), path: &str, size: [u32; 2]) {
                 },
             )
             .expect("production GUI renders");
+        let encode_elapsed = encode_start.elapsed();
+        let wait_start = std::time::Instant::now();
         device
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("GPU completion");
@@ -70,8 +77,9 @@ pub fn capture(view: impl FnOnce(&mut Scope), path: &str, size: [u32; 2]) {
         let error = futures::executor::block_on(validation.pop());
         assert!(error.is_none(), "GPU validation failed: {error:?}");
         println!(
-            "GUI frame {i}: {:?}; {:?}",
+            "GUI frame {i}: {:?}; assembly={assembly_elapsed:?}, encode/submit={encode_elapsed:?}, wait={:?}; {:?}",
             start.elapsed(),
+            wait_start.elapsed(),
             renderer.backend.stats()
         );
         if i == 1 {

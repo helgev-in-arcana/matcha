@@ -1,58 +1,83 @@
-# Rendering: the upstream Scene contract
+# Native rendering interface and GPU placement
 
-Current ECS rendering is defined by render-interface/src/lib.rs. Read its module docs first.
-The dependency direction is UI -> render-interface <- renderer. matcha-paint owns CPU-side
-assembly; matcha-ecs::render::GuiRenderer owns the reusable SceneBuilder and SceneRenderer.
-Widget builders receive CPU layout/interaction state, never atlas/device/queue handles.
+Read render-interface/src/lib.rs for the contract. matcha-paint has been removed. Current widgets
+emit native Scene values/updates with Object, PixelMask and Source definitions. No RenderNode or
+Bitmap adapter exists on the ECS path. The legacy renderer/tree stack remains unchanged.
 
-## Module map
+## Code map
 
-- render-interface/src/lib.rs: source/ID/phase/mask contracts, descriptors, GPU contexts, uploads.
-- matcha-paint/src/lib.rs: immutable CPU Bitmap, local RenderNode, persistent SceneBuilder.
-- renderer/src/scene_renderer.rs and .wgsl: GPU residency, preparation, composition, error rollback.
-- renderer/tests/scene_contract.rs: real GPU contract, effects, projective fast/fallback parity,
-  ten-level masks and unchanged legacy CoreRenderer pixel comparison.
-- renderer/examples/scene_gallery.rs: six reproducible GPU images.
-- matcha-ecs/examples/support/offscreen.rs: actual UI extraction/build/render proof.
+- matcha-ecs/src/components/render.rs: retained Scene builders and in-place dynamic Scene writers.
+- matcha-ecs/src/scene.rs: flat Scene embedding, source sharing, mask-index validation/rebasing.
+- matcha-ecs/src/render.rs: extract, assemble, borrow into backend, submit/present coordination.
+- matcha-ecs-widgets/src/shape_gpu.rs + .wgsl: native SDF/ring/three-box shadow generators.
+- renderer/src/scene_resources.rs: texture rectangle leases and shared mesh-buffer intervals.
+- renderer/src/scene_renderer.rs + .wgsl: preparation, packing, composition and GPU relocation.
+- renderer/tests/scene_contract.rs: positive contracts plus explicit negative design diagnostics.
+- matcha-ecs/examples/interface_stress.rs: actual widget/effect integration and CPU/GPU shape oracle.
 
-## Current facts
+## Ownership
 
-Scene is borrowed synchronously. CPU Source values live directly in private HashMaps. IDs are
-immutable-content identities. A complete pool is required even with warm GPU caches. Registration
-alone never invokes a generator. Callbacks record commands through an encoder; submit stays in the
-renderer. On callback error the command buffer is discarded and newly inserted cache entries are
-removed. Invalid raw GPU commands remain subject to wgpu's validation/error model.
+Scene and resource definitions are CPU-side application data. Source fields/maps stay private.
+Source cloning shares one Arc<Prepare> allocation, replacing Box<Prepare>; no Arc<Source> wrapper.
+Separate retained widget Scenes can share definitions. ResourcePool::import/share_* explicitly
+compose content IDs; public insert_* still rejects duplicate definitions in a single pool.
+Import checks descriptor compatibility, not closure pointer equality. Semantic equality remains
+part of the immutable-content-ID contract. Reconstructing an equivalent generator is legitimate.
 
-The vertex ABI is position Float32x3 + UV Float32x2, triangle lists, optional u32 indices. Y is down.
-Transforms may be projective; z is not used as a depth buffer. Colour is premultiplied linear RGBA;
-sRGB storage bytes encode premultiplied linear RGB. Object.opacity multiplies all four channels.
-Images now premultiply after sRGB decoding instead of uploading straight-alpha bytes.
+The renderer owns final resident placement. Providers may own private shader pipelines and work
+resources. They record Copy/Compute/Render into borrowed logical outputs; no Queue or final target
+is supplied. Generators must initialize outputs completely and not retain their identities.
+Exact-size/format/usage outputs are pooled within a frame after their placement copy is recorded.
+Two simultaneous mesh outputs remain distinct even with equal sizes/usages. Scratch pools drop
+at render completion/error, so a history of dimensions cannot accumulate indefinitely.
 
-Each phase reads a frozen start image. Scratch colour/snapshot are RGBA16Float. Masks multiply
-parent coverage, with no transform inheritance. Arbitrary overlapping mask triangles use maximum
-coverage within one node. Six R8 viewport images bound chain working memory: four reusable prefix
-slots, two ping-pong slots for deeper chains. Conservative mesh bounds limit clear/draw rectangles.
-Coincident non-overlapping object/mask meshes sample local coverage directly. Consecutive draws
-sharing an attachment are batched; parameters use one aligned uniform arena per frame.
+## Phase semantics without snapshot copies
 
-bounds and non_overlapping are optional truthful geometry promises, not requirements. Defaults
-preserve the general path. Wrong hints can change pixels, just as lying about generated content can.
-All preparation happens before per-phase culling, so optimizations cannot change first-use snapshots.
+All generation reads for a phase are recorded before its Object draws. The accumulation image
+itself therefore supplies the phase-start snapshot; queue/encoder order protects those reads.
+No full-viewport snapshot copy or separate snapshot attachment is needed. This relies on sources
+not modifying/retaining the input or submitting work out of band. Later/lazy preparation would
+need a different strategy. Culling still occurs after preparation to preserve first-use semantics.
 
-GPU cache budget defaults to a soft 128 MiB of logical resource bytes. The current frame is pinned;
-scratch images, driver allocation granularity and in-flight commands are additional memory. Pool
-presence is a retention tie-breaker, not an actual-use timestamp. CPU bitmap caching is separate.
+Colour accumulation is RGBA16Float; six R8 mask work images cache a four-node prefix and a two-slot
+ping-pong tail. Working attachments cost 14 bytes/pixel, excluding target/cache/driver resources.
+Coincident non-overlapping mask meshes sample coverage by local UV. General mask meshes rasterize
+coverage and multiply parents. Optional bounds limit clear/draw rectangles. Same-attachment draws
+are batched in paint order. A reusable 112-byte-per-draw (aligned) uniform arena carries placements
+and atlas UV rectangles. Per-frame bind groups are shared by page-view tuple. Filtering clamps to
+texel centres of each resident rectangle, so adjacent allocations do not bleed.
 
-ThreadDriver and InlineDriver share GuiRenderer::render_extracted. A GUI renderer lock serializes
-assembly and GPU command recording across windows. Window/surface lifetime still belongs to the
-existing driver; Scene contains no window or ECS objects.
+## Placement and lifetime
 
-## Legacy and branch differences
+Texture pages are separated by format (default edge 1024). Resources exceeding the page size get
+larger pages, subject to device limits, with no implicit rescaling. Vertices/indices occupy leased
+intervals in shared buffers (default page 256 KiB). Output copies preserve logical offset zero for
+generators. Allocation Drop releases intervals; weak page indices permit empty pages to disappear.
+Reuse is safe because later writes/copies follow earlier submitted reads on the same Queue.
 
-renderer::CoreRenderer, render_node.rs and atlas helpers are unchanged from main a7fd3f6 and still
-serve the old tree stack. They are not the current ECS renderer. Do not transfer their immediate,
-quad-only or atlas ABI restrictions to SceneRenderer. This checkout has no matcha-web crate or
-uniform-params feature. Old notes describing those branches are not current build instructions.
+compact_resources changes placement by GPU-to-GPU copying cached content. It does not invoke
+Source callbacks, change IDs or reinterpret background-dependent resources. set_atlas_config
+instead clears resident caches and changes the policy for subsequent regeneration.
 
-See journal/2026-09-23-render-interface.md for experiments/refuted attempts and
-../docs/render-interface-report.md for the implementation report.
+Cache budget is soft logical bytes, not a VRAM cap. PlacementStats reports page/buffer capacity,
+not driver allocation sizes or in-flight memory. Fewer pages can consume more capacity. Current
+working sets are pinned and generation callbacks are rolled back on PrepareError; GPU validation
+errors are a separate wgpu error channel. CPU Ok is not GPU validation/completion confirmation.
+
+## UI integration constraints
+
+RenderCtx supplies resolved placement and viewport size for backdrop producers. Object/mask
+records in widget Scenes are local and are embedded once. Standard local sources ignore placement;
+view/background/time-dependent definitions use RenderItem::dynamic to refresh content IDs while
+reusing Scene storage. It schedules no redraw itself. ClipReset resets ancestor clipping for both
+paint extraction and picking. It changes neither geometry nor ZIndex; custom Phase paint order
+is not automatically an input order.
+
+Fontdue glyph rasterization happens on GPU-content misses; swash's bounds and pixels are produced
+together, so its native MaskSource retains the pixels. Image sources likewise retain decoded
+pixels. These are provider-specific CPU algorithms, not a common Bitmap transport layer. Byte
+image cache entries carry weak input ownership to prevent naked-address identity reuse.
+
+See ../docs/native-render-interface-report.md and journal/2026-09-23-native-scene-stress.md for
+experiments, counterexamples and design-feedback recommendations. This main checkout still has
+no matcha-web crate. Native Vulkan/DX12 validation is not a browser compatibility claim.

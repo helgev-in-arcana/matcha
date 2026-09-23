@@ -31,6 +31,7 @@ pub mod panel;
 pub mod rich_text;
 pub mod scroll_view;
 pub mod shape;
+mod shape_gpu;
 pub mod slider;
 pub mod sizing;
 pub mod text;
@@ -45,7 +46,7 @@ pub use parley;
 
 pub use anchor::Anchor;
 pub use easing::Easing;
-pub use box_style::{box_node, BoxShadow, BoxStyle, Corners, Sides};
+pub use box_style::{box_scene, BoxShadow, BoxStyle, Corners, Sides};
 pub use button::{Button, ButtonLabel};
 pub use checkbox::Checkbox;
 pub use color_rect::{ColorRect, RectColor};

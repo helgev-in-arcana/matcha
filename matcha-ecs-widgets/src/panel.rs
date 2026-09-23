@@ -26,7 +26,7 @@ use matcha_ecs::{
     view::Widget,
 };
 
-use crate::box_style::{box_node, BoxShadow, BoxStyle, Corners, Sides};
+use crate::box_style::{BoxShadow, BoxStyle, Corners, Sides, box_scene};
 use crate::shape::ShapeCtx;
 use crate::sizing::Sizing;
 
@@ -164,7 +164,7 @@ impl Panel {
 /// places the child within, so paint and child placement can never disagree
 /// even when a parent layout stretches the panel beyond its declared size.
 fn panel_render_item(shape: ShapeCtx, style: BoxStyle) -> RenderItem {
-    RenderItem::new(move |ctx: &RenderCtx| box_node(ctx, &shape, ctx.size, &style))
+    RenderItem::new(move |ctx: &RenderCtx| box_scene(ctx, &shape, ctx.size, &style))
 }
 
 impl Widget for Panel {

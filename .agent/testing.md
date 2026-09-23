@@ -58,7 +58,7 @@ cargo test -p renderer --test scene_contract -j 2 -- --nocapture --test-threads=
 The tests require a real GPU and never silently skip to NOOP. MATCHA_TEST_BACKEND=dx12 or vulkan
 selects a backend. The legacy CoreRenderer implementation is unchanged from the main base and is
 used for numerical pixel parity. CPU pool/assembly checks live in render-interface/tests and
-matcha-paint/tests. No GPU tests were added to the ECS/widget test folders.
+matcha-ecs/tests/scene_composition.rs. No GPU tests were added to the ECS/widget test folders.
 
 The main-based checkout contains no matcha-web crate or uniform-params feature; wasm/browser
 validation is not covered by native shader compilation or by the present proof suite.
@@ -72,3 +72,23 @@ validation is not covered by native shader compilation or by the present proof s
 | `renderer/tests/` | Real-GPU: culling/visibility, mask scale, uniform params, noop smoke |
 | `matcha-window/tests/` | Headless backend |
 | in-file `#[cfg(test)]` | Pure helpers and anything needing a private type |
+
+## Native interface stress
+
+cargo run -p matcha-ecs --example interface_stress -- target
+
+This example invokes the production Scene assembly/backend, compares five GPU shape masks to the
+pure CPU oracle, shares one generated background across three widgets, refreshes backdrop IDs on
+redraw, verifies translated sampling and GPU-only relocation, and checks failed-assembly retention.
+MATCHA_TEST_BACKEND=dx12 selects DX12; default is Vulkan. GPU assertions live here or in renderer
+tests, preserving the GPU-free ECS/widget integration-test convention.
+
+scene_contract includes deliberate contract-violation diagnostics: stale backdrop IDs and invalid
+GPU copy commands are expected to exhibit their documented failure modes. Passing those tests
+does not mean invalid producers are automatically repaired. The pixel-art case shows the cost of
+expressing nearest-like sampling through geometry under the fixed linear-sampling ABI.
+
+cargo run -p renderer --example image_diff -- BASELINE.png ACTUAL.png
+
+Use release builds for performance measurements. Offscreen showcase prints assembly, CPU encode/
+submit and GPU-wait wall times separately; these are not GPU timestamp measurements.

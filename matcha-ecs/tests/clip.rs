@@ -10,7 +10,7 @@
 use bevy_ecs::{entity::Entity, world::World};
 use matcha_ecs::{
     components::view::ViewChildren,
-    layout::{layout_root, Constraints},
+    layout::{Constraints, layout_root},
     pick::{PickQuery, Picker, RectPicker},
     render::extract_items,
     view::run_view,
@@ -77,7 +77,10 @@ fn the_clip_rect_is_the_declaring_entitys_laid_out_box() {
     let frame = extract_items(&world, root);
     assert_eq!(frame.clips.len(), 1);
     // Second child of a Column: offset down by the first child's height.
-    assert_eq!(rect_of(&frame.clips.as_slice()[0]), [0.0, 25.0, 100.0, 105.0]);
+    assert_eq!(
+        rect_of(&frame.clips.as_slice()[0]),
+        [0.0, 25.0, 100.0, 105.0]
+    );
 }
 
 #[test]
@@ -159,18 +162,28 @@ fn a_widget_clipped_out_of_sight_is_no_longer_pickable() {
     let picker = RectPicker::build(&world, root);
 
     // Inside the panel: still pickable.
-    assert!(picker
-        .pick(&world, &PickQuery {
-            viewport_pos: [25.0, 25.0]
-        })
-        .is_some());
+    assert!(
+        picker
+            .pick(
+                &world,
+                &PickQuery {
+                    viewport_pos: [25.0, 25.0]
+                }
+            )
+            .is_some()
+    );
 
     // Over the button but outside the panel: clipped, so nothing is there.
-    assert!(picker
-        .pick(&world, &PickQuery {
-            viewport_pos: [120.0, 120.0]
-        })
-        .is_none());
+    assert!(
+        picker
+            .pick(
+                &world,
+                &PickQuery {
+                    viewport_pos: [120.0, 120.0]
+                }
+            )
+            .is_none()
+    );
 }
 
 #[test]
@@ -187,10 +200,64 @@ fn a_widget_entirely_outside_its_clip_is_dropped_from_picking() {
 
     for pos in [[10.0, 0.0], [40.0, 20.0], [70.0, 35.0]] {
         assert!(
-            picker.pick(&world, &PickQuery { viewport_pos: pos }).is_none(),
+            picker
+                .pick(&world, &PickQuery { viewport_pos: pos })
+                .is_none(),
             "nothing should be pickable at {pos:?}"
         );
     }
+}
+
+#[test]
+fn popup_clip_reset_agrees_between_rendering_and_picking() {
+    let (mut world, root) = laid_out(|s| {
+        s.node(Panel::new(50., 50.).clip(true), |s| {
+            s.leaf(Button::<()>::new("popup").size(200., 200.));
+        });
+    });
+    let popup = extract_items(&world, root)
+        .items
+        .last()
+        .expect("button")
+        .entity;
+    // Explicit popup placement outside the panel. The ordinary panel layout
+    // constrains child size, so simply probing (120,120) tests geometry instead.
+    world
+        .entity_mut(popup)
+        .insert(matcha_ecs::components::layout::GlobalTransform {
+            affine: nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(60., 60., 0.)),
+        });
+    assert!(
+        RectPicker::build(&world, root)
+            .pick(
+                &world,
+                &PickQuery {
+                    viewport_pos: [70., 70.]
+                }
+            )
+            .is_none()
+    );
+    world
+        .entity_mut(popup)
+        .insert(matcha_ecs::components::layout::ClipReset);
+    assert!(
+        extract_items(&world, root)
+            .items
+            .last()
+            .expect("button")
+            .clip
+            .is_none()
+    );
+    assert!(
+        RectPicker::build(&world, root)
+            .pick(
+                &world,
+                &PickQuery {
+                    viewport_pos: [70., 70.]
+                }
+            )
+            .is_some()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -205,9 +272,7 @@ fn a_widget_entirely_outside_its_clip_is_dropped_from_picking() {
 /// A unit-quad transform for the axis-aligned box at `origin` of `size`.
 fn box_transform(origin: [f32; 2], size: [f32; 2]) -> nalgebra::Matrix4<f32> {
     nalgebra::Matrix4::new_translation(&nalgebra::Vector3::new(origin[0], origin[1], 0.0))
-        * nalgebra::Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(
-            size[0], size[1], 1.0,
-        ))
+        * nalgebra::Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(size[0], size[1], 1.0))
 }
 
 #[test]

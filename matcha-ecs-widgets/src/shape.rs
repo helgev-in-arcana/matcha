@@ -1,21 +1,20 @@
-//! CPU rasterization and caching for box coverage and tint bitmaps.
+//! Native GPU generation and sharing of box MaskSources and colour TextureSources.
 //!
-//! Rounded fills, border rings and blurred shadows are immutable CPU bitmaps.
-//! Shape and colour have separate caches so recolouring does not rerasterize
-//! coverage. A cached paint tree contains Bitmap handles, never atlas regions.
-//! SceneBuilder registers lazy upload definitions and the renderer owns GPU
-//! residency and coverage compositing. GPU eviction leaves these CPU caches valid.
+//! ShapeCtx caches immutable source definitions keyed by geometry/colour. The
+//! renderer invokes their GPU generators only on a resident-content miss. Rounded
+//! fills, asymmetric rings and three-pass separable shadows are rendered directly
+//! through MaskPrepareContext; no paint tree or Bitmap layer is involved.
 //!
-//! Coverage multiplies all four premultiplied channels. An aligned self-mask
-//! can be sampled directly; arbitrary transformed mask meshes use the backend's
-//! general coverage path. Neither choice is a widget concern.
+//! The pure CPU rasterizer below is retained as an independent numerical oracle.
+//! Production coverage_source never calls it. Private shader programs are cached
+//! per current device, independently of renderer-owned output residency/atlases.
 
 use std::sync::Arc;
 
 use bevy_ecs::{resource::Resource, world::EntityWorldMut};
 use fxhash::FxHashMap;
-use matcha_paint::Bitmap;
 use parking_lot::Mutex;
+use render_interface::{MaskDescriptor, MaskSource, TextureSource};
 
 use matcha_ecs::components::render::RenderCtx;
 
@@ -95,11 +94,12 @@ fn dequantize(v: u32) -> f32 {
 
 #[derive(Default)]
 struct ShapeCtxInner {
+    gpu: Arc<Mutex<Option<crate::shape_gpu::ShapeGpu>>>,
     /// Coverage bitmaps, keyed on shape alone — deliberately independent of
     /// colour, so recolouring reuses the mask.
-    coverage: Mutex<FxHashMap<CoverageKey, Bitmap>>,
+    coverage: Mutex<FxHashMap<CoverageKey, MaskSource>>,
     /// 1x1 tint pixels, keyed on the premultiplied bytes actually uploaded.
-    tint: Mutex<FxHashMap<[u8; 4], Bitmap>>,
+    tint: Mutex<FxHashMap<[u8; 4], TextureSource>>,
 }
 
 /// World resource holding the shape caches. Lazily inserted on first use so the
@@ -111,7 +111,7 @@ struct ShapeCtxInner {
 /// is rebuilt on every frame it moves (its `LayoutOutput` changes, so
 /// `invalidate_on_layout_change` fires), but its *shape* is constant for the
 /// whole drag — so a shape-keyed cache turns each of those rebuilds into
-/// assembling a `RenderNode` from regions that already exist, instead of an
+/// assembling a `Scene` from regions that already exist, instead of an
 /// atlas allocation plus a rasterisation plus an upload.
 #[derive(Resource, Clone, Default)]
 pub struct ShapeCtx(Arc<ShapeCtxInner>);
@@ -124,7 +124,7 @@ impl ShapeCtx {
 
     /// Fetch (rasterising and uploading on a miss) the coverage bitmap for
     /// `key`, as a region of the stencil atlas.
-    pub fn coverage_region(&self, key: CoverageKey, _ctx: &RenderCtx) -> Option<Bitmap> {
+    pub fn coverage_source(&self, key: CoverageKey, _ctx: &RenderCtx) -> Option<MaskSource> {
         if key.w == 0 || key.h == 0 {
             return None;
         }
@@ -132,8 +132,22 @@ impl ShapeCtx {
             return Some(cached.clone());
         }
 
-        let bitmap = rasterize_box(key);
-        let region = Bitmap::coverage([key.w, key.h], bitmap).ok()?;
+        let mut desc = MaskDescriptor::new([key.w, key.h], wgpu::TextureFormat::R8Unorm);
+        desc.usages = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        let programs = self.0.gpu.clone();
+        let region = MaskSource::new(desc, move |c| {
+            let mut programs = programs.lock();
+            if programs
+                .as_ref()
+                .is_none_or(|p| !p.for_device(c.gpu.device))
+            {
+                *programs = Some(crate::shape_gpu::ShapeGpu::new(c.gpu.device));
+            }
+            programs
+                .as_ref()
+                .expect("programs initialized for this device")
+                .prepare(c, key)
+        });
 
         self.0.coverage.lock().insert(key, region.clone());
         Some(region)
@@ -146,7 +160,7 @@ impl ShapeCtx {
     /// region's own texel centre, so stretching it over a whole quad samples
     /// that one texel everywhere. Same trick the core's `ClipMask` uses, and
     /// it is why recolouring a box costs no rasterisation at all.
-    pub fn tint_region(&self, color: [f32; 4], ctx: &RenderCtx) -> Option<Bitmap> {
+    pub fn tint_source(&self, color: [f32; 4], ctx: &RenderCtx) -> Option<TextureSource> {
         // Keyed on the bytes actually uploaded, so two colours that encode
         // identically share a texel.
         let bytes = premultiplied_srgb_bytes(color);
@@ -154,7 +168,7 @@ impl ShapeCtx {
             return Some(cached.clone());
         }
 
-        let region = crate::color::paint_tint_region(ctx, color, "box")?;
+        let region = crate::color::solid_source(ctx, color, "box")?;
         self.0.tint.lock().insert(bytes, region.clone());
         Some(region)
     }
@@ -285,8 +299,8 @@ fn blur_rows(src: &[u8], dst: &mut [u8], w: usize, h: usize, radius: usize) {
         let row = &src[y * w..(y + 1) * w];
         let at = |i: isize| row[i.clamp(0, w as isize - 1) as usize] as u32;
 
-        let mut sum: u32 = (0..=radius as isize).map(|i| at(i)).sum::<u32>()
-            + row[0] as u32 * radius as u32;
+        let mut sum: u32 =
+            (0..=radius as isize).map(|i| at(i)).sum::<u32>() + row[0] as u32 * radius as u32;
 
         for x in 0..w {
             dst[y * w + x] = (sum / window) as u8;
@@ -408,7 +422,11 @@ mod tests {
     #[test]
     fn blurring_softens_the_edge_without_moving_it() {
         let sharp = rasterize_box(CoverageKey::filled(60, 60, [0.0; 4]).inset(15.0));
-        let soft = rasterize_box(CoverageKey::filled(60, 60, [0.0; 4]).inset(15.0).blurred(4.0));
+        let soft = rasterize_box(
+            CoverageKey::filled(60, 60, [0.0; 4])
+                .inset(15.0)
+                .blurred(4.0),
+        );
 
         assert_eq!(at(&sharp, 60, 5, 30), 0, "well outside the sharp shape");
         assert!(

@@ -4,6 +4,7 @@ edition = "2024"
 version.workspace = true
 
 [dependencies]
+guillotiere = "0.6.2"
 render-interface.workspace = true
 wgpu.workspace = true
 log.workspace = true
@@ -24,7 +25,6 @@ parking_lot.workspace = true
 moka.workspace = true
 
 [dev-dependencies]
-matcha-paint.workspace = true
 image.workspace = true
 futures = { workspace = true }
 

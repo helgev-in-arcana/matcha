@@ -7,7 +7,7 @@
 //! The renderer turns a chain of those into a product of coverage masks.
 //!
 //! Everything in this module is GPU-free. A [`ClipRect`] is pure geometry; the
-//! coverage image is a shared CPU definition registered by SceneBuilder. This is
+//! coverage image is a shared CPU definition registered by GuiRenderer. This is
 //! what lets clipping be tested headlessly.
 //!
 //! [`Clip`]: crate::components::layout::Clip
@@ -137,6 +137,7 @@ pub fn descend(
     entity: Entity,
     inherited: Option<u32>,
 ) -> Option<u32> {
+    let inherited=if world.get::<crate::components::layout::ClipReset>(entity).is_some() {None} else {inherited};
     if world.get::<Clip>(entity).is_none() {
         return inherited;
     }

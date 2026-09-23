@@ -49,6 +49,7 @@ use bevy_ecs::{
     system::{Query, Res, ResMut, ScheduleSystem},
     world::EntityWorldMut,
 };
+use matcha_ecs::scene::{append_local, textured_quad};
 use matcha_ecs::{
     components::{
         focus::{FocusDispatch, FocusPolicy, Focused},
@@ -69,13 +70,12 @@ use matcha_window::event::device_event::{ImeEvent, Key as LogicalKey, KeyInput, 
 use nalgebra::{Matrix4, Point3, Vector3};
 use parking_lot::Mutex;
 use parley::{PlainEditor, StyleProperty};
-use matcha_paint::RenderNode;
 
 use crate::{
+    box_style::{BoxStyle, box_scene},
     live::{LiveBool, LiveF32, LiveVec},
+    rich_text::{ParleyFontCtx, RichTextBrush, draw_parley_layout, solid_source},
     sizing::Sizing,
-    box_style::{box_node, BoxStyle},
-    rich_text::{draw_parley_layout, paint_tint_region, ParleyFontCtx, RichTextBrush},
 };
 
 /// How long the caret stays visible, then invisible, per blink.
@@ -539,8 +539,11 @@ fn with_editor_driver<R>(
     f: impl FnOnce(&mut parley::PlainEditorDriver<'_, RichTextBrush>) -> R,
 ) -> Option<R> {
     let editor = entity.get::<TextEditor>()?.0.clone();
-    let font_ctx = entity
-        .world_scope(|world| world.get_resource_or_insert_with(ParleyFontCtx::new).clone());
+    let font_ctx = entity.world_scope(|world| {
+        world
+            .get_resource_or_insert_with(ParleyFontCtx::new)
+            .clone()
+    });
     let mut editor = editor.lock();
     let mut font_cx = font_ctx.0.font_cx.lock();
     let mut layout_cx = font_ctx.0.layout_cx.lock();
@@ -601,11 +604,13 @@ fn handle_clipboard_key(entity: &mut EntityWorldMut, input: &KeyInput) -> Option
             };
             clipboard.set_text(selected);
             if matches!(op, Op::Cut) {
-                return Some(with_editor_driver(entity, |d| {
-                    d.delete_selection();
-                    true
-                })
-                .unwrap_or(false));
+                return Some(
+                    with_editor_driver(entity, |d| {
+                        d.delete_selection();
+                        true
+                    })
+                    .unwrap_or(false),
+                );
             }
             Some(false)
         }
@@ -948,8 +953,16 @@ fn refresh_text_boxes(
         // Fall back to the declared size until the first arrange has run.
         let allocated = live.allocated();
         let allocated = [
-            if allocated[0] > 0.0 { allocated[0] } else { layout.w },
-            if allocated[1] > 0.0 { allocated[1] } else { layout.h },
+            if allocated[0] > 0.0 {
+                allocated[0]
+            } else {
+                layout.w
+            },
+            if allocated[1] > 0.0 {
+                allocated[1]
+            } else {
+                layout.h
+            },
         ];
 
         // Re-wrap if the parent gave us a different width than we last shaped
@@ -1051,8 +1064,11 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
         .map(|e| e.0.clone())
         .expect("TextEditor is inserted by bundle() before any render item is built");
     let live = entity.get::<TextBoxLive>().cloned().unwrap_or_default();
-    let font_ctx = entity
-        .world_scope(|world| world.get_resource_or_insert_with(ParleyFontCtx::new).clone());
+    let font_ctx = entity.world_scope(|world| {
+        world
+            .get_resource_or_insert_with(ParleyFontCtx::new)
+            .clone()
+    });
     let shape_ctx = crate::shape::ShapeCtx::get(entity);
 
     RenderItem::new(move |ctx: &RenderCtx| {
@@ -1064,12 +1080,11 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
         } else {
             style.border_color
         };
-        let mut node = box_node(
+        let mut node = box_scene(
             ctx,
             &shape_ctx,
             [w, h],
-            &BoxStyle::fill(style.background_color)
-                .border(border, border_color),
+            &BoxStyle::fill(style.background_color).border(border, border_color),
         );
 
         let inset = style.border_width + style.padding;
@@ -1087,32 +1102,39 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
         // Selection sits under the glyphs.
         for (rect, _line) in editor.selection_geometry() {
             let y0 = rect.y0 as f32;
-            let Some(tint) = paint_tint_region(ctx, style.selection_color) else {
+            let Some(tint) = solid_source(ctx, style.selection_color) else {
                 continue;
             };
-            let selection = RenderNode::new().with_texture(
+            let selection = textured_quad(
                 tint,
                 [rect.width() as f32, rect.height() as f32],
                 Matrix4::identity(),
+                None,
             );
-            node.push_child(selection, place(rect.x0 as f32, y0));
+            append_local(&mut node, selection, place(rect.x0 as f32, y0));
         }
 
-        node.push_child(
+        append_local(
+            &mut node,
             draw_parley_layout(&font_ctx, ctx, layout),
             place(0.0, 0.0),
         );
 
         if ctx.focused && live.caret_visible() {
             if let Some(caret) = editor.cursor_geometry(CARET_WIDTH)
-                && let Some(tint) = paint_tint_region(ctx, style.caret_color)
+                && let Some(tint) = solid_source(ctx, style.caret_color)
             {
-                let caret_node = RenderNode::new().with_texture(
+                let caret_node = textured_quad(
                     tint,
                     [caret.width() as f32, caret.height() as f32],
                     Matrix4::identity(),
+                    None,
                 );
-                node.push_child(caret_node, place(caret.x0 as f32, caret.y0 as f32));
+                append_local(
+                    &mut node,
+                    caret_node,
+                    place(caret.x0 as f32, caret.y0 as f32),
+                );
             }
         }
 

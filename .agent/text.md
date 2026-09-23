@@ -17,15 +17,11 @@ Both stacks are kept because parley has known layout-reproducibility issues and 
 
 ## The compositing trick, shared by everything
 
-A glyph is a **1×1 solid-colour tint quad** (CPU colour bitmap) masked by its **coverage bitmap**
-(CPU coverage bitmap, uploaded as R8Unorm), composited by `RenderNode::with_stencil`. fontdue's
-`rasterize_indexed` and swash's `Render::format(Format::Alpha)` produce the same thing, so the GPU
-path is identical for both stacks — and it is the same path rounded rectangles take
-(`shape.rs`). See [rendering.md](rendering.md).
-
-Decorations (underline, strikethrough) are solid rectangles: `.with_texture(..)` with **no** mask,
-and deliberately not a real render pass — a 1–2px-tall region is exactly the tiny-viewport shape that
-rasterises incorrectly through one.
+A glyph is a native Object referencing a GPU solid-colour TextureSource and a MaskSource.
+Colour and coverage definitions are shared independently. Fontdue bounds come from metrics;
+its rasterization/upload runs during prepare on a resident-content miss. Swash produces bounds
+and bitmap together, so its source closure retains those pixels for re-upload. No Bitmap wrapper,
+RenderNode or UI-managed atlas is involved. Decorations are ordinary unmasked Objects.
 
 ## Layout ↔ render, and what is not cached
 
@@ -36,10 +32,10 @@ zero new systems, since the closure keeps re-reading the live width instead of n
 
 Passing the shaped glyph list between stages is an obvious future optimisation, not done.
 
-Per-glyph rasterisation *is* cached: `RichText` keys on font blob id + font index + glyph id +
-quantized size + a hash of variation coords, in a bounded `glyph-cache` LRU (capacity 1024, with
-per-batch eviction protection; a "batch" is one `RenderItem` build, not one frame). `Text`'s cache is
-an unbounded `HashMap`, fine for its fixed-content use.
+Per-glyph source definitions are cached. RichText keys on font blob id + font index + glyph id +
+quantized size + variation-coordinate hash, using glyph-cache capacity 1024 and per-build eviction
+protection. Its MaskSource retains swash pixels. Text uses an unbounded GlyphId -> MaskSource map;
+its generator re-rasterizes through fontdue after GPU eviction rather than caching CPU pixels.
 
 **Known `GlyphKey` gap**: `fontique::Synthesis` (synthetic bold/oblique when the fallback chain has
 no true face) is never applied — supporting it needs a new key field. Requesting such a weight/style
@@ -74,5 +70,5 @@ Text loads native system fonts through suzuri, and RichText/TextBox through parl
 This main-based checkout has no matcha-web crate, font.rs or WithDefaultFont API. The previous
 web-font notes described another branch and must not be used as current API instructions here.
 
-CPU glyph Bitmap caches survive GPU cache eviction. SceneBuilder registers upload sources lazily;
-renderer residency and UI glyph-cache eviction are independent. Colour/coverage sharing is retained.
+CPU source definitions survive GPU eviction; the backend invokes their generators to restore
+content. Source allocation/ID reuse, glyph-cache eviction and GPU residency are independent.

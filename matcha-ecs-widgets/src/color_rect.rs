@@ -9,8 +9,7 @@
 use std::time::Duration;
 
 use bevy_ecs::{
-    bundle::Bundle, change_detection::DetectChangesMut, component::Component,
-    world::EntityWorldMut,
+    bundle::Bundle, change_detection::DetectChangesMut, component::Component, world::EntityWorldMut,
 };
 
 use matcha_ecs::{
@@ -23,7 +22,7 @@ use matcha_ecs::{
 };
 
 use crate::animation::{Easing, ExitFade, OpacityTween};
-use crate::box_style::{box_node, BoxStyle};
+use crate::box_style::{BoxStyle, box_scene};
 use crate::shape::ShapeCtx;
 use crate::sizing::{RectGeometry, Sizing};
 
@@ -120,7 +119,7 @@ impl ColorRect {
 /// (`ctx.size`) — not the widget's declared size, which a parent layout (e.g.
 /// `AlignItems::Stretch`) may have overridden.
 fn color_rect_render_item(shape: ShapeCtx, style: BoxStyle) -> RenderItem {
-    RenderItem::new(move |ctx: &RenderCtx| box_node(ctx, &shape, ctx.size, &style))
+    RenderItem::new(move |ctx: &RenderCtx| box_scene(ctx, &shape, ctx.size, &style))
 }
 
 impl Widget for ColorRect {
@@ -209,4 +208,3 @@ impl Widget for ColorRect {
         }
     }
 }
-

@@ -1,14 +1,14 @@
 //! Borrowed Scene backend. The UI never receives GPU cache handles or placement.
 //!
-//! This portable baseline uses dedicated cached buffers/textures and ordered
-//! draws. It needs no bindless extensions, immediates or writable vertex storage.
+//! Sources generate isolated outputs; the backend copies them into format-specific
+//! texture pages and shared mesh buffers. Final draws bind resident page views. It needs no bindless extensions, immediates or writable vertex storage.
 //! Mask meshes are rasterized into six reusable viewport-sized R8 scratch images:
 //! four cache a shared chain prefix; two ping-pong for arbitrarily deep tails.
 //! Each ancestor multiplies the preceding coverage. Memory is O(viewport), not
 //! O(mask_count * viewport). Conservative bounds limit clears and draws; all
 //! preparation still occurs at the original phase even for culled objects.
 //! This deliberately trades extra passes for bounded memory and arbitrary mesh
-//! semantics; atlasing/batching remain backend optimizations, not ABI promises.
+//! semantics. Placement, reuse and GPU-only relocation remain backend choices.
 //!
 //! A frame is one command buffer. Newly prepared cache entries are rolled back
 //! if any callback fails, because commands recorded before that failure were not
@@ -20,8 +20,10 @@
 //! coincident non-overlapping masks made that workload succeed (journal
 //! 2026-09-23). The exact driver allocation responsible was not isolated.
 
+use crate::scene_resources::{Arenas, BufferSlot, TextureSlot};
+pub use crate::scene_resources::{AtlasConfig, PlacementStats};
 use render_interface::*;
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Range};
 use wgpu::util::DeviceExt;
 
 const COLOR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -52,9 +54,21 @@ pub struct RenderStats {
     /// Render passes containing draws (excludes initial/final clears).
     pub draw_batches: usize,
     pub mask_passes: usize,
+    /// Backend snapshot materializations; zero for this ordered eager backend.
     pub snapshot_copies: usize,
     pub cache_bytes: u64,
     pub evicted: usize,
+    pub placement: PlacementStats,
+    pub bind_groups: usize,
+    pub output_texture_allocations: usize,
+    pub output_buffer_allocations: usize,
+}
+#[derive(Default, Debug, Clone, Copy)]
+pub struct RelocationStats {
+    pub textures: usize,
+    pub meshes: usize,
+    pub copied_bytes: u64,
+    pub placement: PlacementStats,
 }
 struct Entry<T> {
     value: T,
@@ -66,16 +80,20 @@ struct Mesh {
     desc: MeshDescriptor,
     vertices: wgpu::Buffer,
     indices: Option<wgpu::Buffer>,
+    vertex_range: Range<u64>,
+    index_range: Range<u64>,
+    _vertices_slot: Option<BufferSlot>,
+    _indices_slot: Option<BufferSlot>,
 }
 struct Image {
     desc: TextureDescriptor,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    slot: Option<TextureSlot>,
 }
 struct Surfaces {
     size: [u32; 2],
     color: Image,
-    snapshot: Image,
     masks: [Image; 6],
 }
 #[repr(C)]
@@ -87,7 +105,41 @@ struct Params {
     masked: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuParams {
+    base: Params,
+    source_uv: [f32; 4],
+    local_uv: [f32; 4],
+}
+struct ImageRef<'a> {
+    view: &'a wgpu::TextureView,
+    uv: [f32; 4],
+}
+impl<'a> From<&'a Image> for ImageRef<'a> {
+    fn from(image: &'a Image) -> Self {
+        Self {
+            view: &image.view,
+            uv: image
+                .slot
+                .as_ref()
+                .map_or([0., 0., 1., 1.], TextureSlot::uv),
+        }
+    }
+}
+impl<'a> From<&'a wgpu::TextureView> for ImageRef<'a> {
+    fn from(view: &'a wgpu::TextureView) -> Self {
+        Self {
+            view,
+            uv: [0., 0., 1., 1.],
+        }
+    }
+}
+
 pub struct SceneRenderer {
+    arenas: Arenas,
+    temporary_images: HashMap<TextureDescriptor, Image>,
+    temporary_buffers: HashMap<(u64, wgpu::BufferUsages), Vec<wgpu::Buffer>>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     layout: wgpu::BindGroupLayout,
@@ -122,7 +174,7 @@ impl SceneRenderer {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(80),
+                        min_binding_size: wgpu::BufferSize::new(112),
                     },
                     count: None,
                 },
@@ -211,6 +263,10 @@ impl SceneRenderer {
                 usage: wgpu::BufferUsages::VERTEX,
             }),
             indices: None,
+            vertex_range: 0..120,
+            index_range: 0..0,
+            _vertices_slot: None,
+            _indices_slot: None,
         };
         let white = make_image(device, TextureDescriptor::new([1, 1], COVERAGE));
         queue.write_texture(
@@ -233,6 +289,9 @@ impl SceneRenderer {
             color_pipeline,
             mask_pipeline,
             clear_pipeline,
+            arenas: Arenas::new(AtlasConfig::default()),
+            temporary_images: HashMap::new(),
+            temporary_buffers: HashMap::new(),
             outputs: HashMap::new(),
             meshes: HashMap::new(),
             textures: HashMap::new(),
@@ -249,8 +308,108 @@ impl SceneRenderer {
     }
     /// Soft resident-resource budget. A single frame's working set is pinned;
     /// scratch attachments and command-buffer retention are not counted here.
+    /// Change backend placement policy; same immutable Sources regenerate without
+    /// any UI invalidation or changes to IDs. Reject invalid limits before reset.
+    pub fn set_atlas_config(&mut self, config: AtlasConfig) -> Result<(), SceneError> {
+        if config.texture_edge == 0
+            || config.texture_edge > self.device.limits().max_texture_dimension_2d
+            || config.mesh_page_bytes == 0
+            || config.mesh_page_bytes > self.device.limits().max_buffer_size
+            || config.mesh_page_bytes % 4 != 0
+        {
+            return Err(SceneError::Invalid("invalid atlas configuration".into()));
+        }
+        self.clear_cache();
+        self.arenas = Arenas::new(config);
+        Ok(())
+    }
     pub fn set_cache_budget(&mut self, bytes: u64) {
         self.budget = bytes;
+    }
+    /// Repack already generated GPU content, including snapshot-dependent
+    /// textures, without invoking any Source. No CPU readback or ID changes.
+    /// Copy submission is ordered after prior draws; command buffers retain old
+    /// pages until their final use. Peak memory temporarily includes both layouts.
+    pub fn compact_resources(
+        &mut self,
+        config: AtlasConfig,
+    ) -> Result<RelocationStats, SceneError> {
+        if config.texture_edge == 0
+            || config.texture_edge > self.device.limits().max_texture_dimension_2d
+            || config.mesh_page_bytes == 0
+            || config.mesh_page_bytes > self.device.limits().max_buffer_size
+            || config.mesh_page_bytes % 4 != 0
+        {
+            return Err(SceneError::Invalid("invalid atlas configuration".into()));
+        }
+        let mut arenas = Arenas::new(config);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("resident relocation"),
+            });
+        let mut report = RelocationStats::default();
+        for entry in self.meshes.values_mut() {
+            let mesh = &mut entry.value;
+            let slot = arenas.buffer(
+                &self.device,
+                mesh.vertex_range.end - mesh.vertex_range.start,
+            );
+            encoder.copy_buffer_to_buffer(
+                &mesh.vertices,
+                mesh.vertex_range.start,
+                &slot.page.buffer,
+                slot.range.start,
+                slot.range.end - slot.range.start,
+            );
+            mesh.vertices = slot.page.buffer.clone();
+            mesh.vertex_range = slot.range.clone();
+            mesh._vertices_slot = Some(slot);
+            if let Some(indices) = &mesh.indices {
+                let slot =
+                    arenas.buffer(&self.device, mesh.index_range.end - mesh.index_range.start);
+                encoder.copy_buffer_to_buffer(
+                    indices,
+                    mesh.index_range.start,
+                    &slot.page.buffer,
+                    slot.range.start,
+                    slot.range.end - slot.range.start,
+                );
+                mesh.indices = Some(slot.page.buffer.clone());
+                mesh.index_range = slot.range.clone();
+                mesh._indices_slot = Some(slot);
+            }
+            report.meshes += 1;
+            report.copied_bytes += entry.bytes;
+        }
+        for entry in self.textures.values_mut().chain(self.masks.values_mut()) {
+            let image = &mut entry.value;
+            let slot = arenas.texture(&self.device, image.desc.format, image.desc.size);
+            let mut source = image.texture.as_image_copy();
+            if let Some(old) = &image.slot {
+                source.origin = wgpu::Origin3d {
+                    x: old.origin[0],
+                    y: old.origin[1],
+                    z: 0,
+                };
+            }
+            let mut target = slot.page.texture.as_image_copy();
+            target.origin = wgpu::Origin3d {
+                x: slot.origin[0],
+                y: slot.origin[1],
+                z: 0,
+            };
+            encoder.copy_texture_to_texture(source, target, extent(image.desc.size));
+            image.texture = slot.page.texture.clone();
+            image.view = slot.page.view.clone();
+            image.slot = Some(slot);
+            report.textures += 1;
+            report.copied_bytes += entry.bytes;
+        }
+        self.queue.submit([encoder.finish()]);
+        self.arenas = arenas;
+        report.placement = self.arenas.stats();
+        Ok(report)
     }
     pub fn stats(&self) -> RenderStats {
         self.stats
@@ -274,6 +433,11 @@ impl SceneRenderer {
             self.evict(scene);
         }
         self.stats.cache_bytes = self.cache_bytes();
+        self.stats.placement = self.arenas.stats();
+        // Scratch outputs may be reused between generators in this command
+        // stream, but not retained as an unbounded cache of historical sizes.
+        self.temporary_images.clear();
+        self.temporary_buffers.clear();
         result
     }
 
@@ -286,7 +450,6 @@ impl SceneRenderer {
             self.surfaces = Some(Surfaces {
                 size,
                 color: attachment(&self.device, size, COLOR),
-                snapshot: attachment(&self.device, size, COLOR),
                 masks: std::array::from_fn(|_| attachment(&self.device, size, COVERAGE)),
             });
         }
@@ -307,7 +470,7 @@ impl SceneRenderer {
         s: &Surfaces,
     ) -> Result<(), SceneError> {
         let stride = u64::from(self.device.limits().min_uniform_buffer_offset_alignment)
-            .max(80)
+            .max(112)
             .next_multiple_of(u64::from(
                 self.device.limits().min_uniform_buffer_offset_alignment,
             ));
@@ -357,6 +520,7 @@ impl SceneRenderer {
             pending: Vec::new(),
             destination: None,
             batches: 0,
+            groups: HashMap::new(),
         };
         clear(&mut frame.encoder, &s.color.view, target.clear);
         let full = Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(
@@ -370,7 +534,7 @@ impl SceneRenderer {
                 &s.color.view,
                 &self.color_pipeline,
                 &self.quad,
-                initial,
+                initial.into(),
                 &self.white.view,
                 Params {
                     transform: full,
@@ -388,15 +552,13 @@ impl SceneRenderer {
         let mut prefix = Vec::new();
         for phase in &scene.phases {
             flush(&mut frame);
-            frame.encoder.copy_texture_to_texture(
-                s.color.texture.as_image_copy(),
-                s.snapshot.texture.as_image_copy(),
-                extent(s.size),
-            );
-            self.stats.snapshot_copies += 1;
+            // Every generator records its reads before any draw in this phase.
+            // Therefore queue/encoder order freezes the accumulated image for
+            // those reads; no full-viewport snapshot copy is necessary. Source
+            // outputs are isolated and may not alias or mutate this input.
             let snapshot = RenderSnapshot {
-                color_texture: &s.snapshot.texture,
-                color_view: &s.snapshot.view,
+                color_texture: &s.color.texture,
+                color_view: &s.color.view,
                 size: s.size,
                 format: COLOR,
             };
@@ -421,7 +583,7 @@ impl SceneRenderer {
                         .then_some(m)
                 });
                 let screen_mask = direct.map_or(object.mask, |m| m.parent);
-                let local_mask = direct.map(|m| &self.masks[&m.texture].value.view);
+                let local_mask = direct.map(|m| ImageRef::from(&self.masks[&m.texture].value));
                 let mut object_bounds = pixel_bounds(
                     self.meshes[&object.mesh].value.desc.bounds,
                     &object.transform,
@@ -479,7 +641,7 @@ impl SceneRenderer {
                             &s.masks[active_mask].view,
                             &self.clear_pipeline,
                             &self.quad,
-                            &self.white.view,
+                            (&self.white).into(),
                             &self.white.view,
                             Params {
                                 transform: full,
@@ -500,7 +662,7 @@ impl SceneRenderer {
                             &s.masks[active_mask].view,
                             &self.mask_pipeline,
                             &self.meshes[&node.mesh].value,
-                            &self.masks[&node.texture].value.view,
+                            (&self.masks[&node.texture].value).into(),
                             parent,
                             Params {
                                 transform: node.transform,
@@ -522,7 +684,7 @@ impl SceneRenderer {
                     &s.color.view,
                     &self.color_pipeline,
                     &self.meshes[&object.mesh].value,
-                    &self.textures[&object.texture].value.view,
+                    (&self.textures[&object.texture].value).into(),
                     &s.masks[active_mask].view,
                     Params {
                         transform: object.transform,
@@ -561,7 +723,7 @@ impl SceneRenderer {
             target.view,
             &output,
             &self.quad,
-            &s.color.view,
+            (&s.color).into(),
             &self.white.view,
             Params {
                 transform: full,
@@ -574,6 +736,7 @@ impl SceneRenderer {
         );
         flush(&mut frame);
         self.stats.draw_batches = frame.batches;
+        self.stats.bind_groups = frame.groups.len();
         self.queue.write_buffer(&frame.uniforms, 0, &frame.bytes);
         self.queue.submit([frame.encoder.finish()]);
         self.parameter_bytes = frame.bytes;
@@ -594,19 +757,15 @@ impl SceneRenderer {
         }
         let source = scene.resources.mesh(id).expect("scene was validated");
         let desc = *source.descriptor();
-        let vertices = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("scene vertices"),
-            size: u64::from(desc.vertex_count) * 20,
-            usage: desc.usages | wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let vertices = self.take_output_buffer(
+            u64::from(desc.vertex_count) * 20,
+            desc.usages | wgpu::BufferUsages::VERTEX,
+        );
         let indices = (desc.index_count != 0).then(|| {
-            self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("scene indices"),
-                size: u64::from(desc.index_count) * 4,
-                usage: desc.usages | wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
+            self.take_output_buffer(
+                u64::from(desc.index_count) * 4,
+                desc.usages | wgpu::BufferUsages::INDEX,
+            )
         });
         source
             .prepare(MeshPrepareContext {
@@ -626,13 +785,50 @@ impl SceneRenderer {
                 source,
             })?;
         let bytes = u64::from(desc.vertex_count) * 20 + u64::from(desc.index_count) * 4;
+        let vertices_slot = self
+            .arenas
+            .buffer(&self.device, u64::from(desc.vertex_count) * 20);
+        encoder.copy_buffer_to_buffer(
+            &vertices,
+            0,
+            &vertices_slot.page.buffer,
+            vertices_slot.range.start,
+            vertices_slot.range.end - vertices_slot.range.start,
+        );
+        let indices_slot = indices.as_ref().map(|source| {
+            let slot = self
+                .arenas
+                .buffer(&self.device, u64::from(desc.index_count) * 4);
+            encoder.copy_buffer_to_buffer(
+                source,
+                0,
+                &slot.page.buffer,
+                slot.range.start,
+                slot.range.end - slot.range.start,
+            );
+            slot
+        });
+        let packed_vertices = vertices_slot.page.buffer.clone();
+        let vertex_range = vertices_slot.range.clone();
+        let packed_indices = indices_slot.as_ref().map(|slot| slot.page.buffer.clone());
+        let index_range = indices_slot
+            .as_ref()
+            .map_or(0..0, |slot| slot.range.clone());
+        self.return_output_buffer(vertices);
+        if let Some(indices) = indices {
+            self.return_output_buffer(indices);
+        }
         self.meshes.insert(
             id,
             Entry {
                 value: Mesh {
                     desc,
-                    vertices,
-                    indices,
+                    vertices: packed_vertices,
+                    indices: packed_indices,
+                    vertex_range,
+                    index_range,
+                    _vertices_slot: Some(vertices_slot),
+                    _indices_slot: indices_slot,
                 },
                 bytes,
                 last_used: self.frame,
@@ -655,7 +851,7 @@ impl SceneRenderer {
             return Ok(());
         }
         let source = scene.resources.texture(id).expect("scene was validated");
-        let image = make_image(&self.device, *source.descriptor());
+        let image = self.take_output_image(*source.descriptor());
         source
             .prepare(TexturePrepareContext {
                 gpu: GpuPrepareContext {
@@ -669,6 +865,7 @@ impl SceneRenderer {
                 id: id.get(),
                 source,
             })?;
+        let image = self.pack_image(image, encoder);
         self.textures.insert(
             id,
             Entry {
@@ -694,7 +891,7 @@ impl SceneRenderer {
             return Ok(());
         }
         let source = scene.resources.mask(id).expect("scene was validated");
-        let image = make_image(&self.device, *source.descriptor());
+        let image = self.take_output_image(*source.descriptor());
         source
             .prepare(MaskPrepareContext {
                 gpu: GpuPrepareContext {
@@ -708,6 +905,7 @@ impl SceneRenderer {
                 id: id.get(),
                 source,
             })?;
+        let image = self.pack_image(image, encoder);
         self.masks.insert(
             id,
             Entry {
@@ -720,6 +918,63 @@ impl SceneRenderer {
         self.stats.prepared += 1;
         Ok(())
     }
+    fn pack_image(&mut self, image: Image, encoder: &mut wgpu::CommandEncoder) -> Image {
+        let slot = self
+            .arenas
+            .texture(&self.device, image.desc.format, image.desc.size);
+        let mut destination = slot.page.texture.as_image_copy();
+        destination.origin = wgpu::Origin3d {
+            x: slot.origin[0],
+            y: slot.origin[1],
+            z: 0,
+        };
+        encoder.copy_texture_to_texture(
+            image.texture.as_image_copy(),
+            destination,
+            extent(image.desc.size),
+        );
+        let resident = Image {
+            desc: image.desc,
+            texture: slot.page.texture.clone(),
+            view: slot.page.view.clone(),
+            slot: Some(slot),
+        };
+        self.temporary_images.insert(image.desc, image);
+        resident
+    }
+    // Exact descriptors preserve texture.size()/view semantics. Outputs are
+    // leased exclusively, copied into resident placement, then returned. A
+    // producer must initialize all content and may not retain output handles.
+    fn take_output_image(&mut self, desc: TextureDescriptor) -> Image {
+        if let Some(image) = self.temporary_images.remove(&desc) {
+            return image;
+        }
+        self.stats.output_texture_allocations += 1;
+        make_image(&self.device, desc)
+    }
+    fn take_output_buffer(&mut self, size: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
+        let usage = usage | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
+        if let Some(buffer) = self
+            .temporary_buffers
+            .get_mut(&(size, usage))
+            .and_then(Vec::pop)
+        {
+            return buffer;
+        }
+        self.stats.output_buffer_allocations += 1;
+        self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("leased generation output"),
+            size,
+            usage,
+            mapped_at_creation: false,
+        })
+    }
+    fn return_output_buffer(&mut self, buffer: wgpu::Buffer) {
+        self.temporary_buffers
+            .entry((buffer.size(), buffer.usage()))
+            .or_default()
+            .push(buffer);
+    }
     #[allow(clippy::too_many_arguments)]
     fn draw(
         &self,
@@ -727,45 +982,60 @@ impl SceneRenderer {
         destination: &wgpu::TextureView,
         pipeline: &wgpu::RenderPipeline,
         mesh: &Mesh,
-        image: &wgpu::TextureView,
+        image: ImageRef<'_>,
         mask: &wgpu::TextureView,
         params: Params,
         scissor: Option<[u32; 4]>,
-        local: Option<&wgpu::TextureView>,
+        local: Option<ImageRef<'_>>,
     ) {
         let offset = frame.bytes.len();
-        frame.bytes.extend_from_slice(bytemuck::bytes_of(&params));
+        let local = local.unwrap_or_else(|| ImageRef::from(&self.white));
+        let gpu_params = GpuParams {
+            base: params,
+            source_uv: image.uv,
+            local_uv: local.uv,
+        };
+        frame
+            .bytes
+            .extend_from_slice(bytemuck::bytes_of(&gpu_params));
         frame.bytes.resize(offset + frame.stride, 0);
-        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("scene draw"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &frame.uniforms,
-                        offset: 0,
-                        size: wgpu::BufferSize::new(80),
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(image),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(mask),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(local.unwrap_or(&self.white.view)),
-                },
-            ],
-        });
+        let key = (image.view.clone(), mask.clone(), local.view.clone());
+        let group = frame
+            .groups
+            .entry(key)
+            .or_insert_with(|| {
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("scene resident pages"),
+                    layout: &self.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &frame.uniforms,
+                                offset: 0,
+                                size: wgpu::BufferSize::new(112),
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(image.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(mask),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(local.view),
+                        },
+                    ],
+                })
+            })
+            .clone();
         if frame
             .destination
             .as_ref()
@@ -779,6 +1049,8 @@ impl SceneRenderer {
             group,
             vertices: mesh.vertices.clone(),
             indices: mesh.indices.clone(),
+            vertex_range: mesh.vertex_range.clone(),
+            index_range: mesh.index_range.clone(),
             desc: mesh.desc,
             offset: offset as u32,
             scissor,
@@ -1072,7 +1344,10 @@ fn make_image(device: &wgpu::Device, desc: TextureDescriptor) -> Image {
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: desc.format,
-        usage: desc.usages | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        usage: desc.usages
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = texture.create_view(&Default::default());
@@ -1080,6 +1355,7 @@ fn make_image(device: &wgpu::Device, desc: TextureDescriptor) -> Image {
         desc,
         texture,
         view,
+        slot: None,
     }
 }
 fn attachment(device: &wgpu::Device, size: [u32; 2], format: wgpu::TextureFormat) -> Image {
@@ -1167,8 +1443,11 @@ struct DrawFrame {
     pending: Vec<DrawCall>,
     destination: Option<wgpu::TextureView>,
     batches: usize,
+    groups: HashMap<(wgpu::TextureView, wgpu::TextureView, wgpu::TextureView), wgpu::BindGroup>,
 }
 struct DrawCall {
+    vertex_range: Range<u64>,
+    index_range: Range<u64>,
     pipeline: wgpu::RenderPipeline,
     group: wgpu::BindGroup,
     vertices: wgpu::Buffer,
@@ -1209,9 +1488,12 @@ fn flush(frame: &mut DrawFrame) {
             pass.set_scissor_rect(x, y, w, h);
             pass.set_pipeline(&draw.pipeline);
             pass.set_bind_group(0, &draw.group, &[draw.offset]);
-            pass.set_vertex_buffer(0, draw.vertices.slice(..));
+            pass.set_vertex_buffer(0, draw.vertices.slice(draw.vertex_range.clone()));
             if let Some(indices) = &draw.indices {
-                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_index_buffer(
+                    indices.slice(draw.index_range.clone()),
+                    wgpu::IndexFormat::Uint32,
+                );
                 pass.draw_indexed(0..draw.desc.index_count, 0, 0..1);
             } else {
                 pass.draw(0..draw.desc.vertex_count, 0..1);

@@ -28,7 +28,7 @@ fn first_child(world: &World, root: Entity) -> Entity {
         .1
 }
 
-fn cache(world: &World, e: Entity) -> Arc<parking_lot::Mutex<Option<Arc<matcha_paint::RenderNode>>>> {
+fn cache(world: &World, e: Entity) -> Arc<parking_lot::Mutex<Option<render_interface::Scene>>> {
     world
         .get::<RenderItem>(e)
         .expect("Image carries a RenderItem")

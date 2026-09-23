@@ -9,6 +9,10 @@ use std::sync::{
 };
 #[path = "../examples/support/effects.rs"]
 mod effects;
+#[path = "../examples/support/private_3d.rs"]
+mod private_3d;
+#[path = "../examples/support/sources.rs"]
+mod sources;
 
 fn gpu_descriptor(legacy: bool) -> GpuDescriptor {
     GpuDescriptor {
@@ -139,7 +143,7 @@ fn real_gpu_scene_contract() {
     let mut scene = Scene::default();
     let quad = scene
         .resources
-        .insert_mesh(matcha_paint::unit_quad())
+        .insert_mesh(sources::unit_quad())
         .expect("fresh quad");
     let red = color(&mut scene, [255, 0, 0, 255]);
     let blue = color(&mut scene, [0, 0, 255, 255]);
@@ -313,7 +317,7 @@ fn real_gpu_scene_contract() {
     let mut failing = Scene::default();
     let q = failing
         .resources
-        .insert_mesh(matcha_paint::unit_quad())
+        .insert_mesh(sources::unit_quad())
         .expect("fresh mesh");
     let attempts = Arc::new(AtomicUsize::new(0));
     let a = attempts.clone();
@@ -375,7 +379,7 @@ fn real_gpu_scene_contract() {
     let mut effect_scene = Scene::default();
     let q = effect_scene
         .resources
-        .insert_mesh(matcha_paint::unit_quad())
+        .insert_mesh(sources::unit_quad())
         .expect("quad");
     let triangle = effect_scene
         .resources
@@ -476,9 +480,9 @@ fn real_gpu_scene_contract() {
     let mut projected = Scene::default();
     let fast = projected
         .resources
-        .insert_mesh(matcha_paint::unit_quad())
+        .insert_mesh(sources::unit_quad())
         .expect("fast quad");
-    let original = matcha_paint::unit_quad();
+    let original = sources::unit_quad();
     let mut desc = *original.descriptor();
     desc.non_overlapping = false;
     let general = projected
@@ -486,10 +490,13 @@ fn real_gpu_scene_contract() {
         .insert_mesh(MeshSource::new(desc, move |c| original.prepare(c)))
         .expect("general quad");
     let green = color(&mut projected, [0, 255, 0, 255]);
-    let gradient =
-        matcha_paint::Bitmap::coverage([8, 8], (0..64).map(|i| (i % 8 * 32) as u8).collect())
-            .expect("gradient")
-            .register_mask(&mut projected.resources);
+    let gradient = projected
+        .resources
+        .insert_mask(sources::coverage(
+            [8, 8],
+            (0..64).map(|i| (i % 8 * 32) as u8).collect(),
+        ))
+        .expect("gradient");
     let mut transform = rect(4., 4., 48., 48.);
     transform[(3, 0)] = 0.4;
     projected.pixel_masks.push(PixelMask {
@@ -527,7 +534,7 @@ fn real_gpu_scene_contract() {
     let mut initial_scene = Scene::default();
     let q = initial_scene
         .resources
-        .insert_mesh(matcha_paint::unit_quad())
+        .insert_mesh(sources::unit_quad())
         .expect("quad");
     let mut desc = TextureDescriptor::new([4, 4], wgpu::TextureFormat::Rgba8Unorm);
     desc.usages = wgpu::TextureUsages::RENDER_ATTACHMENT;
@@ -654,25 +661,47 @@ fn unchanged_legacy_renderer_is_a_pixel_baseline() {
         )
         .expect("unchanged main renderer");
     let old_pixels = pixels(&device, &queue, &old_target);
-    let node = matcha_paint::RenderNode::new()
-        .with_texture(
-            matcha_paint::Bitmap::rgba([1, 1], rgba.to_vec()).expect("color"),
-            [36., 30.],
-            Matrix4::identity(),
-        )
-        .with_stencil(
-            matcha_paint::Bitmap::coverage([8, 8], bitmap).expect("mask"),
-            [36., 30.],
-            Matrix4::identity(),
-        );
-    let mut builder = matcha_paint::SceneBuilder::new();
-    builder.begin();
-    let clip = builder.push_clip(None, rect(12., 4., 36., 42.));
-    builder.push(&node, transform, Some(clip), 0.6);
-    builder.finish();
+    let mut scene = Scene::default();
+    let mesh = scene
+        .resources
+        .insert_mesh(sources::unit_quad())
+        .expect("quad");
+    let texture = scene
+        .resources
+        .insert_texture(sources::rgba([1, 1], rgba.to_vec()))
+        .expect("color");
+    let mask = scene
+        .resources
+        .insert_mask(sources::coverage([8, 8], bitmap))
+        .expect("gradient");
+    let clip = scene
+        .resources
+        .insert_mask(sources::coverage([1, 1], vec![255]))
+        .expect("clip");
+    scene.pixel_masks = vec![
+        PixelMask {
+            mesh,
+            texture: clip,
+            transform: rect(12., 4., 36., 42.),
+            parent: None,
+        },
+        PixelMask {
+            mesh,
+            texture: mask,
+            transform: transform * rect(0., 0., 36., 30.),
+            parent: Some(PixelMaskIndex(0)),
+        },
+    ];
+    scene.phases.push(Phase {
+        objects: vec![Object {
+            mask: Some(PixelMaskIndex(1)),
+            opacity: 0.6,
+            ..Object::new(mesh, texture, transform * rect(0., 0., 36., 30.))
+        }],
+    });
     let new_target = output(&device);
     let mut renderer = SceneRenderer::new(&device, &queue);
-    render(&mut renderer, builder.scene(), &new_target, [64., 64.]);
+    render(&mut renderer, &scene, &new_target, [64., 64.]);
     let new_pixels = pixels(&device, &queue, &new_target);
     let max = old_pixels
         .iter()
@@ -689,5 +718,541 @@ fn unchanged_legacy_renderer_is_a_pixel_baseline() {
     assert!(
         max <= 2,
         "legacy pixel parity exceeded two quantization steps: {max}"
+    );
+}
+
+#[test]
+fn atlas_pages_relocation_reuse_and_regeneration_preserve_content_ids() {
+    use renderer::scene_renderer::AtlasConfig;
+    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor(false))).expect("real GPU");
+    let (device, queue) = gpu.context().expect("GPU");
+    let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut backend = SceneRenderer::new(&device, &queue);
+    backend
+        .set_atlas_config(AtlasConfig {
+            texture_edge: 16,
+            mesh_page_bytes: 512,
+        })
+        .expect("small stress arenas");
+    let target = output(&device);
+    let mut scene = Scene::default();
+    let generated = Arc::new(AtomicUsize::new(0));
+    let mut expected = vec![0u8; 64 * 64 * 4];
+    scene.phases.push(Phase::default());
+    for i in 0..64u32 {
+        let original = sources::unit_quad();
+        let count = generated.clone();
+        let mesh = scene
+            .resources
+            .insert_mesh(MeshSource::new(*original.descriptor(), move |c| {
+                count.fetch_add(1, Ordering::SeqCst);
+                original.prepare(c)
+            }))
+            .expect("unique mesh");
+        let rgba = [
+            (i * 37 % 256) as u8,
+            (i * 73 % 256) as u8,
+            (i * 113 % 256) as u8,
+            255,
+        ];
+        let size = if i == 63 {
+            [65, 33]
+        } else {
+            [3 + i % 5, 2 + i % 3]
+        };
+        let count = generated.clone();
+        let texture = scene
+            .resources
+            .insert_texture(TextureSource::new(
+                TextureDescriptor::new(size, wgpu::TextureFormat::Rgba8Unorm),
+                move |mut c| {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let mut bytes = Vec::new();
+                    for _ in 0..size[0] * size[1] {
+                        bytes.extend_from_slice(&rgba);
+                    }
+                    upload_texture(&mut c.gpu, &c.target, &bytes)
+                },
+            ))
+            .expect("unique texture");
+        scene.phases[0].objects.push(Object::new(
+            mesh,
+            texture,
+            rect((i % 8 * 8) as f32, (i / 8 * 8) as f32, 8., 8.),
+        ));
+        for y in i / 8 * 8..i / 8 * 8 + 8 {
+            for x in i % 8 * 8..i % 8 * 8 + 8 {
+                let at = (y * 64 + x) as usize * 4;
+                expected[at..at + 4].copy_from_slice(&rgba);
+            }
+        }
+    }
+    scene
+        .resources
+        .insert_texture(TextureSource::new(
+            TextureDescriptor::new([8, 8], wgpu::TextureFormat::Rgba8Unorm),
+            |_| panic!("pool-only source must remain lazy"),
+        ))
+        .expect("unused candidate");
+    let snapshot_calls = Arc::new(AtomicUsize::new(0));
+    let calls = snapshot_calls.clone();
+    let copy = scene
+        .resources
+        .insert_texture(TextureSource::new(
+            TextureDescriptor::new([64, 64], wgpu::TextureFormat::Rgba16Float),
+            move |c| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                c.gpu.encoder.copy_texture_to_texture(
+                    c.gpu.snapshot.color_texture.as_image_copy(),
+                    c.target.texture.as_image_copy(),
+                    c.target.texture.size(),
+                );
+                Ok(())
+            },
+        ))
+        .expect("snapshot source");
+    let quad = scene.phases[0].objects[0].mesh;
+    scene.phases.push(Phase {
+        objects: vec![Object::new(quad, copy, rect(0., 0., 64., 64.))],
+    });
+    render(&mut backend, &scene, &target, [64., 64.]);
+    let before = pixels(&device, &queue, &target);
+    assert!(
+        before
+            .iter()
+            .zip(&expected)
+            .all(|(a, b)| a.abs_diff(*b) <= 1),
+        "no inter-region filter bleed, including oversized fallback"
+    );
+    let small = backend.stats().placement;
+    assert!(
+        small.texture_pages > 3 && small.mesh_pages > 3,
+        "stress must force several pages: {small:?}"
+    );
+    assert_eq!(generated.load(Ordering::SeqCst), 128);
+    // Relocate without waiting for prior frames; queue order protects old reads.
+    for _ in 0..3 {
+        render(&mut backend, &scene, &target, [64., 64.]);
+    }
+    let moved = backend
+        .compact_resources(AtlasConfig {
+            texture_edge: 128,
+            mesh_page_bytes: 8192,
+        })
+        .expect("GPU-only relocation");
+    render(&mut backend, &scene, &target, [64., 64.]);
+    assert_eq!(before, pixels(&device, &queue, &target));
+    assert_eq!(generated.load(Ordering::SeqCst), 128);
+    assert_eq!(
+        snapshot_calls.load(Ordering::SeqCst),
+        1,
+        "relocation cannot resample a phase"
+    );
+    assert_eq!(backend.stats().prepared, 0);
+    assert_eq!(backend.stats().snapshot_copies, 0);
+    assert!(moved.placement.texture_pages < small.texture_pages);
+    assert!(moved.placement.mesh_pages < small.mesh_pages);
+    // Eviction removes lease ownership, not Scene definitions. Empty pages drop.
+    backend.set_cache_budget(0);
+    render(&mut backend, &Scene::default(), &target, [64., 64.]);
+    assert_eq!(backend.stats().placement.texture_pages, 0);
+    assert_eq!(backend.stats().placement.mesh_pages, 0);
+    render(&mut backend, &scene, &target, [64., 64.]);
+    assert_eq!(before, pixels(&device, &queue, &target));
+    assert_eq!(generated.load(Ordering::SeqCst), 256);
+    assert_eq!(snapshot_calls.load(Ordering::SeqCst), 2);
+    // Retire half the allocations while the remaining half keeps shared pages
+    // alive, then refill with new IDs. Every live tile retains its own colour.
+    scene.phases.truncate(1);
+    let removed = scene.phases[0].objects.split_off(32);
+    render(&mut backend, &scene, &target, [64., 64.]);
+    assert!(backend.stats().evicted >= 64);
+    for (n, old) in removed.iter().enumerate() {
+        let rgba = [255, 255 - (n * 7) as u8, (n * 5) as u8, 255];
+        let texture = scene
+            .resources
+            .insert_texture(TextureSource::new(
+                TextureDescriptor::new([4, 3], wgpu::TextureFormat::Rgba8Unorm),
+                move |mut c| upload_texture(&mut c.gpu, &c.target, &rgba.repeat(12)),
+            ))
+            .expect("fresh refill");
+        scene.phases[0]
+            .objects
+            .push(Object::new(old.mesh, texture, old.transform));
+        let tile = n + 32;
+        for y in tile / 8 * 8..tile / 8 * 8 + 8 {
+            for x in tile % 8 * 8..tile % 8 * 8 + 8 {
+                let at = (y * 64 + x) * 4;
+                expected[at..at + 4].copy_from_slice(&rgba);
+            }
+        }
+    }
+    render(&mut backend, &scene, &target, [64., 64.]);
+    let after = pixels(&device, &queue, &target);
+    assert!(
+        after
+            .iter()
+            .zip(&expected)
+            .all(|(a, b)| a.abs_diff(*b) <= 1),
+        "reused regions may not overwrite still-live resources"
+    );
+    eprintln!(
+        "Atlas stress: small={small:?}; relocation={moved:?}; refill={:?}",
+        backend.stats()
+    );
+    let error = futures::executor::block_on(validation.pop());
+    assert!(error.is_none(), "{error:?}");
+}
+
+#[test]
+fn diagnostic_snapshot_content_identity_must_be_updated_by_the_caller() {
+    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor(false))).expect("real GPU");
+    let (device, queue) = gpu.context().expect("GPU");
+    let mut backend = SceneRenderer::new(&device, &queue);
+    let target = output(&device);
+    let mut scene = Scene::default();
+    let mesh = scene
+        .resources
+        .insert_mesh(sources::unit_quad())
+        .expect("quad");
+    let red = color(&mut scene, [255, 0, 0, 255]);
+    let blue = color(&mut scene, [0, 0, 255, 255]);
+    let copy = || {
+        TextureSource::new(
+            TextureDescriptor::new([64, 64], wgpu::TextureFormat::Rgba16Float),
+            |c| {
+                c.gpu.encoder.copy_texture_to_texture(
+                    c.gpu.snapshot.color_texture.as_image_copy(),
+                    c.target.texture.as_image_copy(),
+                    c.target.texture.size(),
+                );
+                Ok(())
+            },
+        )
+    };
+    let texture = scene
+        .resources
+        .insert_texture(copy())
+        .expect("snapshot source");
+    scene.phases = vec![
+        Phase {
+            objects: vec![Object::new(mesh, red, rect(0., 0., 64., 64.))],
+        },
+        Phase {
+            objects: vec![Object::new(mesh, texture, rect(0., 0., 64., 64.))],
+        },
+    ];
+    render(&mut backend, &scene, &target, [64., 64.]);
+    close(
+        pixel(&pixels(&device, &queue, &target), 20, 20),
+        [255, 0, 0, 255],
+    );
+    // Deliberate contract violation: background changes but its consumer's ID
+    // does not. This diagnostic records the observable ergonomic failure mode.
+    scene.phases[0].objects[0].texture = blue;
+    render(&mut backend, &scene, &target, [64., 64.]);
+    close(
+        pixel(&pixels(&device, &queue, &target), 20, 20),
+        [255, 0, 0, 255],
+    );
+    backend.clear_cache();
+    render(&mut backend, &scene, &target, [64., 64.]);
+    close(
+        pixel(&pixels(&device, &queue, &target), 20, 20),
+        [0, 0, 255, 255],
+    );
+    // The supported construction uses a fresh immutable-content definition.
+    scene.phases[1].objects[0].texture = scene
+        .resources
+        .insert_texture(copy())
+        .expect("new content ID");
+    render(&mut backend, &scene, &target, [64., 64.]);
+    close(
+        pixel(&pixels(&device, &queue, &target), 20, 20),
+        [0, 0, 255, 255],
+    );
+    eprintln!(
+        "Design diagnostic: reusing a background-dependent ID produced warm/cold disagreement; fresh ID restored the invariant."
+    );
+}
+
+#[test]
+fn diagnostic_gpu_validation_is_distinct_from_prepare_result() {
+    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor(false))).expect("real GPU");
+    let (device, queue) = gpu.context().expect("GPU");
+    let mut backend = SceneRenderer::new(&device, &queue);
+    let target = output(&device);
+    let mut scene = Scene::default();
+    let mesh = scene
+        .resources
+        .insert_mesh(sources::unit_quad())
+        .expect("mesh");
+    let texture = scene
+        .resources
+        .insert_texture(TextureSource::new(
+            TextureDescriptor::new([64, 64], wgpu::TextureFormat::Rgba8Unorm),
+            |c| {
+                // Invalid format conversion via Copy (RGBA16Float -> RGBA8Unorm).
+                // A valid conversion must use Render/Compute, not this copy command.
+                c.gpu.encoder.copy_texture_to_texture(
+                    c.gpu.snapshot.color_texture.as_image_copy(),
+                    c.target.texture.as_image_copy(),
+                    c.target.texture.size(),
+                );
+                Ok(())
+            },
+        ))
+        .expect("invalid-command producer");
+    scene.phases.push(Phase {
+        objects: vec![Object::new(mesh, texture, rect(0., 0., 64., 64.))],
+    });
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let cpu_result = backend.render(
+        &scene,
+        SceneTarget {
+            view: &target.create_view(&Default::default()),
+            viewport: [64., 64.],
+            clear: wgpu::Color::BLACK,
+            initial: None,
+        },
+    );
+    let gpu_error = futures::executor::block_on(scope.pop());
+    assert!(cpu_result.is_ok());
+    assert!(gpu_error.is_some());
+    backend.clear_cache();
+    eprintln!(
+        "Design diagnostic: callback Ok/CPU render Ok did not imply GPU validation success; wgpu error scope reported the invalid copy."
+    );
+}
+
+#[test]
+fn gpu_deformed_mesh_survives_packing_and_relocation() {
+    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor(false))).expect("real GPU");
+    let (device, queue) = gpu.context().expect("GPU");
+    let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut backend = SceneRenderer::new(&device, &queue);
+    backend
+        .set_atlas_config(renderer::scene_renderer::AtlasConfig {
+            texture_edge: 16,
+            mesh_page_bytes: 256,
+        })
+        .expect("oversized mesh stress");
+    let target = output(&device);
+    let mut scene = Scene::default();
+    let texture = color(&mut scene, [0, 255, 255, 255]);
+    let clip_mesh = scene
+        .resources
+        .insert_mesh(sources::unit_quad())
+        .expect("clip quad");
+    let mask = coverage(&mut scene, 255);
+    scene.pixel_masks.push(PixelMask {
+        mesh: clip_mesh,
+        texture: mask,
+        transform: rect(8., 0., 48., 64.),
+        parent: None,
+    });
+    scene.phases.push(Phase::default());
+    let mut frames = Vec::new();
+    for phase in [0., 1.2, 2.4] {
+        let mesh = scene
+            .resources
+            .insert_mesh(effects::ribbon(256, phase))
+            .expect("fresh animated mesh");
+        scene.phases[0].objects.clear();
+        scene.phases[0].objects.push(Object {
+            mask: Some(PixelMaskIndex(0)),
+            ..Object::new(mesh, texture, rect(0., 0., 64., 64.))
+        });
+        render(&mut backend, &scene, &target, [64., 64.]);
+        let bytes = pixels(&device, &queue, &target);
+        assert!(bytes.chunks_exact(4).filter(|p| p[1] > 200).count() > 150);
+        for y in 0..64 {
+            assert_eq!(pixel(&bytes, 2, y), [0, 0, 0, 255]);
+        }
+        frames.push(bytes);
+    }
+    assert_ne!(frames[0], frames[1]);
+    assert_ne!(frames[1], frames[2]);
+    let moved = backend
+        .compact_resources(renderer::scene_renderer::AtlasConfig {
+            texture_edge: 32,
+            mesh_page_bytes: 128 * 1024,
+        })
+        .expect("relocate generated geometry");
+    render(&mut backend, &scene, &target, [64., 64.]);
+    assert_eq!(frames[2], pixels(&device, &queue, &target));
+    assert_eq!(backend.stats().prepared, 0);
+    eprintln!(
+        "GPU animated mesh: 1536 generated vertices/frame, clipping and relocation exact; {moved:?}"
+    );
+    // Equal size AND usages must still lease distinct simultaneous logical
+    // outputs. Reusing the same scratch buffer here would corrupt vertices.
+    let mut desc = MeshDescriptor::triangles(3, 15);
+    desc.usages = wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::INDEX;
+    let mesh = scene
+        .resources
+        .insert_mesh(MeshSource::new(desc, |mut c| {
+            let indices = c.target.indices.expect("indexed source");
+            assert_ne!(c.target.vertices, indices);
+            let vertices = [
+                Vertex {
+                    position: [0., 0., 0.],
+                    uv: [0., 0.],
+                },
+                Vertex {
+                    position: [1., 0., 0.],
+                    uv: [1., 0.],
+                },
+                Vertex {
+                    position: [0., 1., 0.],
+                    uv: [0., 1.],
+                },
+            ];
+            upload_buffer(
+                &mut c.gpu,
+                c.target.vertices,
+                bytemuck::cast_slice(&vertices),
+            )?;
+            upload_buffer(
+                &mut c.gpu,
+                indices,
+                bytemuck::cast_slice(&[0u32, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2]),
+            )
+        }))
+        .expect("two simultaneous outputs");
+    scene.phases[0].objects = vec![Object::new(mesh, texture, rect(0., 0., 64., 64.))];
+    render(&mut backend, &scene, &target, [64., 64.]);
+    let bytes = pixels(&device, &queue, &target);
+    close(pixel(&bytes, 4, 4), [0, 255, 255, 255]);
+    close(pixel(&bytes, 55, 55), [0, 0, 0, 255]);
+    assert_eq!(backend.stats().output_buffer_allocations, 2);
+    let error = futures::executor::block_on(validation.pop());
+    assert!(error.is_none(), "{error:?}");
+}
+
+#[test]
+fn a_generator_can_render_private_3d_with_depth_then_join_ui_composition() {
+    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor(false))).expect("real GPU");
+    let (device, queue) = gpu.context().expect("GPU");
+    let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut backend = SceneRenderer::new(&device, &queue);
+    let target = output(&device);
+    let mut scene = Scene::default();
+    let mesh = scene
+        .resources
+        .insert_mesh(sources::unit_quad())
+        .expect("quad");
+    let background = color(&mut scene, [25, 30, 40, 255]);
+    let cube = scene
+        .resources
+        .insert_texture(private_3d::cube([64, 64], 0.4))
+        .expect("private 3D source");
+    scene.phases.push(Phase {
+        objects: vec![
+            Object::new(mesh, background, rect(0., 0., 64., 64.)),
+            Object::new(mesh, cube, rect(0., 0., 64., 64.)),
+        ],
+    });
+    render(&mut backend, &scene, &target, [64., 64.]);
+    let before = pixels(&device, &queue, &target);
+    close(pixel(&before, 0, 0), [25, 30, 40, 255]);
+    assert!(
+        before
+            .chunks_exact(4)
+            .filter(|p| p[0] > 70 || p[1] > 70 || p[2] > 70)
+            .count()
+            > 500,
+        "3D interior is visible"
+    );
+    backend
+        .compact_resources(renderer::scene_renderer::AtlasConfig {
+            texture_edge: 128,
+            mesh_page_bytes: 4096,
+        })
+        .expect("relocate rendered texture");
+    render(&mut backend, &scene, &target, [64., 64.]);
+    assert_eq!(before, pixels(&device, &queue, &target));
+    assert_eq!(backend.stats().prepared, 0);
+    let error = futures::executor::block_on(validation.pop());
+    assert!(error.is_none(), "{error:?}");
+}
+
+#[test]
+fn diagnostic_pixel_art_needs_extra_geometry_with_the_fixed_linear_sampler() {
+    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor(false))).expect("real GPU");
+    let (device, queue) = gpu.context().expect("GPU");
+    let mut backend = SceneRenderer::new(&device, &queue);
+    let target = output(&device);
+    let mut scene = Scene::default();
+    let texture = scene
+        .resources
+        .insert_texture(TextureSource::new(
+            TextureDescriptor::new([2, 1], wgpu::TextureFormat::Rgba8Unorm),
+            |mut c| upload_texture(&mut c.gpu, &c.target, &[255, 0, 0, 255, 0, 0, 255, 255]),
+        ))
+        .expect("two texels");
+    let quad = scene
+        .resources
+        .insert_mesh(sources::unit_quad())
+        .expect("quad");
+    scene.phases.push(Phase {
+        objects: vec![Object::new(quad, texture, rect(0., 0., 64., 64.))],
+    });
+    render(&mut backend, &scene, &target, [64., 64.]);
+    let linear = pixels(&device, &queue, &target);
+    let boundary = pixel(&linear, 32, 32);
+    assert!(
+        boundary[0] > 100 && boundary[2] > 100,
+        "linear interpolation blends the two texels"
+    );
+    // Existing ABI can express nearest-looking pixels using constant UV per
+    // texel quad, but that scales to six vertices per texel instead of a sampler
+    // choice. This is an explicit design-feedback experiment, not a new policy.
+    let mesh = scene
+        .resources
+        .insert_mesh(MeshSource::new(
+            MeshDescriptor::triangles(12, 0),
+            |mut c| {
+                let mut vertices = Vec::new();
+                for (left, right, u) in [(0., 0.5, 0.25), (0.5, 1., 0.75)] {
+                    for [x, y] in [
+                        [left, 0.],
+                        [left, 1.],
+                        [right, 1.],
+                        [left, 0.],
+                        [right, 1.],
+                        [right, 0.],
+                    ] {
+                        vertices.push(Vertex {
+                            position: [x, y, 0.],
+                            uv: [u, 0.5],
+                        });
+                    }
+                }
+                upload_buffer(
+                    &mut c.gpu,
+                    c.target.vertices,
+                    bytemuck::cast_slice(&vertices),
+                )
+            },
+        ))
+        .expect("explicit pixel mesh");
+    scene.phases[0].objects[0].mesh = mesh;
+    render(&mut backend, &scene, &target, [64., 64.]);
+    let discrete = pixels(&device, &queue, &target);
+    for y in 0..64 {
+        for x in 0..64 {
+            assert_eq!(
+                pixel(&discrete, x, y),
+                if x < 32 {
+                    [255, 0, 0, 255]
+                } else {
+                    [0, 0, 255, 255]
+                }
+            );
+        }
+    }
+    eprintln!(
+        "Design diagnostic: pixel art is expressible with texel geometry, but efficient nearest-vs-linear sampling needs an explicit drawing-semantic decision."
     );
 }

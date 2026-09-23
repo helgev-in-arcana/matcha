@@ -11,7 +11,7 @@
 //! arranges a child within the box (today's `RectGeometry::arrange` is a hard
 //! leaf) and would break every existing `Button::new(label)` call site's
 //! shape. Text shaping/rasterisation is reused from `crate::text` (the same
-//! `FontCtx` resource, `shape`, `paint_tint_region`, `glyph_run_nodes` helpers
+//! `FontCtx` resource, `shape`, `solid_source`, `draw_glyph_run` helpers
 //! `Text` uses), so no shaping/stencil-cache logic is duplicated here.
 //!
 //! (A formerly-documented "known issue" here — intermittent corruption of
@@ -39,12 +39,12 @@ use matcha_ecs::{
 
 use crate::{
     animation::Easing,
-    shape::ShapeCtx,
-    box_style::{box_node, BoxStyle, Corners},
+    box_style::{BoxStyle, Corners, box_scene},
     color_rect::RectColor,
-    interaction::{interaction_cell, ColorCell, InteractionColors},
+    interaction::{ColorCell, InteractionColors, interaction_cell},
+    shape::ShapeCtx,
     sizing::{RectGeometry, Sizing},
-    text::{glyph_run_nodes, paint_tint_region, shape, FontCtx},
+    text::{FontCtx, draw_glyph_run, shape, solid_source},
 };
 use std::time::Duration;
 
@@ -171,7 +171,6 @@ impl<Msg: Message> Button<Msg> {
         self
     }
 
-
     /// What the pointer looks like over this widget (CSS `cursor`).
     pub fn cursor(mut self, cursor: CursorIcon) -> Self {
         self.cursor = cursor;
@@ -216,7 +215,8 @@ impl<Msg: Message> Button<Msg> {
     /// (re)built (it needs world access for `FontCtx`, so unlike `ColorRect`
     /// it cannot be built inside `bundle()`).
     fn rebuild_render_item(&self, entity: &mut EntityWorldMut) -> RenderItem {
-        let font_ctx = entity.world_scope(|world| world.get_resource_or_insert_with(FontCtx::new).clone());
+        let font_ctx =
+            entity.world_scope(|world| world.get_resource_or_insert_with(FontCtx::new).clone());
         // The cell survives this rebuild, so an in-flight hover transition is
         // not restarted by an unrelated prop change.
         let box_color = interaction_cell(entity, self.colors());
@@ -273,10 +273,10 @@ fn button_render_item(
         if ctx.focused {
             style = style.border(FOCUS_RING_WIDTH, focus_ring_color);
         }
-        let mut node = box_node(ctx, &shape_ctx, [w, h], &style);
+        let mut node = box_scene(ctx, &shape_ctx, [w, h], &style);
 
         let layout = shape(&font_ctx, &label, font_size, f32::MAX);
-        let Some(tint_region) = paint_tint_region(ctx, label_color) else {
+        let Some(tint_source) = solid_source(ctx, label_color) else {
             return node;
         };
 
@@ -285,9 +285,7 @@ fn button_render_item(
             ((h - layout.total_height) / 2.0).max(0.0),
             0.0,
         ));
-        for (glyph_node, transform) in glyph_run_nodes(&font_ctx, ctx, &layout, &tint_region) {
-            node.push_child(glyph_node, offset * transform);
-        }
+        draw_glyph_run(&mut node, &font_ctx, &layout, &tint_source, offset);
 
         node
     })

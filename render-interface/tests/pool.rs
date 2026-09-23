@@ -42,3 +42,23 @@ fn ids_are_unique_across_resource_types_and_concurrent_allocation() {
         .collect();
     assert_eq!(ids.len(), 6000);
 }
+
+#[test]
+fn composing_definitions_uses_content_identity_not_closure_pointer_identity() {
+    let desc = TextureDescriptor::new([1, 1], wgpu::TextureFormat::Rgba8Unorm);
+    let id = TextureId::new();
+    let mut a = ResourcePool::default();
+    let mut b = ResourcePool::default();
+    a.insert_texture(TextureSource::with_id(id, desc, |_| Ok(())))
+        .expect("first definition");
+    b.insert_texture(TextureSource::with_id(id, desc, |_| Ok(())))
+        .expect("same content reconstructed independently");
+    a.import(&b)
+        .expect("caller promises same logical content for this ID");
+    assert_eq!(a.len(), 1);
+    assert!(
+        a.insert_texture(TextureSource::with_id(id, desc, |_| Ok(())))
+            .is_err(),
+        "direct duplicate submissions remain errors"
+    );
+}

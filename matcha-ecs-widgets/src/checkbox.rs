@@ -18,6 +18,7 @@
 use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, world::EntityWorldMut,
 };
+use matcha_ecs::scene::append_local;
 use matcha_window::window::CursorIcon;
 use nalgebra::{Matrix4, Vector3};
 
@@ -32,9 +33,9 @@ use matcha_ecs::{
     view::Widget,
 };
 
-use crate::box_style::{box_node, BoxStyle};
-use crate::sizing::RectGeometry;
+use crate::box_style::{BoxStyle, box_scene};
 use crate::shape::ShapeCtx;
+use crate::sizing::RectGeometry;
 use crate::sizing::Sizing;
 
 /// Draw-relevant checkbox state, tracked so `patch` can detect changes and
@@ -115,7 +116,6 @@ impl<Msg: Message> Checkbox<Msg> {
         self
     }
 
-
     /// What the pointer looks like over this widget (CSS `cursor`).
     pub fn cursor(mut self, cursor: CursorIcon) -> Self {
         self.cursor = cursor;
@@ -163,12 +163,12 @@ fn checkbox_render_item(shape: ShapeCtx, state: CheckboxState) -> RenderItem {
 
     RenderItem::new(move |ctx: &RenderCtx| {
         let [w, h] = ctx.size;
-        let mut node = box_node(ctx, &shape, [w, h], &outline);
+        let mut node = box_scene(ctx, &shape, [w, h], &outline);
         if state.checked {
             let fill_size = [(w - inset * 2.0).max(0.0), (h - inset * 2.0).max(0.0)];
-            let fill_node = box_node(ctx, &shape, fill_size, &tick);
+            let fill_node = box_scene(ctx, &shape, fill_size, &tick);
             let transform = Matrix4::new_translation(&Vector3::new(inset, inset, 0.0));
-            node.push_child(fill_node, transform);
+            append_local(&mut node, fill_node, transform);
         }
         node
     })

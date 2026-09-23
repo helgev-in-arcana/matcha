@@ -15,12 +15,15 @@
 use std::{collections::HashMap, sync::Arc, sync::mpsc, thread::JoinHandle};
 
 use bevy_ecs::{entity::Entity, world::World};
-use matcha_paint::{RenderNode, SceneBuilder};
 use matcha_window::window::WindowId;
 use nalgebra::Matrix4;
 use parking_lot::{Condvar, Mutex};
 use render_interface::PixelMaskIndex;
+use render_interface::{
+    MaskDescriptor, MaskId, MaskSource, MeshId, MeshSource, PixelMask, Scene, TextureId,
+};
 use renderer::{SceneRenderer, SceneTarget};
+use std::collections::HashSet;
 
 use crate::{
     clip::ClipArena,
@@ -39,12 +42,13 @@ use crate::{
 /// its current opacity (`1.0` if the entity has no `RenderOpacity`), and its
 /// focus and pointer state.
 pub struct RenderItemSnapshot {
+    pub rebuild_each_frame: bool,
     /// Which entity this was extracted from. Nothing on the render path reads
     /// it — it is here so a frame can be traced back to the tree that produced
     /// it, by a debugger or a test asserting on paint order.
     pub entity: Entity,
-    pub cache: Arc<Mutex<Option<Arc<RenderNode>>>>,
-    pub builder: Arc<dyn Fn(&RenderCtx) -> RenderNode + Send + Sync>,
+    pub cache: Arc<Mutex<Option<Scene>>>,
+    pub builder: Arc<dyn Fn(&RenderCtx, &mut Scene) + Send + Sync>,
     pub transform: Matrix4<f32>,
     pub size: [f32; 2],
     pub opacity: f32,
@@ -86,46 +90,142 @@ pub struct RenderSnapshot {
 /// pair under one driver lock permits the existing threaded presentation path
 /// without moving Sources or sharing each Source through an Arc.
 pub struct GuiRenderer {
-    pub scene: SceneBuilder,
+    pub scene: Scene,
     pub backend: SceneRenderer,
+    quad: MeshSource,
+    clip: MaskSource,
+    meshes: HashSet<MeshId>,
+    textures: HashSet<TextureId>,
+    masks: HashSet<MaskId>,
 }
 impl GuiRenderer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        let mut desc = MaskDescriptor::new([1, 1], wgpu::TextureFormat::R8Unorm);
+        desc.usages = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        let clip = MaskSource::new(desc, |c| {
+            let attachments = [Some(wgpu::RenderPassColorAttachment {
+                view: c.target.view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                    store: wgpu::StoreOp::Store,
+                },
+            })];
+            let _pass = c
+                .gpu
+                .encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    color_attachments: &attachments,
+                    ..Default::default()
+                });
+            Ok(())
+        });
         Self {
-            scene: SceneBuilder::new(),
+            scene: Scene::default(),
             backend: SceneRenderer::new(device, queue),
+            quad: crate::scene::unit_quad(),
+            clip,
+            meshes: HashSet::new(),
+            textures: HashSet::new(),
+            masks: HashSet::new(),
         }
     }
-    /// Production assembly and rendering, also usable with offscreen attachments
-    /// for visual proofs. No surface or window is needed by the Scene contract.
+    /// Merge complete widget Scenes. Unreferenced definitions supplied by a
+    /// widget remain retention hints; no paint-tree or bitmap conversion occurs.
     pub fn render_extracted(
         &mut self,
         items: &[RenderItemSnapshot],
         clips: &ClipArena,
         target: SceneTarget<'_>,
     ) -> Result<(), renderer::scene_renderer::SceneError> {
-        self.scene.begin();
+        self.assemble(items, clips, target.viewport)?;
+        self.backend.render(&self.scene, target)
+    }
+    /// Resolve retained widget Scenes into one complete interface submission.
+    /// Separate from GPU recording so construction costs can be measured directly.
+    pub fn assemble(
+        &mut self,
+        items: &[RenderItemSnapshot],
+        clips: &ClipArena,
+        viewport: [f32; 2],
+    ) -> Result<(), renderer::scene_renderer::SceneError> {
+        for phase in &mut self.scene.phases {
+            phase.objects.clear();
+        }
+        self.scene.pixel_masks.clear();
+        self.meshes.clear();
+        self.textures.clear();
+        self.masks.clear();
+        self.meshes.insert(self.quad.id());
+        self.masks.insert(self.clip.id());
+        if self.scene.resources.mesh(self.quad.id()).is_none() {
+            self.scene
+                .resources
+                .insert_mesh(self.quad.clone())
+                .expect("new shared quad");
+        }
+        if self.scene.resources.mask(self.clip.id()).is_none() {
+            self.scene
+                .resources
+                .insert_mask(self.clip.clone())
+                .expect("new shared clip");
+        }
         for clip in clips.as_slice() {
-            self.scene.push_clip(clip.parent, clip.transform);
+            self.scene.pixel_masks.push(PixelMask {
+                mesh: self.quad.id(),
+                texture: self.clip.id(),
+                transform: clip.transform,
+                parent: clip.parent.map(PixelMaskIndex),
+            });
         }
         for item in items {
             let ctx = RenderCtx {
+                transform: item.transform,
+                viewport_size: viewport,
                 size: item.size,
                 focused: item.focused,
                 focus_within: item.focus_within,
                 hovered: item.hovered,
                 active: item.active,
             };
-            let node = build_node(&item.cache, &item.builder, &ctx);
-            self.scene.push(
-                &node,
+            let mut cache = item.cache.lock();
+            let rebuild = cache.is_none() || item.rebuild_each_frame;
+            let source = cache.get_or_insert_with(Scene::default);
+            if rebuild {
+                (item.builder)(&ctx, source);
+            }
+            self.meshes.extend(source.resources.mesh_ids());
+            self.textures.extend(source.resources.texture_ids());
+            self.masks.extend(source.resources.mask_ids());
+            if let Err(error) = crate::scene::append_scene(
+                &mut self.scene,
+                &source,
                 item.transform,
                 item.clip.map(PixelMaskIndex),
                 item.opacity,
-            );
+            ) {
+                // Failed redraws must not accumulate fresh dynamic definitions
+                // from the widgets visited before the malformed fragment.
+                self.retain_submitted_sources();
+                return Err(renderer::scene_renderer::SceneError::Invalid(
+                    error.to_string(),
+                ));
+            }
         }
-        self.scene.finish();
-        self.backend.render(self.scene.scene(), target)
+        self.retain_submitted_sources();
+        Ok(())
+    }
+    fn retain_submitted_sources(&mut self) {
+        self.scene
+            .resources
+            .retain_meshes(|id| self.meshes.contains(&id));
+        self.scene
+            .resources
+            .retain_textures(|id| self.textures.contains(&id));
+        self.scene
+            .resources
+            .retain_masks(|id| self.masks.contains(&id));
     }
 }
 
@@ -173,6 +273,7 @@ fn extract_one(
             .unwrap_or(1.0);
         out.items.push(RenderItemSnapshot {
             entity,
+            rebuild_each_frame: item.rebuild_each_frame,
             cache: item.cache.clone(),
             builder: item.builder.clone(),
             transform,
@@ -223,33 +324,6 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
     }
 
     surface_texture.present();
-}
-
-/// Fetch (building on first use) an item's render node. In debug builds this
-/// first tries a non-blocking lock and warns on contention: the §7.4 invariant
-/// is that the main thread and render thread never hold this lock at once.
-fn build_node(
-    cache: &Arc<Mutex<Option<Arc<RenderNode>>>>,
-    builder: &Arc<dyn Fn(&RenderCtx) -> RenderNode + Send + Sync>,
-    ctx: &RenderCtx,
-) -> Arc<RenderNode> {
-    #[cfg(debug_assertions)]
-    {
-        match cache.try_lock() {
-            Some(mut guard) => {
-                return guard.get_or_insert_with(|| Arc::new(builder(ctx))).clone();
-            }
-            None => {
-                log::warn!(
-                    "render cache lock contended on render thread; \
-                     main and render threads should never lock it at once"
-                );
-            }
-        }
-    }
-
-    let mut guard = cache.lock();
-    guard.get_or_insert_with(|| Arc::new(builder(ctx))).clone()
 }
 
 /// Consumes per-frame [`RenderSnapshot`]s. The main thread checks
