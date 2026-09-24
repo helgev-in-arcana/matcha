@@ -23,7 +23,9 @@ use crate::SceneError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AtlasConfig {
+    /// Preferred page edge; oversized resources receive a larger page unchanged.
     pub texture_edge: u32,
+    /// Preferred mesh page capacity, positive and a multiple of four bytes.
     pub mesh_page_bytes: u64,
 }
 

@@ -1,7 +1,11 @@
 //! Ordered mesh and mask composition. This module sees resolved GPU resources,
 //! not content IDs, source callbacks, cache policies or submission ownership.
+pub(crate) mod plan;
+
 use render_interface::*;
 use std::{collections::HashMap, ops::Range};
+
+use plan::DrawPlan;
 
 use crate::resources::{Image, Mesh, extent, make_image};
 use wgpu::util::DeviceExt;
@@ -23,6 +27,8 @@ struct GpuParams {
     pub(crate) source_uv: [f32; 4],
     pub(crate) local_uv: [f32; 4],
 }
+
+pub(crate) const PARAMETER_BYTES: u64 = std::mem::size_of::<GpuParams>() as u64;
 
 pub(crate) struct ImageRef<'a> {
     pub(crate) view: &'a wgpu::TextureView,
@@ -58,7 +64,8 @@ pub(crate) struct Compositor {
     pub(crate) quad: Mesh,
     pub(crate) white: Image,
     pub(crate) parameter_buffer: Option<wgpu::Buffer>,
-    pub(crate) parameter_bytes: Vec<u8>,
+    pub(crate) draw_plan: DrawPlan,
+    workspace: FrameWorkspace,
 }
 impl Compositor {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
@@ -71,7 +78,7 @@ impl Compositor {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(112),
+                        min_binding_size: wgpu::BufferSize::new(PARAMETER_BYTES),
                     },
                     count: None,
                 },
@@ -189,8 +196,41 @@ impl Compositor {
             quad,
             white,
             parameter_buffer: None,
-            parameter_bytes: Vec::new(),
+            draw_plan: DrawPlan::default(),
+            workspace: FrameWorkspace::default(),
         }
+    }
+
+    /// Invalidate when the uniform arena or resident placement changes. Entries
+    /// own GPU views, so cache reset/relocation must not leave them pinning pages.
+    pub(crate) fn clear_bind_groups(&mut self) {
+        self.workspace.groups.clear();
+    }
+
+    pub(crate) fn take_workspace(&mut self) -> FrameWorkspace {
+        let mut workspace = std::mem::take(&mut self.workspace);
+        workspace.begin();
+        workspace
+    }
+
+    /// Called only after upload/submission has consumed this frame's records.
+    /// Keep map capacity and bindings used in this frame; forget views no longer
+    /// referenced, allowing retired pages to disappear after their GPU use.
+    pub(crate) fn restore_workspace(&mut self, mut workspace: FrameWorkspace) {
+        workspace.bytes.clear();
+        workspace.pending.clear();
+        let generation = workspace.generation;
+        workspace
+            .groups
+            .retain(|_, entry| entry.generation == generation);
+        self.workspace = workspace;
+    }
+
+    pub(crate) fn abort_workspace(&mut self, mut workspace: FrameWorkspace) {
+        workspace.groups.clear();
+        workspace.bytes.clear();
+        workspace.pending.clear();
+        self.workspace = workspace;
     }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw(
@@ -205,7 +245,7 @@ impl Compositor {
         scissor: Option<[u32; 4]>,
         local: Option<ImageRef<'_>>,
     ) {
-        let offset = frame.bytes.len();
+        let offset = frame.storage.bytes.len();
         let local = local.unwrap_or_else(|| ImageRef::from(&self.white));
         let gpu_params = GpuParams {
             base: params,
@@ -213,46 +253,49 @@ impl Compositor {
             local_uv: local.uv,
         };
         frame
+            .storage
             .bytes
             .extend_from_slice(bytemuck::bytes_of(&gpu_params));
-        frame.bytes.resize(offset + frame.stride, 0);
+        frame.storage.bytes.resize(offset + frame.stride, 0);
         let key = (image.view.clone(), mask.clone(), local.view.clone());
-        let group = frame
-            .groups
-            .entry(key)
-            .or_insert_with(|| {
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("scene resident pages"),
-                    layout: &self.layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &frame.uniforms,
-                                offset: 0,
-                                size: wgpu::BufferSize::new(112),
-                            }),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(image.view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: wgpu::BindingResource::TextureView(mask),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: wgpu::BindingResource::TextureView(local.view),
-                        },
-                    ],
-                })
-            })
-            .clone();
+        let generation = frame.storage.generation;
+        let created = &mut frame.storage.bind_groups_created;
+        let entry = frame.storage.groups.entry(key).or_insert_with(|| {
+            *created += 1;
+            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("scene resident pages"),
+                layout: &self.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &frame.uniforms,
+                            offset: 0,
+                            size: wgpu::BufferSize::new(PARAMETER_BYTES),
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(image.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(mask),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(local.view),
+                    },
+                ],
+            });
+            CachedGroup { group, generation }
+        });
+        entry.generation = generation;
+        let group = entry.group.clone();
         if frame
             .destination
             .as_ref()
@@ -261,7 +304,7 @@ impl Compositor {
             flush(frame);
         }
         frame.destination = Some(destination.clone());
-        frame.pending.push(DrawCall {
+        frame.storage.pending.push(DrawCall {
             pipeline: pipeline.clone(),
             group,
             vertices: mesh.vertices.clone(),
@@ -277,13 +320,38 @@ impl Compositor {
 pub(crate) struct DrawFrame {
     pub(crate) encoder: wgpu::CommandEncoder,
     pub(crate) uniforms: wgpu::Buffer,
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) storage: FrameWorkspace,
     pub(crate) stride: usize,
-    pub(crate) pending: Vec<DrawCall>,
     pub(crate) destination: Option<wgpu::TextureView>,
     pub(crate) batches: usize,
-    pub(crate) groups:
-        HashMap<(wgpu::TextureView, wgpu::TextureView, wgpu::TextureView), wgpu::BindGroup>,
+}
+
+struct CachedGroup {
+    group: wgpu::BindGroup,
+    generation: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct FrameWorkspace {
+    pub(crate) bytes: Vec<u8>,
+    pending: Vec<DrawCall>,
+    groups: HashMap<(wgpu::TextureView, wgpu::TextureView, wgpu::TextureView), CachedGroup>,
+    generation: u64,
+    pub(crate) bind_groups_created: usize,
+}
+
+impl FrameWorkspace {
+    fn begin(&mut self) {
+        self.bytes.clear();
+        self.pending.clear();
+        self.bind_groups_created = 0;
+        if let Some(next) = self.generation.checked_add(1) {
+            self.generation = next;
+        } else {
+            self.groups.clear();
+            self.generation = 1;
+        }
+    }
 }
 pub(crate) struct DrawCall {
     pub(crate) vertex_range: Range<u64>,
@@ -318,7 +386,7 @@ pub(crate) fn flush(frame: &mut DrawFrame) {
                 color_attachments: &attachments,
                 ..Default::default()
             });
-        for draw in &frame.pending {
+        for draw in &frame.storage.pending {
             let [x, y, w, h] = draw.scissor.unwrap_or([
                 0,
                 0,
@@ -340,7 +408,7 @@ pub(crate) fn flush(frame: &mut DrawFrame) {
             }
         }
     }
-    frame.pending.clear();
+    frame.storage.pending.clear();
 }
 pub(crate) fn clear(
     encoder: &mut wgpu::CommandEncoder,

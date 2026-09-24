@@ -55,7 +55,11 @@ pub enum SceneError {
     Prepare { id: u64, source: PrepareError },
 }
 #[derive(Debug, Default, Clone, Copy)]
+/// Recording counters and managed-capacity estimates. Counters may include work
+/// discarded after a CPU error; they never certify GPU completion. Capacity
+/// excludes driver overhead and resources retained only by in-flight submissions.
 pub struct RenderStats {
+    /// Successfully recorded source callbacks, including later-aborted recordings.
     pub prepared: usize,
     pub cache_hits: usize,
     pub draw_calls: usize,
@@ -64,9 +68,11 @@ pub struct RenderStats {
     pub mask_passes: usize,
     /// Backend snapshot materializations; zero for this ordered eager backend.
     pub snapshot_copies: usize,
+    /// Logical resident content, excluding page slack and temporary outputs.
     pub cache_bytes: u64,
     pub placement: PlacementStats,
     pub evicted: usize,
+    /// Newly created bind groups during recording; a stable warm frame reuses them.
     pub bind_groups: usize,
     pub output_texture_allocations: usize,
     pub output_buffer_allocations: usize,
@@ -76,7 +82,9 @@ pub struct RenderStats {
     pub scratch_reuses: usize,
     /// A frame's required resident working set may exceed the soft budget.
     pub over_budget_bytes: u64,
+    /// Accumulation and mask attachment capacity for the current target size.
     pub working_bytes: u64,
+    /// Retained uniform arena capacity, which may exceed the current draw count.
     pub parameter_bytes: u64,
 }
 
@@ -86,6 +94,7 @@ pub struct SceneRenderer {
     queue: wgpu::Queue,
     compositor: Compositor,
     resources: ResourceStore,
+    preparation: plan::FramePlan,
     surfaces: Option<Surfaces>,
     stats: RenderStats,
 }
@@ -96,6 +105,7 @@ impl SceneRenderer {
             queue: queue.clone(),
             compositor: Compositor::new(device, queue),
             resources: ResourceStore::new(device),
+            preparation: plan::FramePlan::default(),
             surfaces: None,
             stats: RenderStats::default(),
         }
@@ -106,15 +116,18 @@ impl SceneRenderer {
     /// Drops resident content. Providers must resupply definitions on subsequent calls.
     pub fn clear_cache(&mut self) {
         self.resources.clear();
+        self.compositor.clear_bind_groups();
         self.refresh_resource_stats();
     }
     /// Changes physical placement and clears resident content, leaving Scene IDs intact.
     pub fn set_placement_mode(&mut self, mode: PlacementMode) {
         self.resources.set_mode(mode);
+        self.compositor.clear_bind_groups();
         self.refresh_resource_stats();
     }
     pub fn set_atlas_config(&mut self, config: AtlasConfig) -> Result<(), SceneError> {
         self.resources.set_config(config)?;
+        self.compositor.clear_bind_groups();
         self.refresh_resource_stats();
         Ok(())
     }
@@ -122,6 +135,7 @@ impl SceneRenderer {
     /// all resources used by that frame remain pinned even when over budget.
     pub fn set_cache_budget(&mut self, bytes: u64) {
         self.resources.set_budget(bytes);
+        self.refresh_resource_stats();
     }
     /// Repack resident content using GPU copies, without source callbacks or
     /// readback. Old and replacement capacity coexist while copies are in flight.
@@ -146,6 +160,7 @@ impl SceneRenderer {
         let stats = plan.stats;
         self.queue.submit([encoder.finish()]);
         self.resources.commit_relocation(plan);
+        self.compositor.clear_bind_groups();
         self.refresh_resource_stats();
         Ok(stats)
     }
@@ -157,16 +172,13 @@ impl SceneRenderer {
     pub fn render(&mut self, scene: &Scene, target: SceneTarget<'_>) -> Result<(), SceneError> {
         self.stats = RenderStats::default();
         self.resources.begin()?;
-        let plan = match plan::FramePlan::build(scene).and_then(|plan| {
+        if let Err(error) = self.preparation.rebuild(scene).and_then(|()| {
             validation::validate(&self.device, &self.resources, scene, &target)?;
-            Ok(plan)
+            Ok(())
         }) {
-            Ok(plan) => plan,
-            Err(error) => {
-                self.refresh_resource_stats();
-                return Err(error);
-            }
-        };
+            self.refresh_resource_stats();
+            return Err(error);
+        }
         let size = [
             target.view.texture().width(),
             target.view.texture().height(),
@@ -179,7 +191,7 @@ impl SceneRenderer {
             &mut self.compositor,
             &mut self.resources,
             scene,
-            &plan,
+            &self.preparation,
             target,
             self.surfaces.as_ref().expect("surfaces were initialized"),
             &mut self.stats,
@@ -188,9 +200,10 @@ impl SceneRenderer {
             Ok(frame) => {
                 // Queue writes occur only after every fallible CPU callback. The queue
                 // orders this upload before the command buffer's uniform reads.
-                self.queue.write_buffer(&frame.uniforms, 0, &frame.bytes);
+                self.queue
+                    .write_buffer(&frame.uniforms, 0, &frame.storage.bytes);
                 self.queue.submit([frame.encoder.finish()]);
-                self.compositor.parameter_bytes = frame.bytes;
+                self.compositor.restore_workspace(frame.storage);
                 self.resources.finish(scene);
             }
             Err(error) => {

@@ -388,6 +388,14 @@ fn prepare_failure_preserves_old_residency_and_rolls_back_every_new_resource_kin
         matches!(error, Err(SceneError::Prepare { .. })),
         "{error:?}"
     );
+    assert!(
+        renderer.stats().draw_batches > 0,
+        "phase-zero commands were recorded before the failure"
+    );
+    assert!(
+        renderer.stats().bind_groups > 0,
+        "discarded binding work remains observable"
+    );
     assert_eq!(
         new.counts(),
         [1; 3],

@@ -197,6 +197,11 @@ fn least_recent_use_is_evicted_but_pool_presence_is_a_soft_retention_hint() {
         // Even a submitted pool containing all definitions does not pin entries
         // when no Object references them and no budget remains.
         backend.set_cache_budget(0);
+        assert_eq!(
+            backend.stats().over_budget_bytes,
+            backend.stats().cache_bytes,
+            "changing the budget updates statistics before the next render"
+        );
         render(&mut backend, &scene(&mesh, &all, &[]), &target).expect("hints are not pins");
         assert_eq!(backend.stats().cache_bytes, 0);
         assert_eq!(backend.stats().placement, Default::default());

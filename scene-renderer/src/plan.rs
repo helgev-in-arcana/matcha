@@ -13,30 +13,46 @@ pub(crate) struct PhasePlan {
     pub(crate) masks: Vec<MaskId>,
 }
 
+#[derive(Default)]
 pub(crate) struct FramePlan {
     pub(crate) phases: Vec<PhasePlan>,
+    meshes: HashSet<MeshId>,
+    textures: HashSet<TextureId>,
+    masks: HashSet<MaskId>,
+    visited_masks: HashSet<render_interface::PixelMaskIndex>,
 }
 
 impl FramePlan {
+    #[cfg(test)]
     pub(crate) fn build(scene: &Scene) -> Result<Self, SceneError> {
+        let mut plan = Self::default();
+        plan.rebuild(scene)?;
+        Ok(plan)
+    }
+    pub(crate) fn rebuild(&mut self, scene: &Scene) -> Result<(), SceneError> {
+        self.meshes.clear();
+        self.textures.clear();
+        self.masks.clear();
+        self.visited_masks.clear();
+        for phase in &mut self.phases {
+            phase.meshes.clear();
+            phase.textures.clear();
+            phase.masks.clear();
+        }
+        self.phases
+            .resize_with(scene.phases.len(), PhasePlan::default);
         // Check topology first, so following a parent is finite and in bounds.
         for (index, mask) in scene.pixel_masks.iter().enumerate() {
             if mask.parent.is_some_and(|p| p.0 as usize >= index) {
                 return Err(SceneError::Invalid("mask parent must precede child".into()));
             }
         }
-        let mut meshes = HashSet::new();
-        let mut textures = HashSet::new();
-        let mut masks = HashSet::new();
-        let mut visited_masks = HashSet::new();
-        let mut phases = Vec::with_capacity(scene.phases.len());
-        for phase in &scene.phases {
-            let mut plan = PhasePlan::default();
+        for (phase, plan) in scene.phases.iter().zip(&mut self.phases) {
             for object in &phase.objects {
-                if meshes.insert(object.mesh) {
+                if self.meshes.insert(object.mesh) {
                     plan.meshes.push(object.mesh);
                 }
-                if textures.insert(object.texture) {
+                if self.textures.insert(object.texture) {
                     plan.textures.push(object.texture);
                 }
                 let mut index = object.mask;
@@ -44,21 +60,20 @@ impl FramePlan {
                     let mask = scene.pixel_masks.get(current.0 as usize).ok_or_else(|| {
                         SceneError::Invalid("object mask index out of bounds".into())
                     })?;
-                    if !visited_masks.insert(current) {
+                    if !self.visited_masks.insert(current) {
                         break;
                     }
-                    if meshes.insert(mask.mesh) {
+                    if self.meshes.insert(mask.mesh) {
                         plan.meshes.push(mask.mesh);
                     }
-                    if masks.insert(mask.texture) {
+                    if self.masks.insert(mask.texture) {
                         plan.masks.push(mask.texture);
                     }
                     index = mask.parent;
                 }
             }
-            phases.push(plan);
         }
-        Ok(Self { phases })
+        Ok(())
     }
 }
 
