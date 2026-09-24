@@ -6,9 +6,9 @@ publish = false
 
 [dependencies]
 # self
-renderer = { workspace = true }
+renderer = { workspace = true, features = ["legacy"] }
 utils = { workspace = true }
-gpu-utils = { workspace = true }
+gpu-utils = { workspace = true, features = ["legacy-atlas"] }
 shared-buffer = { workspace = true }
 
 # async runtime, utility

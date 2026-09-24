@@ -3,6 +3,10 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 
 /// Descriptor used to configure and create a [`Gpu`] instance.
+///
+/// `Default` preserves the existing UI's platform-specific feature requirements.
+/// New renderers requiring only standard WebGPU features can use
+/// [`GpuDescriptor::standard`], independently of Cargo feature unification.
 pub struct GpuDescriptor {
     /// Which wgpu backends to enable.
     pub backends: wgpu::Backends,
@@ -34,6 +38,16 @@ impl Default for GpuDescriptor {
 }
 
 impl GpuDescriptor {
+    /// Platform preset without optional GPU features, suitable for the Scene
+    /// renderer. Backend selection, limits and surface format match `Default`.
+    /// This does not depend on whether compatibility atlases are compiled in.
+    pub fn standard() -> Self {
+        Self {
+            required_features: wgpu::Features::empty(),
+            ..Default::default()
+        }
+    }
+
     /// GPU-less preset for headless tests: selects wgpu's noop backend, which
     /// needs no OS, driver or hardware. The noop adapter reports every feature
     /// as supported, so the default `required_features` pass unchanged. It can
@@ -192,6 +206,17 @@ impl Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standard_preset_does_not_inherit_the_legacy_feature_requirements() {
+        assert!(GpuDescriptor::standard().required_features.is_empty());
+        #[cfg(not(web))]
+        assert!(
+            GpuDescriptor::default()
+                .required_features
+                .contains(wgpu::Features::IMMEDIATES | wgpu::Features::VERTEX_WRITABLE_STORAGE)
+        );
+    }
 
     /// Gate for the whole headless-testing stack: `request_adapter` must find
     /// the noop backend (it is selected via the same code path as real

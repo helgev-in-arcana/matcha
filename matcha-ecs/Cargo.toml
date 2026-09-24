@@ -6,8 +6,8 @@ publish = false
 
 [dependencies]
 # self
-renderer = { workspace = true }
-gpu-utils = { workspace = true }
+renderer = { workspace = true, features = ["legacy"] }
+gpu-utils = { workspace = true, features = ["legacy-atlas"] }
 matcha-window = { workspace = true }
 
 # ecs

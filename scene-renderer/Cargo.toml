@@ -11,7 +11,7 @@ bytemuck.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-renderer.workspace = true
+renderer = { workspace = true, features = ["legacy"] }
 gpu-utils.workspace = true
 futures.workspace = true
 image.workspace = true
