@@ -1,0 +1,20 @@
+[package]
+name = "scene-renderer"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
+render-interface.workspace = true
+wgpu.workspace = true
+nalgebra.workspace = true
+bytemuck.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+renderer.workspace = true
+gpu-utils.workspace = true
+futures.workspace = true
+image.workspace = true
+
+[lints]
+workspace = true
