@@ -26,6 +26,10 @@ use compositor::Compositor;
 use frame::Surfaces;
 use render_interface::*;
 use resources::ResourceStore;
+pub use resources::{
+    PlacementMode,
+    placement::{AtlasConfig, PlacementStats},
+};
 pub struct SceneTarget<'a> {
     /// Full, single-sample 2D attachment; size is taken from its texture.
     pub view: &'a wgpu::TextureView,
@@ -58,6 +62,7 @@ pub struct RenderStats {
     /// Backend snapshot materializations; zero for this ordered eager backend.
     pub snapshot_copies: usize,
     pub cache_bytes: u64,
+    pub placement: PlacementStats,
     pub evicted: usize,
     pub bind_groups: usize,
     pub output_texture_allocations: usize,
@@ -90,6 +95,17 @@ impl SceneRenderer {
     /// Drops resident content. Providers must resupply definitions on subsequent calls.
     pub fn clear_cache(&mut self) {
         self.resources.clear();
+        self.refresh_resource_stats();
+    }
+    /// Changes physical placement and clears resident content, leaving Scene IDs intact.
+    pub fn set_placement_mode(&mut self, mode: PlacementMode) {
+        self.resources.set_mode(mode);
+        self.refresh_resource_stats();
+    }
+    pub fn set_atlas_config(&mut self, config: AtlasConfig) -> Result<(), SceneError> {
+        self.resources.set_config(config)?;
+        self.refresh_resource_stats();
+        Ok(())
     }
     pub fn render(&mut self, scene: &Scene, target: SceneTarget<'_>) -> Result<(), SceneError> {
         self.stats = RenderStats::default();
@@ -123,15 +139,20 @@ impl SceneRenderer {
             }
             Err(error) => {
                 self.resources.abort();
+                self.refresh_resource_stats();
                 return Err(error);
             }
         }
+        self.refresh_resource_stats();
+        Ok(())
+    }
+    fn refresh_resource_stats(&mut self) {
         self.stats.prepared = self.resources.stats.prepared;
         self.stats.cache_hits = self.resources.stats.cache_hits;
         self.stats.output_buffer_allocations = self.resources.stats.output_buffer_allocations;
         self.stats.output_texture_allocations = self.resources.stats.output_texture_allocations;
         self.stats.cache_bytes = self.resources.cache_bytes();
-        Ok(())
+        self.stats.placement = self.resources.placement_stats();
     }
 }
 impl Renderer for SceneRenderer {

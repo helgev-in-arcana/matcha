@@ -9,6 +9,7 @@ wgpu.workspace = true
 nalgebra.workspace = true
 bytemuck.workspace = true
 thiserror.workspace = true
+guillotiere = "0.6"
 
 [dev-dependencies]
 renderer = { workspace = true, features = ["legacy"] }

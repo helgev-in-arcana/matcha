@@ -162,6 +162,8 @@ impl Compositor {
             indices: None,
             vertex_range: 0..120,
             index_range: 0..0,
+            vertex_lease: None,
+            index_lease: None,
         };
         let white = make_image(device, TextureDescriptor::new([1, 1], COVERAGE));
         queue.write_texture(
