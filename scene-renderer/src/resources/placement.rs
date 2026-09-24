@@ -233,10 +233,13 @@ impl Placement {
                 Err(error) => return Err(allocation_error(error)),
             }
         }
-        let page_size = [
-            self.config.texture_edge.max(size[0]),
-            self.config.texture_edge.max(size[1]),
-        ];
+        // A wide, one-pixel-high image must not reserve an entire normal page
+        // height. Oversized images occupy an exact-size dedicated page.
+        let page_size = if size.iter().any(|&edge| edge > self.config.texture_edge) {
+            size
+        } else {
+            [self.config.texture_edge; 2]
+        };
         let capacity_bytes = u64::from(page_size[0])
             .checked_mul(u64::from(page_size[1]))
             .and_then(|area| area.checked_mul(bytes_per_texel))
@@ -429,6 +432,20 @@ mod tests {
     }
 
     #[test]
+    fn oversized_thin_images_do_not_inherit_the_normal_page_height() {
+        let device = device();
+        let mut placement = Placement::new(config());
+        let lease = placement
+            .texture(&device, wgpu::TextureFormat::Rgba8Unorm, [65, 1])
+            .expect("valid thin image");
+        assert_eq!(lease.page_size, [65, 1]);
+        assert_eq!(placement.stats().reserved_texture_bytes, 65 * 4);
+        assert_eq!(placement.stats().live_texture_bytes, 65 * 4);
+        placement.release_texture(lease).expect("live allocation");
+        assert_eq!(placement.stats(), PlacementStats::default());
+    }
+
+    #[test]
     fn buffer_rounding_reuse_and_oversized_pages_preserve_requested_data_range() {
         let device = device();
         let mut placement = Placement::new(config());
@@ -460,8 +477,8 @@ mod tests {
             .texture(&device, wgpu::TextureFormat::Rgba16Float, [13, 3])
             .expect("dedicated sized page");
         assert_eq!(image.size, [13, 3]);
-        assert_eq!(image.page_size, [13, 8]);
-        assert_eq!(placement.stats().reserved_texture_bytes, 13 * 8 * 8);
+        assert_eq!(image.page_size, [13, 3]);
+        assert_eq!(placement.stats().reserved_texture_bytes, 13 * 3 * 8);
         assert_eq!(placement.stats().live_texture_bytes, 13 * 3 * 8);
         placement.release_texture(image).expect("live image");
     }
