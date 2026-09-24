@@ -13,9 +13,11 @@
 //! device features are required. All targets are full, single-layer/mip/sample
 //! 2D views. Unsupported descriptors fail before source callbacks run.
 //!
-//! The dedicated-resource path is the correctness reference. Its resident cache
-//! is explicitly cleared by the caller until bounded placement/cache policies
-//! are enabled. A renderer must be recreated when its device is replaced;
+//! The dedicated-resource path is the correctness reference. Both modes use a
+//! soft resident-content budget (default 128 MiB); the current frame stays pinned.
+//! Reusable generation outputs have a separate retained budget (default 16 MiB).
+//! Attachments, parameters and driver/in-flight storage are not charged to either.
+//! A renderer must be recreated when its device is replaced;
 //! providers capturing device-specific pipelines must also recreate those captures.
 mod compositor;
 mod frame;
@@ -67,6 +69,14 @@ pub struct RenderStats {
     pub bind_groups: usize,
     pub output_texture_allocations: usize,
     pub output_buffer_allocations: usize,
+    /// Retained generation outputs, excluding the current resident content.
+    pub scratch_bytes: u64,
+    pub scratch_peak_bytes: u64,
+    pub scratch_reuses: usize,
+    /// A frame's required resident working set may exceed the soft budget.
+    pub over_budget_bytes: u64,
+    pub working_bytes: u64,
+    pub parameter_bytes: u64,
 }
 
 /// Owns the renderer's device-local resources and submission order.
@@ -107,10 +117,29 @@ impl SceneRenderer {
         self.refresh_resource_stats();
         Ok(())
     }
+    /// Soft logical-content budget. Eviction occurs after successful submission;
+    /// all resources used by that frame remain pinned even when over budget.
+    pub fn set_cache_budget(&mut self, bytes: u64) {
+        self.resources.set_budget(bytes);
+    }
+    /// Limits retained generation outputs; it does not reject large generators.
+    pub fn set_scratch_budget(&mut self, bytes: u64) {
+        self.resources.set_scratch_budget(bytes);
+        self.refresh_resource_stats();
+    }
     pub fn render(&mut self, scene: &Scene, target: SceneTarget<'_>) -> Result<(), SceneError> {
         self.stats = RenderStats::default();
-        let plan = plan::FramePlan::build(scene)?;
-        validation::validate(&self.device, &self.resources, scene, &target)?;
+        self.resources.begin()?;
+        let plan = match plan::FramePlan::build(scene).and_then(|plan| {
+            validation::validate(&self.device, &self.resources, scene, &target)?;
+            Ok(plan)
+        }) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.refresh_resource_stats();
+                return Err(error);
+            }
+        };
         let size = [
             target.view.texture().width(),
             target.view.texture().height(),
@@ -118,7 +147,6 @@ impl SceneRenderer {
         if self.surfaces.as_ref().is_none_or(|s| s.size != size) {
             self.surfaces = Some(Surfaces::new(&self.device, size));
         }
-        self.resources.begin();
         let result = frame::encode(
             &self.device,
             &mut self.compositor,
@@ -136,6 +164,7 @@ impl SceneRenderer {
                 self.queue.write_buffer(&frame.uniforms, 0, &frame.bytes);
                 self.queue.submit([frame.encoder.finish()]);
                 self.compositor.parameter_bytes = frame.bytes;
+                self.resources.finish(scene);
             }
             Err(error) => {
                 self.resources.abort();
@@ -151,8 +180,25 @@ impl SceneRenderer {
         self.stats.cache_hits = self.resources.stats.cache_hits;
         self.stats.output_buffer_allocations = self.resources.stats.output_buffer_allocations;
         self.stats.output_texture_allocations = self.resources.stats.output_texture_allocations;
+        let scratch = self.resources.scratch_stats();
+        self.stats.output_buffer_allocations += scratch.buffer_allocations;
+        self.stats.output_texture_allocations += scratch.image_allocations;
+        self.stats.scratch_bytes = scratch.pooled_bytes;
+        self.stats.scratch_peak_bytes = scratch.peak_bytes;
+        self.stats.scratch_reuses = scratch.image_reuses + scratch.buffer_reuses;
+        self.stats.evicted = self.resources.stats.evicted;
+        self.stats.over_budget_bytes = self.resources.over_budget_bytes();
         self.stats.cache_bytes = self.resources.cache_bytes();
         self.stats.placement = self.resources.placement_stats();
+        self.stats.working_bytes = self
+            .surfaces
+            .as_ref()
+            .map_or(0, |s| u64::from(s.size[0]) * u64::from(s.size[1]) * 14);
+        self.stats.parameter_bytes = self
+            .compositor
+            .parameter_buffer
+            .as_ref()
+            .map_or(0, wgpu::Buffer::size);
     }
 }
 impl Renderer for SceneRenderer {

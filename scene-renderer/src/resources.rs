@@ -4,9 +4,22 @@
 use render_interface::*;
 use std::{collections::HashMap, ops::Range};
 
-use crate::{RenderStats, SceneError};
+use crate::SceneError;
+mod cache;
 pub(crate) mod placement;
+mod scratch;
+use cache::{CachePolicy, Candidate, Lru, ResourceKey};
 use placement::{AtlasConfig, BufferLease, Placement, PlacementStats, TextureLease};
+use scratch::ScratchPool;
+
+#[derive(Default)]
+pub(crate) struct ResourceStats {
+    pub(crate) prepared: usize,
+    pub(crate) cache_hits: usize,
+    pub(crate) evicted: usize,
+    pub(crate) output_texture_allocations: usize,
+    pub(crate) output_buffer_allocations: usize,
+}
 
 /// Dedicated storage is a correctness/reference path and a fallback for callers
 /// whose workload does not benefit from atlas packing. Neither mode changes IDs.
@@ -92,10 +105,13 @@ pub(crate) struct ResourceStore {
     pub(crate) masks: HashMap<MaskId, Entry<Image>>,
     device: wgpu::Device,
     frame: u64,
-    pub(crate) stats: RenderStats,
+    pub(crate) stats: ResourceStats,
     placement: Placement,
     config: AtlasConfig,
     mode: PlacementMode,
+    scratch: ScratchPool,
+    cache_policy: Lru,
+    budget: u64,
 }
 impl ResourceStore {
     pub(crate) fn new(device: &wgpu::Device) -> Self {
@@ -109,18 +125,23 @@ impl ResourceStore {
             masks: HashMap::new(),
             device: device.clone(),
             frame: 0,
-            stats: RenderStats::default(),
+            stats: ResourceStats::default(),
             placement: Placement::new(config),
             config,
             mode: PlacementMode::Atlas,
+            scratch: ScratchPool::new(),
+            cache_policy: Lru,
+            budget: 128 * 1024 * 1024,
         }
     }
-    pub(crate) fn begin(&mut self) {
+    pub(crate) fn begin(&mut self) -> Result<(), SceneError> {
         self.frame = self
             .frame
             .checked_add(1)
             .expect("renderer frame sequence exhausted");
-        self.stats = RenderStats::default();
+        self.stats = ResourceStats::default();
+        self.scratch.begin_frame()?;
+        Ok(())
     }
     pub(crate) fn abort(&mut self) {
         let frame = self.frame;
@@ -145,6 +166,7 @@ impl ResourceStore {
         for image in images {
             self.release_image(image);
         }
+        self.scratch.reset();
     }
     pub(crate) fn clear(&mut self) {
         self.meshes.clear();
@@ -153,6 +175,7 @@ impl ResourceStore {
         // Clearing all resident owners permits dropping the complete registry.
         // Submitted command buffers still retain their own GPU handles.
         self.placement = Placement::new(self.config);
+        self.scratch.reset();
     }
     pub(crate) fn set_mode(&mut self, mode: PlacementMode) {
         if mode != self.mode {
@@ -203,6 +226,82 @@ impl ResourceStore {
             + self.textures.values().map(|e| e.bytes).sum::<u64>()
             + self.masks.values().map(|e| e.bytes).sum::<u64>()
     }
+    pub(crate) fn set_budget(&mut self, bytes: u64) {
+        self.budget = bytes;
+    }
+    pub(crate) fn set_scratch_budget(&mut self, bytes: u64) {
+        self.scratch.set_budget(bytes);
+    }
+    pub(crate) fn scratch_stats(&self) -> scratch::ScratchStats {
+        self.scratch.stats()
+    }
+    pub(crate) fn over_budget_bytes(&self) -> u64 {
+        self.cache_bytes().saturating_sub(self.budget)
+    }
+
+    /// Called only after submission. Every resource referenced in any phase was
+    /// marked used during preparation; no eviction can change its first snapshot.
+    pub(crate) fn finish(&mut self, scene: &Scene) {
+        let mut bytes = self.cache_bytes();
+        if bytes <= self.budget {
+            return;
+        }
+        let mut candidates = Vec::new();
+        for (id, entry) in &self.meshes {
+            if entry.last_used != self.frame {
+                candidates.push(Candidate {
+                    key: ResourceKey::Mesh(*id),
+                    last_used: entry.last_used,
+                    retention_hint: scene.resources.mesh(*id).is_some(),
+                });
+            }
+        }
+        for (id, entry) in &self.textures {
+            if entry.last_used != self.frame {
+                candidates.push(Candidate {
+                    key: ResourceKey::Texture(*id),
+                    last_used: entry.last_used,
+                    retention_hint: scene.resources.texture(*id).is_some(),
+                });
+            }
+        }
+        for (id, entry) in &self.masks {
+            if entry.last_used != self.frame {
+                candidates.push(Candidate {
+                    key: ResourceKey::Mask(*id),
+                    last_used: entry.last_used,
+                    retention_hint: scene.resources.mask(*id).is_some(),
+                });
+            }
+        }
+        self.cache_policy.order(&mut candidates);
+        for candidate in candidates {
+            if bytes <= self.budget {
+                break;
+            }
+            let removed = match candidate.key {
+                ResourceKey::Mesh(id) => self.meshes.remove(&id).map(|entry| {
+                    let bytes = entry.bytes;
+                    self.release_mesh(entry.value);
+                    bytes
+                }),
+                ResourceKey::Texture(id) => self.textures.remove(&id).map(|entry| {
+                    let bytes = entry.bytes;
+                    self.release_image(entry.value);
+                    bytes
+                }),
+                ResourceKey::Mask(id) => self.masks.remove(&id).map(|entry| {
+                    let bytes = entry.bytes;
+                    self.release_image(entry.value);
+                    bytes
+                }),
+            };
+            if let Some(removed) = removed {
+                bytes -= removed;
+                self.stats.evicted += 1;
+            }
+        }
+    }
 }
 impl ResourceStore {
     fn pack_image(
@@ -210,20 +309,17 @@ impl ResourceStore {
         image: Image,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<Image, SceneError> {
+        debug_assert!(
+            image.texture_lease.is_none(),
+            "packing accepts logical outputs; relocation owns old leases separately"
+        );
         if self.mode == PlacementMode::Dedicated {
             return Ok(image);
         }
         let lease = self
             .placement
             .texture(&self.device, image.desc.format, image.desc.size)?;
-        let mut source = image.texture.as_image_copy();
-        if let Some(old) = &image.texture_lease {
-            source.origin = wgpu::Origin3d {
-                x: old.origin[0],
-                y: old.origin[1],
-                z: 0,
-            };
-        }
+        let source = image.texture.as_image_copy();
         let mut destination = lease.texture.as_image_copy();
         destination.origin = wgpu::Origin3d {
             x: lease.origin[0],
@@ -231,19 +327,25 @@ impl ResourceStore {
             z: 0,
         };
         encoder.copy_texture_to_texture(source, destination, extent(image.desc.size));
-        Ok(Image {
+        let resident = Image {
             desc: image.desc,
             texture: lease.texture.clone(),
             view: lease.view.clone(),
             uv: lease.uv(),
             texture_lease: Some(lease),
-        })
+        };
+        self.scratch.return_image(image);
+        Ok(resident)
     }
     fn pack_mesh(
         &mut self,
         mesh: Mesh,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<Mesh, SceneError> {
+        debug_assert!(
+            mesh.vertex_lease.is_none() && mesh.index_lease.is_none(),
+            "packing accepts logical outputs; relocation owns old leases separately"
+        );
         if self.mode == PlacementMode::Dedicated {
             return Ok(mesh);
         }
@@ -283,7 +385,7 @@ impl ResourceStore {
                 lease.range.end - lease.range.start,
             );
         }
-        Ok(Mesh {
+        let resident = Mesh {
             desc: mesh.desc,
             vertices: vertex_lease.buffer.clone(),
             indices: index_lease.as_ref().map(|lease| lease.buffer.clone()),
@@ -293,7 +395,12 @@ impl ResourceStore {
                 .map_or(0..0, |lease| lease.range.clone()),
             vertex_lease: Some(vertex_lease),
             index_lease,
-        })
+        };
+        self.scratch.return_buffer(mesh.vertices);
+        if let Some(indices) = mesh.indices {
+            self.scratch.return_buffer(indices);
+        }
+        Ok(resident)
     }
     pub(crate) fn prepare_mesh(
         &mut self,
@@ -444,10 +551,16 @@ impl ResourceStore {
         Ok(())
     }
     fn take_output_image(&mut self, desc: TextureDescriptor) -> Image {
+        if self.mode == PlacementMode::Atlas {
+            return self.scratch.take_image(&self.device, desc);
+        }
         self.stats.output_texture_allocations += 1;
         make_image(&self.device, desc)
     }
     fn take_output_buffer(&mut self, size: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
+        if self.mode == PlacementMode::Atlas {
+            return self.scratch.take_buffer(&self.device, size, usage);
+        }
         self.stats.output_buffer_allocations += 1;
         self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dedicated source output"),
