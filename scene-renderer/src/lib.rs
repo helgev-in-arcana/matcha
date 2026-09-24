@@ -31,6 +31,7 @@ use resources::ResourceStore;
 pub use resources::{
     PlacementMode,
     placement::{AtlasConfig, PlacementStats},
+    relocation::RelocationStats,
 };
 pub struct SceneTarget<'a> {
     /// Full, single-sample 2D attachment; size is taken from its texture.
@@ -121,6 +122,32 @@ impl SceneRenderer {
     /// all resources used by that frame remain pinned even when over budget.
     pub fn set_cache_budget(&mut self, bytes: u64) {
         self.resources.set_budget(bytes);
+    }
+    /// Repack resident content using GPU copies, without source callbacks or
+    /// readback. Old and replacement capacity coexist while copies are in flight.
+    /// This heuristic need not reduce capacity for every distribution of sizes.
+    pub fn compact_resources(&mut self) -> Result<RelocationStats, SceneError> {
+        self.compact_resources_with_budget(u64::MAX)
+    }
+    /// Declines the complete relocation before allocation/recording if its
+    /// logical copy volume exceeds the limit. The old placement remains usable.
+    pub fn compact_resources_with_budget(
+        &mut self,
+        max_copy_bytes: u64,
+    ) -> Result<RelocationStats, SceneError> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("transactional scene relocation"),
+            });
+        let plan = self
+            .resources
+            .plan_relocation(&mut encoder, max_copy_bytes)?;
+        let stats = plan.stats;
+        self.queue.submit([encoder.finish()]);
+        self.resources.commit_relocation(plan);
+        self.refresh_resource_stats();
+        Ok(stats)
     }
     /// Limits retained generation outputs; it does not reject large generators.
     pub fn set_scratch_budget(&mut self, bytes: u64) {

@@ -7,6 +7,7 @@ use std::{collections::HashMap, ops::Range};
 use crate::SceneError;
 mod cache;
 pub(crate) mod placement;
+pub(crate) mod relocation;
 mod scratch;
 use cache::{CachePolicy, Candidate, Lru, ResourceKey};
 use placement::{AtlasConfig, BufferLease, Placement, PlacementStats, TextureLease};
@@ -114,6 +115,46 @@ pub(crate) struct ResourceStore {
     budget: u64,
 }
 impl ResourceStore {
+    pub(crate) fn plan_relocation(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        max_copy_bytes: u64,
+    ) -> Result<relocation::RelocationPlan, SceneError> {
+        relocation::RelocationPlan::build(
+            &self.device,
+            &self.meshes,
+            &self.textures,
+            &self.masks,
+            self.config,
+            self.mode,
+            max_copy_bytes,
+            encoder,
+        )
+    }
+    pub(crate) fn commit_relocation(&mut self, plan: relocation::RelocationPlan) {
+        // All old leases stay owned until the facade has submitted every copy.
+        // Replace values and the complete registry together. Last-use metadata,
+        // content IDs and source definitions are unaffected by physical movement.
+        for (id, mesh) in plan.meshes {
+            self.meshes
+                .get_mut(&id)
+                .expect("relocation retains resident mesh IDs")
+                .value = mesh;
+        }
+        for (id, image) in plan.textures {
+            self.textures
+                .get_mut(&id)
+                .expect("relocation retains resident texture IDs")
+                .value = image;
+        }
+        for (id, image) in plan.masks {
+            self.masks
+                .get_mut(&id)
+                .expect("relocation retains resident mask IDs")
+                .value = image;
+        }
+        self.placement = plan.placement;
+    }
     pub(crate) fn new(device: &wgpu::Device) -> Self {
         let config = AtlasConfig {
             texture_edge: 1024.min(device.limits().max_texture_dimension_2d),
