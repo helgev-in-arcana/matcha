@@ -37,6 +37,7 @@ pub struct RelocationStats {
     pub copied_bytes: u64,
     /// Old plus replacement resident capacity while both sets coexist.
     /// This excludes scratch/working buffers and opaque driver allocations.
+    /// For a Dedicated no-op this is just the current resident capacity.
     pub peak_managed_bytes: u64,
     pub placement: PlacementStats,
 }
@@ -299,6 +300,7 @@ fn add_copy_bytes(current: u64, bytes: u64, limit: u64) -> Result<u64, SceneErro
 
 /// Count each actual page once, even when many residents share its GPU handle.
 /// Empty managed pages are released by Placement, so live handles cover its pages.
+#[allow(clippy::mutable_key_type)] // wgpu Hash/Eq use stable handle identity, not mutable device state.
 fn resident_stats<'a>(
     meshes: impl Iterator<Item = &'a Mesh>,
     images: impl Iterator<Item = &'a Image>,

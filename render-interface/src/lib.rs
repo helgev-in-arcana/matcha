@@ -8,6 +8,7 @@
 //!   independent of atlas placement. Fields and defaults remain undecided.
 //! - Other shader/draw settings beyond sampler policy, such as blend policy:
 //!   the useful settings, their scope and their representation remain undecided.
+//!
 //! These notes do not change the current contract described below.
 //!
 //! A caller owns and may reuse a complete [`Scene`]. A renderer borrows it only

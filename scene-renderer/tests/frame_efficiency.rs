@@ -251,8 +251,18 @@ fn workspace_and_bind_groups_recover_after_resize_cache_replacement_and_prepare_
     assert_color(&device, &queue, &target);
     backend
         .compact_resources()
-        .expect("replacement resident handles");
-    render(&mut backend, &scene, &target).expect("bindings follow relocated resources");
+        .expect("dedicated compaction is unnecessary");
+    render(&mut backend, &scene, &target).expect("dedicated bindings remain reusable");
+    assert_eq!(backend.stats().prepared, 0);
+    assert_eq!(backend.stats().bind_groups, 0);
+    assert_color(&device, &queue, &target);
+    backend.set_placement_mode(PlacementMode::Atlas);
+    render(&mut backend, &scene, &target).expect("new shared handles");
+    assert_eq!(backend.stats().prepared, 3);
+    backend
+        .compact_resources()
+        .expect("replacement shared handles");
+    render(&mut backend, &scene, &target).expect("bindings follow relocated shared resources");
     assert_eq!(backend.stats().prepared, 0);
     assert!(backend.stats().bind_groups > 0);
     assert_color(&device, &queue, &target);

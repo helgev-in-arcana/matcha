@@ -1,9 +1,17 @@
 //! Device/descriptor checks precede recording, including warm-cache submissions.
-use crate::{SceneError, SceneTarget, resources::ResourceStore};
+use crate::{
+    SceneError, SceneTarget,
+    resources::{Entry, Image, Mesh, ResourceStore, ValidationScratch},
+};
 use render_interface::*;
+use std::collections::HashMap;
+
+#[cfg(test)]
+mod dedup_tests;
+
 pub(crate) fn validate(
     device: &wgpu::Device,
-    resources: &ResourceStore,
+    resources: &mut ResourceStore,
     scene: &Scene,
     target: &SceneTarget<'_>,
 ) -> Result<(), SceneError> {
@@ -71,16 +79,41 @@ pub(crate) fn validate(
             "destination must be a single-sample render attachment",
         ));
     }
+    validate_scene(
+        scene,
+        &device.limits(),
+        device.features(),
+        &resources.meshes,
+        &resources.textures,
+        &resources.masks,
+        &mut resources.validation,
+    )
+}
+
+/// Descriptor checks depend on resource identity, while transform/opacity and
+/// mask topology belong to individual occurrences. Keep the latter checks even
+/// when an ID was seen already. Scratch membership lasts for this call only.
+fn validate_scene(
+    scene: &Scene,
+    limits: &wgpu::Limits,
+    features: wgpu::Features,
+    meshes: &HashMap<MeshId, Entry<Mesh>>,
+    textures: &HashMap<TextureId, Entry<Image>>,
+    masks: &HashMap<MaskId, Entry<Image>>,
+    scratch: &mut ValidationScratch,
+) -> Result<(), SceneError> {
+    scratch.clear();
+    let invalid = |msg: &str| SceneError::Invalid(msg.into());
     let check_mesh = |id| -> Result<(), SceneError> {
         let source = scene
             .resources
             .mesh(id)
             .ok_or_else(|| invalid("missing mesh definition"))?;
         let d = source.descriptor();
-        if let Some([min, max]) = d.bounds {
-            if (0..3).any(|i| !min[i].is_finite() || !max[i].is_finite() || min[i] > max[i]) {
-                return Err(invalid("invalid conservative mesh bounds"));
-            }
+        if let Some([min, max]) = d.bounds
+            && (0..3).any(|i| !min[i].is_finite() || !max[i].is_finite() || min[i] > max[i])
+        {
+            return Err(invalid("invalid conservative mesh bounds"));
         }
         if d.vertex_count == 0
             || (if d.index_count == 0 {
@@ -92,17 +125,13 @@ pub(crate) fn validate(
         {
             return Err(invalid("triangle mesh has invalid counts"));
         }
-        if u64::from(d.vertex_count) * 20 > device.limits().max_buffer_size
-            || u64::from(d.index_count) * 4 > device.limits().max_buffer_size
+        if u64::from(d.vertex_count) * 20 > limits.max_buffer_size
+            || u64::from(d.index_count) * 4 > limits.max_buffer_size
         {
             return Err(invalid("mesh exceeds device buffer limit"));
         }
         validate_mesh_usages(d.usages)?;
-        if resources
-            .meshes
-            .get(&id)
-            .is_some_and(|e| e.value.desc != *d)
-        {
+        if meshes.get(&id).is_some_and(|e| e.value.desc != *d) {
             return Err(invalid("cached mesh ID changed descriptor"));
         }
         Ok(())
@@ -111,7 +140,7 @@ pub(crate) fn validate(
         validate_texture_usages(d.usages)?;
         if d.size
             .iter()
-            .any(|v| *v == 0 || *v > device.limits().max_texture_dimension_2d)
+            .any(|v| *v == 0 || *v > limits.max_texture_dimension_2d)
         {
             return Err(invalid("texture size exceeds device limits or is zero"));
         }
@@ -130,7 +159,7 @@ pub(crate) fn validate(
             | wgpu::TextureUsages::COPY_SRC;
         if !d
             .format
-            .guaranteed_format_features(device.features())
+            .guaranteed_format_features(features)
             .allowed_usages
             .contains(usages)
         {
@@ -145,19 +174,19 @@ pub(crate) fn validate(
         if m.transform.iter().any(|x| !x.is_finite()) {
             return Err(invalid("nonfinite mask transform"));
         }
-        check_mesh(m.mesh)?;
-        let d = scene
-            .resources
-            .mask(m.texture)
-            .ok_or_else(|| invalid("missing mask definition"))?
-            .descriptor();
-        check_image(d)?;
-        if resources
-            .masks
-            .get(&m.texture)
-            .is_some_and(|e| e.value.desc != *d)
-        {
-            return Err(invalid("cached mask ID changed descriptor"));
+        if scratch.meshes.insert(m.mesh) {
+            check_mesh(m.mesh)?;
+        }
+        if scratch.masks.insert(m.texture) {
+            let d = scene
+                .resources
+                .mask(m.texture)
+                .ok_or_else(|| invalid("missing mask definition"))?
+                .descriptor();
+            check_image(d)?;
+            if masks.get(&m.texture).is_some_and(|e| e.value.desc != *d) {
+                return Err(invalid("cached mask ID changed descriptor"));
+            }
         }
     }
     for o in scene.phases.iter().flat_map(|p| &p.objects) {
@@ -172,19 +201,19 @@ pub(crate) fn validate(
         {
             return Err(invalid("invalid object transform/opacity"));
         }
-        check_mesh(o.mesh)?;
-        let d = scene
-            .resources
-            .texture(o.texture)
-            .ok_or_else(|| invalid("missing texture definition"))?
-            .descriptor();
-        check_image(d)?;
-        if resources
-            .textures
-            .get(&o.texture)
-            .is_some_and(|e| e.value.desc != *d)
-        {
-            return Err(invalid("cached texture ID changed descriptor"));
+        if scratch.meshes.insert(o.mesh) {
+            check_mesh(o.mesh)?;
+        }
+        if scratch.textures.insert(o.texture) {
+            let d = scene
+                .resources
+                .texture(o.texture)
+                .ok_or_else(|| invalid("missing texture definition"))?
+                .descriptor();
+            check_image(d)?;
+            if textures.get(&o.texture).is_some_and(|e| e.value.desc != *d) {
+                return Err(invalid("cached texture ID changed descriptor"));
+            }
         }
     }
     Ok(())

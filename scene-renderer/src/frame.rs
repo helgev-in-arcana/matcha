@@ -3,6 +3,19 @@
 use crate::compositor::plan::{DrawOp, DrawPlan};
 use crate::{RenderStats, SceneError, SceneTarget, compositor::*, plan::FramePlan, resources::*};
 use render_interface::*;
+
+/// An unwind is transported to the submission owner only after the encoder and
+/// compositor workspace have been recovered. It is resumed there, never changed
+/// into a successful render or a provider's ordinary PrepareError.
+pub(crate) enum FrameFailure {
+    Recording(SceneError),
+    Unwind(Box<dyn std::any::Any + Send>),
+}
+impl From<SceneError> for FrameFailure {
+    fn from(error: SceneError) -> Self {
+        Self::Recording(error)
+    }
+}
 pub(crate) struct Surfaces {
     pub(crate) size: [u32; 2],
     pub(crate) color: Image,
@@ -31,6 +44,7 @@ pub(crate) fn attachment(
         },
     )
 }
+#[allow(clippy::too_many_arguments)] // Explicitly borrowed, separately owned subsystems.
 pub(crate) fn encode(
     device: &wgpu::Device,
     compositor: &mut Compositor,
@@ -40,7 +54,7 @@ pub(crate) fn encode(
     target: SceneTarget<'_>,
     s: &Surfaces,
     stats: &mut RenderStats,
-) -> Result<DrawFrame, SceneError> {
+) -> Result<DrawFrame, FrameFailure> {
     // Taking only the reusable CPU plan avoids borrowing the compositor through
     // its own draw calls. Both success and every ordinary error restore it.
     let mut draw_plan = std::mem::take(&mut compositor.draw_plan);
@@ -48,7 +62,7 @@ pub(crate) fn encode(
         Ok(()) => encode_planned(
             device, compositor, resources, scene, plan, &draw_plan, target, s, stats,
         ),
-        Err(error) => Err(error),
+        Err(error) => Err(error.into()),
     };
     compositor.draw_plan = draw_plan;
     if result.is_err() {
@@ -68,7 +82,7 @@ fn encode_planned(
     target: SceneTarget<'_>,
     s: &Surfaces,
     stats: &mut RenderStats,
-) -> Result<DrawFrame, SceneError> {
+) -> Result<DrawFrame, FrameFailure> {
     let alignment = u64::from(device.limits().min_uniform_buffer_offset_alignment);
     let stride = PARAMETER_BYTES
         .checked_add(alignment.saturating_sub(1))
@@ -85,7 +99,7 @@ fn encode_planned(
         .checked_mul(uniform_count)
         .ok_or_else(|| SceneError::Invalid("draw parameter capacity overflow".into()))?;
     if uniform_size > device.limits().max_buffer_size || uniform_size > u64::from(u32::MAX) {
-        return Err(SceneError::Invalid("too many draw parameters".into()));
+        return Err(SceneError::Invalid("too many draw parameters".into()).into());
     }
     if compositor
         .parameter_buffer
@@ -116,9 +130,18 @@ fn encode_planned(
         destination: None,
         batches: 0,
     };
-    let result = record_operations(
-        device, compositor, resources, scene, plan, draw_plan, target, s, stats, &mut frame,
-    );
+    // This is the only region that calls provider code. AssertUnwindSafe is
+    // justified by discarding the encoder, rolling back provisional residents,
+    // and restoring the taken workspace before the panic leaves the renderer.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        record_operations(
+            device, compositor, resources, scene, plan, draw_plan, target, s, stats, &mut frame,
+        )
+    }));
+    let result = match result {
+        Ok(result) => result.map_err(FrameFailure::Recording),
+        Err(payload) => Err(FrameFailure::Unwind(payload)),
+    };
     // These counters describe recording work, including work later discarded on
     // a CPU preparation error. They are not a receipt of GPU execution.
     stats.draw_batches = frame.batches;
@@ -133,9 +156,9 @@ fn encode_planned(
     if frame.storage.bytes.len() as u64 != uniform_size {
         drop(frame.encoder);
         compositor.abort_workspace(frame.storage);
-        return Err(SceneError::Invalid(
-            "draw plan and recorded uniform count differ".into(),
-        ));
+        return Err(
+            SceneError::Invalid("draw plan and recorded uniform count differ".into()).into(),
+        );
     }
     Ok(frame)
 }

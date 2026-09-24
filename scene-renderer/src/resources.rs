@@ -2,7 +2,10 @@
 //! New entries are provisional until submission. A CPU recording failure discards every
 //! entry produced by that recording, leaving previously submitted content intact.
 use render_interface::*;
-use std::{collections::HashMap, ops::Range};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+};
 
 use crate::SceneError;
 mod cache;
@@ -13,6 +16,9 @@ use cache::{CachePolicy, Candidate, Lru, ResourceKey};
 use placement::{AtlasConfig, BufferLease, Placement, PlacementStats, TextureLease};
 use scratch::ScratchPool;
 
+#[cfg(test)]
+mod accounting_tests;
+
 #[derive(Default)]
 pub(crate) struct ResourceStats {
     pub(crate) prepared: usize,
@@ -20,6 +26,92 @@ pub(crate) struct ResourceStats {
     pub(crate) evicted: usize,
     pub(crate) output_texture_allocations: usize,
     pub(crate) output_buffer_allocations: usize,
+}
+
+/// Reused CPU validation sets, cleared for every submitted Scene. Membership is
+/// not persistent validation: the same immutable ID is checked again next frame.
+#[derive(Default)]
+pub(crate) struct ValidationScratch {
+    pub(crate) meshes: HashSet<MeshId>,
+    pub(crate) textures: HashSet<TextureId>,
+    pub(crate) masks: HashSet<MaskId>,
+}
+
+impl ValidationScratch {
+    pub(crate) fn clear(&mut self) {
+        self.meshes.clear();
+        self.textures.clear();
+        self.masks.clear();
+    }
+}
+
+/// Updating the resident maps also updates these totals. Provisional entries
+/// count while recording and are subtracted by abort; relocation changes only
+/// dedicated placement contributions, never the logical-content total.
+#[derive(Default)]
+struct ResidentAccounting {
+    bytes: u64,
+    dedicated: PlacementStats,
+}
+
+impl ResidentAccounting {
+    fn insert(&mut self, bytes: u64, dedicated: PlacementStats) {
+        self.bytes += bytes;
+        self.add_placement(dedicated);
+    }
+
+    fn remove(&mut self, bytes: u64, dedicated: PlacementStats) {
+        self.bytes -= bytes;
+        self.remove_placement(dedicated);
+    }
+
+    fn add_placement(&mut self, stats: PlacementStats) {
+        self.dedicated.texture_pages += stats.texture_pages;
+        self.dedicated.mesh_pages += stats.mesh_pages;
+        self.dedicated.reserved_texture_bytes += stats.reserved_texture_bytes;
+        self.dedicated.reserved_mesh_bytes += stats.reserved_mesh_bytes;
+        self.dedicated.live_texture_bytes += stats.live_texture_bytes;
+        self.dedicated.live_mesh_bytes += stats.live_mesh_bytes;
+    }
+
+    fn remove_placement(&mut self, stats: PlacementStats) {
+        self.dedicated.texture_pages -= stats.texture_pages;
+        self.dedicated.mesh_pages -= stats.mesh_pages;
+        self.dedicated.reserved_texture_bytes -= stats.reserved_texture_bytes;
+        self.dedicated.reserved_mesh_bytes -= stats.reserved_mesh_bytes;
+        self.dedicated.live_texture_bytes -= stats.live_texture_bytes;
+        self.dedicated.live_mesh_bytes -= stats.live_mesh_bytes;
+    }
+}
+
+fn dedicated_image(image: &Image) -> PlacementStats {
+    if image.texture_lease.is_some() {
+        return PlacementStats::default();
+    }
+    let bytes = image.bytes();
+    PlacementStats {
+        texture_pages: 1,
+        reserved_texture_bytes: bytes,
+        live_texture_bytes: bytes,
+        ..Default::default()
+    }
+}
+
+fn dedicated_mesh(mesh: &Mesh) -> PlacementStats {
+    let mut stats = PlacementStats::default();
+    if mesh.vertex_lease.is_none() {
+        stats.mesh_pages += 1;
+        stats.reserved_mesh_bytes += mesh.vertices.size();
+        stats.live_mesh_bytes += mesh.vertex_range.end - mesh.vertex_range.start;
+    }
+    if let Some(indices) = &mesh.indices
+        && mesh.index_lease.is_none()
+    {
+        stats.mesh_pages += 1;
+        stats.reserved_mesh_bytes += indices.size();
+        stats.live_mesh_bytes += mesh.index_range.end - mesh.index_range.start;
+    }
+    stats
 }
 
 /// Dedicated storage is a correctness/reference path and a fallback for callers
@@ -113,6 +205,8 @@ pub(crate) struct ResourceStore {
     scratch: ScratchPool,
     cache_policy: Lru,
     budget: u64,
+    accounting: ResidentAccounting,
+    pub(crate) validation: ValidationScratch,
 }
 impl ResourceStore {
     pub(crate) fn plan_relocation(
@@ -136,22 +230,34 @@ impl ResourceStore {
         // Replace values and the complete registry together. Last-use metadata,
         // content IDs and source definitions are unaffected by physical movement.
         for (id, mesh) in plan.meshes {
-            self.meshes
+            let entry = self
+                .meshes
                 .get_mut(&id)
-                .expect("relocation retains resident mesh IDs")
-                .value = mesh;
+                .expect("relocation retains resident mesh IDs");
+            self.accounting
+                .remove_placement(dedicated_mesh(&entry.value));
+            self.accounting.add_placement(dedicated_mesh(&mesh));
+            entry.value = mesh;
         }
         for (id, image) in plan.textures {
-            self.textures
+            let entry = self
+                .textures
                 .get_mut(&id)
-                .expect("relocation retains resident texture IDs")
-                .value = image;
+                .expect("relocation retains resident texture IDs");
+            self.accounting
+                .remove_placement(dedicated_image(&entry.value));
+            self.accounting.add_placement(dedicated_image(&image));
+            entry.value = image;
         }
         for (id, image) in plan.masks {
-            self.masks
+            let entry = self
+                .masks
                 .get_mut(&id)
-                .expect("relocation retains resident mask IDs")
-                .value = image;
+                .expect("relocation retains resident mask IDs");
+            self.accounting
+                .remove_placement(dedicated_image(&entry.value));
+            self.accounting.add_placement(dedicated_image(&image));
+            entry.value = image;
         }
         self.placement = plan.placement;
     }
@@ -173,6 +279,8 @@ impl ResourceStore {
             scratch: ScratchPool::new(),
             cache_policy: Lru,
             budget: 128 * 1024 * 1024,
+            accounting: ResidentAccounting::default(),
+            validation: ValidationScratch::default(),
         }
     }
     pub(crate) fn begin(&mut self) -> Result<(), SceneError> {
@@ -189,7 +297,7 @@ impl ResourceStore {
         let meshes: Vec<_> = self
             .meshes
             .extract_if(|_, e| e.created_frame == frame)
-            .map(|(_, e)| e.value)
+            .map(|(_, e)| e)
             .collect();
         for mesh in meshes {
             self.release_mesh(mesh);
@@ -197,22 +305,23 @@ impl ResourceStore {
         let images: Vec<_> = self
             .textures
             .extract_if(|_, e| e.created_frame == frame)
-            .map(|(_, e)| e.value)
+            .map(|(_, e)| e)
             .chain(
                 self.masks
                     .extract_if(|_, e| e.created_frame == frame)
-                    .map(|(_, e)| e.value),
+                    .map(|(_, e)| e),
             )
             .collect();
         for image in images {
             self.release_image(image);
         }
-        self.scratch.reset();
+        self.scratch.abort_checkouts();
     }
     pub(crate) fn clear(&mut self) {
         self.meshes.clear();
         self.textures.clear();
         self.masks.clear();
+        self.accounting = ResidentAccounting::default();
         // Clearing all resident owners permits dropping the complete registry.
         // Submitted command buffers still retain their own GPU handles.
         self.placement = Placement::new(self.config);
@@ -224,6 +333,9 @@ impl ResourceStore {
             self.mode = mode;
         }
     }
+    pub(crate) fn placement_mode(&self) -> PlacementMode {
+        self.mode
+    }
     pub(crate) fn set_config(&mut self, config: AtlasConfig) -> Result<(), SceneError> {
         placement::validate_config(&self.device, config)?;
         self.config = config;
@@ -232,30 +344,29 @@ impl ResourceStore {
     }
     pub(crate) fn placement_stats(&self) -> PlacementStats {
         let mut stats = self.placement.stats();
-        for e in self.textures.values().chain(self.masks.values()) {
-            if e.value.texture_lease.is_none() {
-                stats.texture_pages += 1;
-                stats.reserved_texture_bytes += e.bytes;
-                stats.live_texture_bytes += e.bytes;
-            }
-        }
-        for e in self.meshes.values() {
-            if e.value.vertex_lease.is_none() {
-                stats.mesh_pages += 1 + usize::from(e.value.indices.is_some());
-                stats.reserved_mesh_bytes += e.bytes;
-                stats.live_mesh_bytes += e.bytes;
-            }
-        }
+        let dedicated = self.accounting.dedicated;
+        stats.texture_pages += dedicated.texture_pages;
+        stats.mesh_pages += dedicated.mesh_pages;
+        stats.reserved_texture_bytes += dedicated.reserved_texture_bytes;
+        stats.reserved_mesh_bytes += dedicated.reserved_mesh_bytes;
+        stats.live_texture_bytes += dedicated.live_texture_bytes;
+        stats.live_mesh_bytes += dedicated.live_mesh_bytes;
         stats
     }
-    fn release_image(&mut self, image: Image) {
+    fn release_image(&mut self, entry: Entry<Image>) {
+        self.accounting
+            .remove(entry.bytes, dedicated_image(&entry.value));
+        let image = entry.value;
         if let Some(lease) = image.texture_lease {
             self.placement
                 .release_texture(lease)
                 .expect("resident image owns a live placement lease");
         }
     }
-    fn release_mesh(&mut self, mesh: Mesh) {
+    fn release_mesh(&mut self, entry: Entry<Mesh>) {
+        self.accounting
+            .remove(entry.bytes, dedicated_mesh(&entry.value));
+        let mesh = entry.value;
         for lease in [mesh.vertex_lease, mesh.index_lease].into_iter().flatten() {
             self.placement
                 .release_buffer(lease)
@@ -263,9 +374,7 @@ impl ResourceStore {
         }
     }
     pub(crate) fn cache_bytes(&self) -> u64 {
-        self.meshes.values().map(|e| e.bytes).sum::<u64>()
-            + self.textures.values().map(|e| e.bytes).sum::<u64>()
-            + self.masks.values().map(|e| e.bytes).sum::<u64>()
+        self.accounting.bytes
     }
     pub(crate) fn set_budget(&mut self, bytes: u64) {
         self.budget = bytes;
@@ -323,17 +432,17 @@ impl ResourceStore {
             let removed = match candidate.key {
                 ResourceKey::Mesh(id) => self.meshes.remove(&id).map(|entry| {
                     let bytes = entry.bytes;
-                    self.release_mesh(entry.value);
+                    self.release_mesh(entry);
                     bytes
                 }),
                 ResourceKey::Texture(id) => self.textures.remove(&id).map(|entry| {
                     let bytes = entry.bytes;
-                    self.release_image(entry.value);
+                    self.release_image(entry);
                     bytes
                 }),
                 ResourceKey::Mask(id) => self.masks.remove(&id).map(|entry| {
                     let bytes = entry.bytes;
-                    self.release_image(entry.value);
+                    self.release_image(entry);
                     bytes
                 }),
             };
@@ -499,6 +608,7 @@ impl ResourceStore {
             },
             encoder,
         )?;
+        self.accounting.insert(bytes, dedicated_mesh(&mesh));
         self.meshes.insert(
             id,
             Entry {
@@ -539,6 +649,8 @@ impl ResourceStore {
                 source,
             })?;
         let image = self.pack_image(image, encoder)?;
+        self.accounting
+            .insert(image.bytes(), dedicated_image(&image));
         self.textures.insert(
             id,
             Entry {
@@ -579,6 +691,8 @@ impl ResourceStore {
                 source,
             })?;
         let image = self.pack_image(image, encoder)?;
+        self.accounting
+            .insert(image.bytes(), dedicated_image(&image));
         self.masks.insert(
             id,
             Entry {

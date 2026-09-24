@@ -33,6 +33,25 @@ pub use resources::{
     placement::{AtlasConfig, PlacementStats},
     relocation::RelocationStats,
 };
+/// Destination for the contract's premultiplied linear-light composition.
+///
+/// Source sampling and the working image supply premultiplied linear RGB. Final
+/// output to non-sRGB Unorm or Float views keeps those linear values (subject to
+/// the format's precision/range). An sRGB view hardware-encodes RGB on write;
+/// alpha stays linear. This applies equally to an explicitly enabled sRGB view
+/// of an Unorm texture. No transfer function is inferred from the destination's
+/// role as an offscreen image or a displayed surface.
+///
+/// Presentation belongs to the caller. A WebGPU canvas's preferred texture
+/// format is Unorm, while its `colorSpace`/`alphaMode` define how stored values
+/// are displayed. Select the view and any final presentation conversion for that
+/// encoding; see [WebGPU colour encoding](https://gpuweb.github.io/gpuweb/#color-spaces).
+/// In particular, encoding premultiplied linear RGB does not generally produce
+/// RGB premultiplied in the encoded space. An sRGB view alone therefore does not
+/// adapt translucent output for a canvas expecting encoded premultiplied RGB.
+/// An opaque result can use the sRGB view directly for sRGB-encoded presentation;
+/// transparent presentation may need unpremultiply, encode, and re-premultiply.
+/// This renderer performs no gamut, tone-mapping, or presentation-alpha conversion.
 pub struct SceneTarget<'a> {
     /// Full, single-sample 2D attachment; size is taken from its texture.
     pub view: &'a wgpu::TextureView,
@@ -41,6 +60,7 @@ pub struct SceneTarget<'a> {
     /// the caller must declare the format used to create this full 2D view.
     pub format: wgpu::TextureFormat,
     pub viewport: [f32; 2],
+    /// Initial premultiplied linear-light RGBA, independent of output view format.
     pub clear: wgpu::Color,
     /// Optional full-size sampled initial image, composited over clear before
     /// phase zero. It must not alias the destination or any source output.
@@ -140,6 +160,7 @@ impl SceneRenderer {
     /// Repack resident content using GPU copies, without source callbacks or
     /// readback. Old and replacement capacity coexist while copies are in flight.
     /// This heuristic need not reduce capacity for every distribution of sizes.
+    /// Dedicated storage has no shared-page fragmentation and is left unchanged.
     pub fn compact_resources(&mut self) -> Result<RelocationStats, SceneError> {
         self.compact_resources_with_budget(u64::MAX)
     }
@@ -149,6 +170,15 @@ impl SceneRenderer {
         &mut self,
         max_copy_bytes: u64,
     ) -> Result<RelocationStats, SceneError> {
+        if self.resources.placement_mode() == PlacementMode::Dedicated {
+            let placement = self.resources.placement_stats();
+            return Ok(RelocationStats {
+                peak_managed_bytes: placement.reserved_texture_bytes
+                    + placement.reserved_mesh_bytes,
+                placement,
+                ..Default::default()
+            });
+        }
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -169,11 +199,16 @@ impl SceneRenderer {
         self.resources.set_scratch_budget(bytes);
         self.refresh_resource_stats();
     }
+    /// On a provider panic with unwinding enabled, discards unsubmitted work and
+    /// new residents, restores reusable workspace, then resumes the original panic.
+    /// A caller catching it can render again without clearing previously valid
+    /// residents. Provider-owned side effects are not rolled back; panic=abort
+    /// terminates the process and cannot run this cleanup.
     pub fn render(&mut self, scene: &Scene, target: SceneTarget<'_>) -> Result<(), SceneError> {
         self.stats = RenderStats::default();
         self.resources.begin()?;
         if let Err(error) = self.preparation.rebuild(scene).and_then(|()| {
-            validation::validate(&self.device, &self.resources, scene, &target)?;
+            validation::validate(&self.device, &mut self.resources, scene, &target)?;
             Ok(())
         }) {
             self.refresh_resource_stats();
@@ -206,10 +241,13 @@ impl SceneRenderer {
                 self.compositor.restore_workspace(frame.storage);
                 self.resources.finish(scene);
             }
-            Err(error) => {
+            Err(failure) => {
                 self.resources.abort();
                 self.refresh_resource_stats();
-                return Err(error);
+                return match failure {
+                    frame::FrameFailure::Recording(error) => Err(error),
+                    frame::FrameFailure::Unwind(payload) => std::panic::resume_unwind(payload),
+                };
             }
         }
         self.refresh_resource_stats();

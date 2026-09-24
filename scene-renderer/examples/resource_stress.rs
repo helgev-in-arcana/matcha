@@ -276,7 +276,17 @@ fn main() {
             image::ColorType::Rgba8,
         )
         .expect("save proof image");
-        assert!(renderer.compact_resources_with_budget(0).is_err());
+        match mode {
+            PlacementMode::Atlas => assert!(renderer.compact_resources_with_budget(0).is_err()),
+            PlacementMode::Dedicated => {
+                let unchanged = renderer
+                    .compact_resources_with_budget(0)
+                    .expect("dedicated placement needs no relocation");
+                assert_eq!(unchanged.copied_bytes, 0);
+                assert_eq!(unchanged.meshes, 0);
+                assert_eq!(unchanged.textures, 0);
+            }
+        }
         let moved = renderer
             .compact_resources_with_budget(cold.cache_bytes)
             .expect("bounded relocation");
@@ -285,7 +295,13 @@ fn main() {
             generated,
             "relocation must not prepare sources"
         );
-        assert_eq!(moved.copied_bytes, cold.cache_bytes);
+        assert_eq!(
+            moved.copied_bytes,
+            match mode {
+                PlacementMode::Atlas => cold.cache_bytes,
+                PlacementMode::Dedicated => 0,
+            }
+        );
         writeln!(report, "# {mode:?} relocation: {moved:?}").expect("relocation metrics");
         assert_eq!(
             render(

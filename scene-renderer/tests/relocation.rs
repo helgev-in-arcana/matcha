@@ -227,11 +227,26 @@ fn relocation_limit_is_atomic_and_exact_budget_moves_snapshot_dependent_content(
         assert_eq!(original_stats.cache_bytes, bytes);
         assert_eq!(calls.load(Ordering::SeqCst), 4);
         assert_eq!(snapshot_calls.load(Ordering::SeqCst), 1);
-        let error = backend.compact_resources_with_budget(bytes - 1);
-        assert!(
-            matches!(error, Err(SceneError::Invalid(_))),
-            "{mode:?}: {error:?}"
-        );
+        match mode {
+            PlacementMode::Atlas => {
+                let error = backend.compact_resources_with_budget(bytes - 1);
+                assert!(matches!(error, Err(SceneError::Invalid(_))), "{error:?}");
+            }
+            PlacementMode::Dedicated => {
+                let unchanged = backend
+                    .compact_resources_with_budget(0)
+                    .expect("dedicated resources contain no shared-placement fragmentation");
+                assert_eq!(unchanged.copied_bytes, 0);
+                assert_eq!(unchanged.meshes, 0);
+                assert_eq!(unchanged.textures, 0);
+                assert_eq!(unchanged.placement, original_stats.placement);
+                assert_eq!(
+                    unchanged.peak_managed_bytes,
+                    original_stats.placement.reserved_texture_bytes
+                        + original_stats.placement.reserved_mesh_bytes
+                );
+            }
+        }
         let after_failure = backend.stats();
         assert_eq!(after_failure.placement, original_stats.placement);
         assert_eq!(after_failure.cache_bytes, original_stats.cache_bytes);
@@ -243,24 +258,35 @@ fn relocation_limit_is_atomic_and_exact_budget_moves_snapshot_dependent_content(
         assert_eq!(
             backend.stats().prepared,
             0,
-            "failed plan retained all old contents"
+            "declined or unnecessary relocation retained all old contents"
         );
         assert_eq!(before, pixels(&device, &queue, &target));
 
         let moved = backend
             .compact_resources_with_budget(bytes)
             .expect("exact logical copy budget");
-        assert_eq!(moved.copied_bytes, bytes);
-        assert_eq!(moved.meshes, 2);
-        assert_eq!(
-            moved.textures, 3,
-            "coverage also participates in texture relocation"
-        );
         let old_capacity = original_stats.placement.reserved_texture_bytes
             + original_stats.placement.reserved_mesh_bytes;
         let new_capacity =
             moved.placement.reserved_texture_bytes + moved.placement.reserved_mesh_bytes;
-        assert_eq!(moved.peak_managed_bytes, old_capacity + new_capacity);
+        match mode {
+            PlacementMode::Atlas => {
+                assert_eq!(moved.copied_bytes, bytes);
+                assert_eq!(moved.meshes, 2);
+                assert_eq!(
+                    moved.textures, 3,
+                    "coverage also participates in texture relocation"
+                );
+                assert_eq!(moved.peak_managed_bytes, old_capacity + new_capacity);
+            }
+            PlacementMode::Dedicated => {
+                assert_eq!(moved.copied_bytes, 0);
+                assert_eq!(moved.meshes, 0);
+                assert_eq!(moved.textures, 0);
+                assert_eq!(moved.placement, original_stats.placement);
+                assert_eq!(moved.peak_managed_bytes, old_capacity);
+            }
+        }
         render(&mut backend, &scene, &target);
         assert_eq!(backend.stats().prepared, 0);
         assert_eq!(backend.stats().snapshot_copies, 0);
@@ -307,8 +333,17 @@ fn queue_order_preserves_old_frames_through_relocation_clear_and_new_allocations
             let moved = backend
                 .compact_resources()
                 .expect("ordered relocation submission");
-            assert_eq!(moved.meshes, 1);
-            assert_eq!(moved.textures, 2);
+            match mode {
+                PlacementMode::Atlas => {
+                    assert_eq!(moved.meshes, 1);
+                    assert_eq!(moved.textures, 2);
+                }
+                PlacementMode::Dedicated => {
+                    assert_eq!(moved.meshes, 0);
+                    assert_eq!(moved.textures, 0);
+                    assert_eq!(moved.copied_bytes, 0);
+                }
+            }
             let after_relocation = output(&device);
             render(&mut backend, &scene, &after_relocation);
             assert_eq!(backend.stats().prepared, 0);
