@@ -2,6 +2,7 @@
 members = [
     "render-interface",
     "scene-renderer",
+    "scene-builder",
     "matcha",
     "matcha-tree",
     "matcha-tree-widgets",
@@ -23,6 +24,7 @@ version = "0.0.6"
 # self
 render-interface = { path = "render-interface" }
 scene-renderer = { path = "scene-renderer" }
+scene-builder = { path = "scene-builder" }
 matcha = { path = "matcha" }
 matcha-tree = { path = "matcha-tree" }
 matcha-window = { path = "matcha-window" }

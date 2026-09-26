@@ -40,8 +40,10 @@
 //! hints, but must not regenerate a source from a later phase's snapshot.
 //!
 //! GPU callbacks may record copy/compute/render work into their dedicated output.
-//! They must initialize it, never mutate the snapshot, retain borrowed handles,
-//! destroy resources or submit work themselves. CPU preparation errors abort
+//! They must initialize it, never mutate the snapshot, retain output/snapshot
+//! handles, destroy borrowed resources or submit work themselves. Device clones
+//! and privately created pipelines/work resources may be retained by providers.
+//! CPU preparation errors abort
 //! submission and publication of newly generated cache entries for the frame.
 //! This does not roll back a callback's external CPU side effects. Exposing
 //! raw wgpu handles is a trusted extension contract, not a security sandbox.

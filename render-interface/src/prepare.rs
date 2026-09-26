@@ -29,8 +29,10 @@ pub struct RenderSnapshot<'a> {
 }
 /// Borrowed recording access for a resource generator.
 ///
-/// Callbacks must not retain borrowed handles (including cloned GPU handles),
-/// submit commands, destroy resources, or mutate the snapshot. They may record
+/// Callbacks must not retain output/snapshot handles (including clones) or the
+/// encoder, submit commands, destroy borrowed resources, or mutate the snapshot.
+/// Device clones and private pipelines/work resources may be retained, with
+/// caches scoped to device identity. Callbacks may record
 /// copy, compute and render work and create private intermediates. Every declared
 /// output byte/texel must be initialized; prior output contents are unspecified.
 /// The output is a logical resource at offset/origin zero, never an atlas region.
