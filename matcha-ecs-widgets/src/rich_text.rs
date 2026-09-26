@@ -5,11 +5,10 @@
 //! no font fallback, so mixed-script or ligature-heavy text can render
 //! incorrectly. `RichText` shapes via parley (HarfRust shaping + fontique
 //! font fallback) and rasterises glyphs via swash, but reuses the exact same
-//! GPU compositing trick `Text` already established: a 1x1 solid-colour
-//! "tint" quad (`texture_atlas`) masked by a per-glyph coverage bitmap
-//! (`stencil_atlas`, `R8Unorm`) via `RenderNode::with_stencil` — see
-//! `renderer/src/core_renderer/renderer_render.wgsl`'s
-//! `final_color = texture_color * stencil_atlas.r`.
+//! native Scene contract as Text: shared GPU colour generators and glyph
+//! MaskSources. Swash produces bitmap bounds and pixels together; its pixels
+//! are retained inside the source closure for regeneration, without a Bitmap
+//! wrapper. Scene Objects/PixelMasks reference those definitions directly.
 //!
 //! **CSS text-property coverage (added in a later pass, see `CLAUDE.md`'s
 //! dated entry for the full design writeup)**: `RichText` now reproduces most
@@ -37,30 +36,20 @@
 //! `GlyphKey` field to avoid a same-key-different-bitmap collision — see
 //! `GlyphKey`'s doc comment), colour glyphs (emoji — rasterisation only
 //! accepts `Content::Mask`, alpha coverage), sub-pixel glyph positioning
-//! (layout is quantized to whole pixels instead), and any shape-result
-//! caching (matching `Text`: `measure`/`arrange`/the `RenderItem` builder
-//! each independently re-shape from scratch).
+//! (layout is quantized to whole pixels instead), and sharing shape results
+//! between layout and painting. The draw writer already caches its most recent
+//! shaped layout by wrap width; layout measurement shapes independently.
 
-use std::{
-    collections::HashMap,
-    num::NonZeroUsize,
-    ops::Range,
-    sync::Arc,
-    time::Duration,
-};
+use std::{num::NonZeroUsize, ops::Range, sync::Arc, time::Duration};
 
 use bevy_ecs::{
-    bundle::Bundle,
-    change_detection::DetectChangesMut,
-    component::Component,
-    entity::Entity,
-    resource::Resource,
-    world::EntityWorldMut,
+    bundle::Bundle, change_detection::DetectChangesMut, component::Component, entity::Entity,
+    resource::Resource, world::EntityWorldMut,
 };
-use gpu_utils::texture_atlas::AtlasRegion;
+use matcha_ecs::scene::Draw;
 use nalgebra::{Matrix4, Vector3};
 use parking_lot::Mutex;
-use renderer::RenderNode;
+use render_interface::{MaskDescriptor, MaskSource, upload_texture};
 
 use matcha_ecs::{
     components::{
@@ -71,9 +60,9 @@ use matcha_ecs::{
     view::Widget,
 };
 
+use crate::animation::{Easing, ExitFade, OpacityTween};
 use crate::live::LiveF32;
 use crate::sizing::Sizing;
-use crate::animation::{Easing, ExitFade, OpacityTween};
 
 /// The displayed content: a fully assembled string (base text + every span's
 /// text, in declaration order, each already transform/collapse-processed)
@@ -373,7 +362,12 @@ fn collapse_white_space_with_span_remap<T: Clone>(
 
     let remapped = spans
         .iter()
-        .map(|(range, payload)| (old_to_new[range.start]..old_to_new[range.end], payload.clone()))
+        .map(|(range, payload)| {
+            (
+                old_to_new[range.start]..old_to_new[range.end],
+                payload.clone(),
+            )
+        })
         .collect();
     (new_text, remapped)
 }
@@ -467,11 +461,9 @@ struct GlyphKey {
 /// `GlyphCache` (see the `glyph-cache` crate) rather than an unbounded map:
 /// unlike `Text`'s `stencil_cache`, `RichText` is expected to draw arbitrary
 /// runtime text (timecodes, filenames, ...) where an unbounded cache would
-/// grow forever. Eviction only ever drops this map's own entry — any
-/// `AtlasRegion` already baked into a built `RenderNode` keeps itself alive
-/// via its own `Arc` clone (RAII deallocation on last drop), so evicting a
-/// glyph here never corrupts an already-rendered frame, only means it will
-/// be re-rasterised if drawn again later.
+/// grow forever. Eviction drops the provider entry; definitions already imported
+/// by the framework remain alive through the submitted frame. A later miss may
+/// rasterize again and receive a new content ID.
 const GLYPH_CACHE_CAPACITY: usize = 1024;
 
 /// parley's per-glyph "paint" type — wraps a resolved RGBA colour. `Default`
@@ -489,7 +481,8 @@ pub(crate) struct ParleyFontCtxInner {
     /// visible bitmap, e.g. space — caching that avoids re-rasterising them
     /// every frame), shared across every `RichText` entity/frame drawing the
     /// same glyph at the same size.
-    stencil_cache: Mutex<glyph_cache::GlyphCache<GlyphKey, Option<(AtlasRegion, [f32; 2], [i32; 2])>>>,
+    stencil_cache:
+        Mutex<glyph_cache::GlyphCache<GlyphKey, Option<(MaskSource, [f32; 2], [i32; 2])>>>,
 }
 
 /// World resource wrapping parley's `FontContext`/`LayoutContext`, swash's
@@ -505,57 +498,44 @@ impl ParleyFontCtx {
             layout_cx: Mutex::new(parley::LayoutContext::new()),
             scale_cx: Mutex::new(swash::scale::ScaleContext::new()),
             stencil_cache: Mutex::new(glyph_cache::GlyphCache::new(
-                NonZeroUsize::new(GLYPH_CACHE_CAPACITY).expect("GLYPH_CACHE_CAPACITY is a nonzero constant"),
+                NonZeroUsize::new(GLYPH_CACHE_CAPACITY)
+                    .expect("GLYPH_CACHE_CAPACITY is a nonzero constant"),
             )),
         }))
     }
 
-    /// Marks the start of a new eviction-protection batch. Called once per
-    /// `RenderItem` builder invocation (see `rich_text_render_item`) — not
-    /// once per rendered frame, since a `RenderItem` is only rebuilt when a
-    /// draw-relevant prop actually changes (`RenderItem::invalidate`), which
-    /// can be far less often than every frame. A "batch" is therefore one
-    /// full shape-and-draw pass over one `RichText` entity's glyphs: this
-    /// protects every glyph that pass touches from being evicted by a later
-    /// glyph in the *same* pass, while still allowing eviction across
-    /// different (unrelated, or later) rebuilds.
+    /// Protect one writer's glyph run from eviction during that traversal.
+    /// This runs each redraw; shaping itself is cached separately by wrap width.
     pub(crate) fn begin_glyph_batch(&self) {
         self.0.stencil_cache.lock().new_batch();
     }
 
-    /// Look up (or rasterise-and-cache) the stencil atlas region holding
+    /// Look up the native MaskSource defining
     /// `key`'s coverage bitmap, plus its pixel size and its placement
     /// (offset of the bitmap's top-left corner from the pen position).
     /// Returns `None` both when the glyph has no visible bitmap and when the
     /// cache had no room left this batch (see `GlyphCache::get_or_insert_with`)
     /// — either way, the caller should simply skip drawing this glyph.
-    fn stencil_region(
+    fn glyph_source(
         &self,
         key: GlyphKey,
-        glyph_id: swash::GlyphId,
-        scaler: &mut swash::scale::Scaler,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        atlas: &gpu_utils::texture_atlas::TextureAtlas,
-    ) -> Option<(AtlasRegion, [f32; 2], [i32; 2])> {
+        build: impl FnOnce() -> Option<(MaskSource, [f32; 2], [i32; 2])>,
+    ) -> Option<(MaskSource, [f32; 2], [i32; 2])> {
         self.0
             .stencil_cache
             .lock()
-            .get_or_insert_with(key, || rasterize_and_upload(glyph_id, scaler, device, queue, atlas))
+            .get_or_insert_with(key, build)
             .cloned()
             .flatten()
     }
 }
 
 /// Rasterise `glyph_id` via swash (alpha coverage mask only — colour glyphs
-/// are skipped, see module docs) and upload it into the stencil atlas.
-fn rasterize_and_upload(
+/// are skipped, see module docs) and retain the bytes in a lazy MaskSource.
+fn rasterize_bitmap(
     glyph_id: swash::GlyphId,
     scaler: &mut swash::scale::Scaler,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    atlas: &gpu_utils::texture_atlas::TextureAtlas,
-) -> Option<(AtlasRegion, [f32; 2], [i32; 2])> {
+) -> Option<(MaskSource, [f32; 2], [i32; 2])> {
     let image = swash::scale::Render::new(&[swash::scale::Source::Outline])
         .format(swash::zeno::Format::Alpha)
         .render(scaler, glyph_id)?;
@@ -567,17 +547,13 @@ fn rasterize_and_upload(
         return None;
     }
 
-    let region = match atlas.allocate(device, queue, [image.placement.width, image.placement.height]) {
-        Ok(region) => region,
-        Err(e) => {
-            log::error!("RichText glyph stencil allocation failed: {e}");
-            return None;
-        }
-    };
-    if let Err(e) = region.write_data(queue, &image.data) {
-        log::error!("RichText glyph stencil upload failed: {e}");
-        return None;
-    }
+    let region = MaskSource::new(
+        MaskDescriptor::new(
+            [image.placement.width, image.placement.height],
+            wgpu::TextureFormat::R8Unorm,
+        ),
+        move |mut c| upload_texture(&mut c.gpu, &c.target, &image.data),
+    );
 
     Some((
         region,
@@ -589,15 +565,25 @@ fn rasterize_and_upload(
 /// Push every set field of `overrides` onto `builder` for `range` — the
 /// per-span counterpart to `shape()`'s widget-default `push_default` calls.
 /// `underline`/`strikethrough` overrides are not included here (RT4).
-fn push_span_overrides(builder: &mut parley::RangedBuilder<'_, RichTextBrush>, overrides: &SpanOverrides, range: Range<usize>) {
+fn push_span_overrides(
+    builder: &mut parley::RangedBuilder<'_, RichTextBrush>,
+    overrides: &SpanOverrides,
+    range: Range<usize>,
+) {
     if let Some(v) = overrides.font_size {
         builder.push(parley::StyleProperty::FontSize(v), range.clone());
     }
     if let Some(v) = overrides.color {
-        builder.push(parley::StyleProperty::Brush(RichTextBrush(v)), range.clone());
+        builder.push(
+            parley::StyleProperty::Brush(RichTextBrush(v)),
+            range.clone(),
+        );
     }
     if let Some(v) = &overrides.font_family {
-        builder.push(parley::StyleProperty::FontFamily(parley::FontFamily::from(v.as_str())), range.clone());
+        builder.push(
+            parley::StyleProperty::FontFamily(parley::FontFamily::from(v.as_str())),
+            range.clone(),
+        );
     }
     if let Some(v) = overrides.font_weight {
         builder.push(parley::StyleProperty::FontWeight(v), range.clone());
@@ -609,10 +595,16 @@ fn push_span_overrides(builder: &mut parley::RangedBuilder<'_, RichTextBrush>, o
         builder.push(parley::StyleProperty::FontWidth(v), range.clone());
     }
     if let Some(v) = &overrides.font_variations {
-        builder.push(parley::StyleProperty::FontVariations(v.as_str().into()), range.clone());
+        builder.push(
+            parley::StyleProperty::FontVariations(v.as_str().into()),
+            range.clone(),
+        );
     }
     if let Some(v) = &overrides.font_features {
-        builder.push(parley::StyleProperty::FontFeatures(v.as_str().into()), range.clone());
+        builder.push(
+            parley::StyleProperty::FontFeatures(v.as_str().into()),
+            range.clone(),
+        );
     }
     if let Some(v) = overrides.line_height {
         builder.push(parley::StyleProperty::LineHeight(v), range.clone());
@@ -629,14 +621,21 @@ fn push_span_overrides(builder: &mut parley::RangedBuilder<'_, RichTextBrush>, o
     if let Some(v) = overrides.overflow_wrap {
         builder.push(parley::StyleProperty::OverflowWrap(v), range.clone());
     }
-    if let Some(locale) = overrides.locale.as_deref().and_then(|s| parley::Language::parse(s).ok()) {
+    if let Some(locale) = overrides
+        .locale
+        .as_deref()
+        .and_then(|s| parley::Language::parse(s).ok())
+    {
         builder.push(parley::StyleProperty::Locale(Some(locale)), range.clone());
     }
     if let Some(v) = overrides.underline {
         builder.push(parley::StyleProperty::Underline(v), range.clone());
     }
     if let Some(v) = overrides.underline_color {
-        builder.push(parley::StyleProperty::UnderlineBrush(v.map(RichTextBrush)), range.clone());
+        builder.push(
+            parley::StyleProperty::UnderlineBrush(v.map(RichTextBrush)),
+            range.clone(),
+        );
     }
     if let Some(v) = overrides.underline_offset {
         builder.push(parley::StyleProperty::UnderlineOffset(v), range.clone());
@@ -648,7 +647,10 @@ fn push_span_overrides(builder: &mut parley::RangedBuilder<'_, RichTextBrush>, o
         builder.push(parley::StyleProperty::Strikethrough(v), range.clone());
     }
     if let Some(v) = overrides.strikethrough_color {
-        builder.push(parley::StyleProperty::StrikethroughBrush(v.map(RichTextBrush)), range.clone());
+        builder.push(
+            parley::StyleProperty::StrikethroughBrush(v.map(RichTextBrush)),
+            range.clone(),
+        );
     }
     if let Some(v) = overrides.strikethrough_offset {
         builder.push(parley::StyleProperty::StrikethroughOffset(v), range.clone());
@@ -686,22 +688,42 @@ fn shape(
     builder.push_default(parley::StyleProperty::WordBreak(style.word_break));
     builder.push_default(parley::StyleProperty::OverflowWrap(style.overflow_wrap));
     if let Some(variations) = &style.font_variations {
-        builder.push_default(parley::StyleProperty::FontVariations(variations.as_str().into()));
+        builder.push_default(parley::StyleProperty::FontVariations(
+            variations.as_str().into(),
+        ));
     }
     if let Some(features) = &style.font_features {
-        builder.push_default(parley::StyleProperty::FontFeatures(features.as_str().into()));
+        builder.push_default(parley::StyleProperty::FontFeatures(
+            features.as_str().into(),
+        ));
     }
-    if let Some(locale) = style.locale.as_deref().and_then(|s| parley::Language::parse(s).ok()) {
+    if let Some(locale) = style
+        .locale
+        .as_deref()
+        .and_then(|s| parley::Language::parse(s).ok())
+    {
         builder.push_default(parley::StyleProperty::Locale(Some(locale)));
     }
     builder.push_default(parley::StyleProperty::Underline(style.underline.enabled));
-    builder.push_default(parley::StyleProperty::UnderlineBrush(style.underline.color.map(RichTextBrush)));
-    builder.push_default(parley::StyleProperty::UnderlineOffset(style.underline.offset));
+    builder.push_default(parley::StyleProperty::UnderlineBrush(
+        style.underline.color.map(RichTextBrush),
+    ));
+    builder.push_default(parley::StyleProperty::UnderlineOffset(
+        style.underline.offset,
+    ));
     builder.push_default(parley::StyleProperty::UnderlineSize(style.underline.size));
-    builder.push_default(parley::StyleProperty::Strikethrough(style.strikethrough.enabled));
-    builder.push_default(parley::StyleProperty::StrikethroughBrush(style.strikethrough.color.map(RichTextBrush)));
-    builder.push_default(parley::StyleProperty::StrikethroughOffset(style.strikethrough.offset));
-    builder.push_default(parley::StyleProperty::StrikethroughSize(style.strikethrough.size));
+    builder.push_default(parley::StyleProperty::Strikethrough(
+        style.strikethrough.enabled,
+    ));
+    builder.push_default(parley::StyleProperty::StrikethroughBrush(
+        style.strikethrough.color.map(RichTextBrush),
+    ));
+    builder.push_default(parley::StyleProperty::StrikethroughOffset(
+        style.strikethrough.offset,
+    ));
+    builder.push_default(parley::StyleProperty::StrikethroughSize(
+        style.strikethrough.size,
+    ));
 
     for span in &content.spans {
         push_span_overrides(&mut builder, &span.overrides, span.range.clone());
@@ -716,39 +738,20 @@ fn shape(
     layout
 }
 
-/// Paint the 1x1 tint pixel a glyph's stencil — or a decoration rule — is
-/// masked against.
-pub(crate) fn paint_tint_region(ctx: &RenderCtx, color: [f32; 4]) -> Option<AtlasRegion> {
-    crate::color::paint_tint_region(ctx, color, "RichText")
-}
-
-/// Composite a shaped parley layout into a `RenderNode`: one stencil-masked
+/// Emit a shaped parley layout through the frame writer: one stencil-masked
 /// quad per glyph, plus any underline/strikethrough the run carries.
 ///
 /// Shared by [`RichText`] and [`crate::TextBox`]: parley hands both of them the
 /// same `Layout` type (`PlainEditor::layout()` returns one too), so the drawing
 /// pass is identical and there is no reason to grow a second copy of it.
 pub(crate) fn draw_parley_layout(
+    draw: &mut Draw<'_>,
     font_ctx: &ParleyFontCtx,
     ctx: &RenderCtx,
     layout: &parley::Layout<RichTextBrush>,
-) -> RenderNode {
-    let mut node = RenderNode::new();
-
-    // Per-span colour means a single build can need several distinct tint
-    // regions (one per distinct colour actually used) — deduped locally,
-    // scoped to this one build, no persistent cache/eviction needed
-    // (typically only a handful of colours).
-    let mut tint_regions: HashMap<[u32; 4], AtlasRegion> = HashMap::new();
-    let mut tint_for = |color: [f32; 4]| -> Option<AtlasRegion> {
-        let key = [color[0].to_bits(), color[1].to_bits(), color[2].to_bits(), color[3].to_bits()];
-        if let Some(region) = tint_regions.get(&key) {
-            return Some(region.clone());
-        }
-        let region = paint_tint_region(ctx, color)?;
-        tint_regions.insert(key, region.clone());
-        Some(region)
-    };
+    tints: &crate::shape::ShapeCtx,
+) {
+    let tint_for = |color| tints.tint_source(color, ctx);
 
     font_ctx.begin_glyph_batch();
     let mut scale_cx = font_ctx.0.scale_cx.lock();
@@ -763,16 +766,11 @@ pub(crate) fn draw_parley_layout(
             let font_size_px = run.font_size();
             let coords = run.normalized_coords();
 
-            let Some(font_ref) = swash::FontRef::from_index(font.data.as_ref(), font.index as usize) else {
+            let Some(font_ref) =
+                swash::FontRef::from_index(font.data.as_ref(), font.index as usize)
+            else {
                 continue;
             };
-            let mut scaler = scale_cx
-                .builder(font_ref)
-                .size(font_size_px)
-                .hint(true)
-                .normalized_coords(coords)
-                .build();
-
             let font_size_bits = (font_size_px * SUB_PIXEL_QUANTIZE).round() as u32;
             let coords_hash = fxhash::hash64(coords);
 
@@ -780,7 +778,7 @@ pub(crate) fn draw_parley_layout(
             // new run wherever a style — including brush — changes), so
             // the run's colour is already fully resolved: no manual
             // span/byte-range lookup needed here.
-            let Some(tint_region) = tint_for(glyph_run.style().brush.0) else {
+            let Some(tint_source) = tint_for(glyph_run.style().brush.0) else {
                 continue;
             };
 
@@ -800,36 +798,50 @@ pub(crate) fn draw_parley_layout(
                     coords_hash,
                 };
 
-                let Some((stencil_region, size, placement)) = font_ctx.stencil_region(
-                    key,
-                    glyph.id as swash::GlyphId,
-                    &mut scaler,
-                    ctx.device,
-                    ctx.queue,
-                    ctx.stencil_atlas,
-                ) else {
+                let Some((glyph_source, size, placement)) = font_ctx.glyph_source(key, || {
+                    // Creating a scaler can allocate and initialize font programs.
+                    // Warm draw writers only need the existing glyph definition.
+                    let mut scaler = scale_cx
+                        .builder(font_ref)
+                        .size(font_size_px)
+                        .hint(true)
+                        .normalized_coords(coords)
+                        .build();
+                    rasterize_bitmap(glyph.id as swash::GlyphId, &mut scaler)
+                }) else {
                     continue;
                 };
 
                 let px = gx.floor() + placement[0] as f32;
                 let py = gy.floor() - placement[1] as f32;
                 let transform = Matrix4::new_translation(&Vector3::new(px, py, 0.0));
-                let glyph_node = RenderNode::new()
-                    .with_texture(tint_region.clone(), size, Matrix4::identity())
-                    .with_stencil(stencil_region, size, Matrix4::identity());
-                node.push_child(glyph_node, transform);
+                matcha_ecs::scene::push_quad(
+                    draw,
+                    &tint_source,
+                    size,
+                    transform,
+                    Some(&glyph_source),
+                );
             }
 
             // Underline/strikethrough: a flat filled rectangle, not a
-            // glyph — no `.with_stencil(..)` coverage mask needed.
+            // glyph — no PixelMask needed.
             // `y = baseline - offset` matches parley's own reference
             // renderers (e.g. `examples/swash_render` in the parley
             // repo) exactly.
             let run_metrics = run.metrics();
             let run_style = glyph_run.style();
             for (decoration, default_offset, default_size) in [
-                (&run_style.underline, run_metrics.underline_offset, run_metrics.underline_size),
-                (&run_style.strikethrough, run_metrics.strikethrough_offset, run_metrics.strikethrough_size),
+                (
+                    &run_style.underline,
+                    run_metrics.underline_offset,
+                    run_metrics.underline_size,
+                ),
+                (
+                    &run_style.strikethrough,
+                    run_metrics.strikethrough_offset,
+                    run_metrics.strikethrough_size,
+                ),
             ] {
                 let Some(decoration) = decoration else {
                     continue;
@@ -840,17 +852,21 @@ pub(crate) fn draw_parley_layout(
                 let offset = decoration.offset.unwrap_or(default_offset);
                 let size = decoration.size.unwrap_or(default_size).max(1.0);
                 let y = baseline - offset;
-                let deco_transform = Matrix4::new_translation(&Vector3::new(glyph_run.offset(), y, 0.0));
-                let deco_node = RenderNode::new().with_texture(deco_tint, [glyph_run.advance(), size], Matrix4::identity());
-                node.push_child(deco_node, deco_transform);
+                let deco_transform =
+                    Matrix4::new_translation(&Vector3::new(glyph_run.offset(), y, 0.0));
+                matcha_ecs::scene::push_quad(
+                    draw,
+                    &deco_tint,
+                    [glyph_run.advance(), size],
+                    deco_transform,
+                    None,
+                );
             }
         }
     }
-
-    node
 }
 
-/// Build a `RenderItem` that shapes `content` fresh every rebuild, reading the
+/// Build a writer that retains a shaped layout keyed by the
 /// live wrap width from `wrap_width`.
 fn rich_text_render_item(
     font_ctx: ParleyFontCtx,
@@ -858,14 +874,26 @@ fn rich_text_render_item(
     content: RichTextContent,
     style: RichTextStyle,
 ) -> RenderItem {
-    RenderItem::new(move |ctx: &RenderCtx| {
+    let cached = Mutex::new(None);
+    // Declared span colors live with this writer, not forever in the font context.
+    let tints = crate::shape::ShapeCtx::default();
+    RenderItem::new(move |ctx: &RenderCtx, draw| {
         if content.text.is_empty() {
-            return RenderNode::new();
+            return;
         }
 
         let max_width = wrap_width.get();
-        let layout = shape(&font_ctx, &content, &style, max_width);
-        draw_parley_layout(&font_ctx, ctx, &layout)
+        let mut cached = cached.lock();
+        if cached.as_ref().is_none_or(|(width, _)| *width != max_width) {
+            *cached = Some((max_width, shape(&font_ctx, &content, &style, max_width)));
+        }
+        draw_parley_layout(
+            draw,
+            &font_ctx,
+            ctx,
+            &cached.as_ref().expect("shaped width").1,
+            &tints,
+        )
     })
 }
 
@@ -979,7 +1007,11 @@ impl RichText {
     /// declared so far (the base text, and/or any earlier spans) — CSS's
     /// "same text, differently styled sub-ranges" model. Any style field not
     /// set on the span inherits this `RichText`'s widget-level default.
-    pub fn span(mut self, content: impl Into<String>, build: impl FnOnce(RichSpan) -> RichSpan) -> Self {
+    pub fn span(
+        mut self,
+        content: impl Into<String>,
+        build: impl FnOnce(RichSpan) -> RichSpan,
+    ) -> Self {
         let span = build(RichSpan::new(content.into()));
         self.spans.push(PendingSpan {
             text: span.text,
@@ -1196,12 +1228,19 @@ impl RichText {
 
         RichTextContent {
             text,
-            spans: spans.into_iter().map(|(range, overrides)| ResolvedSpan { range, overrides }).collect(),
+            spans: spans
+                .into_iter()
+                .map(|(range, overrides)| ResolvedSpan { range, overrides })
+                .collect(),
         }
     }
 
     fn rebuild_render_item(&self, entity: &mut EntityWorldMut) -> RenderItem {
-        let font_ctx = entity.world_scope(|world| world.get_resource_or_insert_with(ParleyFontCtx::new).clone());
+        let font_ctx = entity.world_scope(|world| {
+            world
+                .get_resource_or_insert_with(ParleyFontCtx::new)
+                .clone()
+        });
         let wrap_width = entity
             .get::<RichTextWrapWidth>()
             .expect("bundle() inserted RichTextWrapWidth")
@@ -1288,7 +1327,7 @@ mod tests {
     use bevy_ecs::world::World;
     use matcha_ecs::{
         components::view::ViewChildren,
-        layout::{layout_root, Constraints},
+        layout::{Constraints, layout_root},
         view::run_view,
     };
 
@@ -1306,7 +1345,9 @@ mod tests {
         let child = world.get::<ViewChildren>(root).unwrap().slots[0].1;
         let stored_width = world.get::<RichTextWrapWidth>(child).unwrap().0.get();
 
-        let out = world.get::<matcha_ecs::components::layout::LayoutOutput>(child).unwrap();
+        let out = world
+            .get::<matcha_ecs::components::layout::LayoutOutput>(child)
+            .unwrap();
         assert_eq!(
             stored_width, out.size[0],
             "RichTextWrapWidth must hold exactly the width arrange() resolved this entity to"
@@ -1315,16 +1356,31 @@ mod tests {
 
     #[test]
     fn apply_text_transform_uppercase_lowercase_capitalize() {
-        assert_eq!(apply_text_transform("Hello World", TextTransform::None), "Hello World");
-        assert_eq!(apply_text_transform("Hello World", TextTransform::Uppercase), "HELLO WORLD");
-        assert_eq!(apply_text_transform("Hello World", TextTransform::Lowercase), "hello world");
+        assert_eq!(
+            apply_text_transform("Hello World", TextTransform::None),
+            "Hello World"
+        );
+        assert_eq!(
+            apply_text_transform("Hello World", TextTransform::Uppercase),
+            "HELLO WORLD"
+        );
+        assert_eq!(
+            apply_text_transform("Hello World", TextTransform::Lowercase),
+            "hello world"
+        );
         assert_eq!(
             apply_text_transform("hello   world", TextTransform::Capitalize),
             "Hello   World"
         );
         // Non-ASCII: uppercasing an accented character must not just no-op.
-        assert_eq!(apply_text_transform("café", TextTransform::Uppercase), "CAFÉ");
-        assert_eq!(apply_text_transform("CAFÉ", TextTransform::Lowercase), "café");
+        assert_eq!(
+            apply_text_transform("café", TextTransform::Uppercase),
+            "CAFÉ"
+        );
+        assert_eq!(
+            apply_text_transform("CAFÉ", TextTransform::Lowercase),
+            "café"
+        );
     }
 
     #[test]
@@ -1357,7 +1413,10 @@ mod tests {
         assert_eq!(*b_payload, "b");
         assert_eq!(&collapsed[a_range.clone()], "hello ");
         assert_eq!(&collapsed[b_range.clone()], "world");
-        assert!(a_range.end <= b_range.start, "spans must not overlap after remapping");
+        assert!(
+            a_range.end <= b_range.start,
+            "spans must not overlap after remapping"
+        );
     }
 
     #[test]
@@ -1369,13 +1428,18 @@ mod tests {
         let text = "a   b";
         let outer = 0..5; // whole string
         let inner_tail_of_run = 2..4; // the 2nd and 3rd spaces only
-        let (collapsed, remapped) =
-            collapse_white_space_with_span_remap(text, &[(outer, "outer"), (inner_tail_of_run, "inner")]);
+        let (collapsed, remapped) = collapse_white_space_with_span_remap(
+            text,
+            &[(outer, "outer"), (inner_tail_of_run, "inner")],
+        );
 
         assert_eq!(collapsed, "a b");
         let (outer_range, _) = &remapped[0];
         let (inner_range, _) = &remapped[1];
         assert_eq!(&collapsed[outer_range.clone()], "a b");
-        assert!(inner_range.is_empty(), "a span covering only already-collapsed whitespace must remap to empty");
+        assert!(
+            inner_range.is_empty(),
+            "a span covering only already-collapsed whitespace must remap to empty"
+        );
     }
 }

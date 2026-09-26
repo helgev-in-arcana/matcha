@@ -18,15 +18,15 @@ use bevy_ecs::{
 
 use matcha_ecs::{
     components::{input::Pickable, render::RenderItem, view::ViewChildren},
-    layout::{layout_root, Constraints},
+    layout::{Constraints, layout_root},
     pick::{PickerResource, RectPicker},
     pointer::set_position,
     resources::{FrameTime, RedrawRequest},
-    view::{run_view, Widget},
+    view::{Widget, run_view},
 };
 use matcha_ecs_widgets::{
-    interaction::{self, InteractionColorState, InteractionColors},
     Button, ColorRect, Column,
+    interaction::{self, InteractionColorState, InteractionColors},
 };
 
 const WINDOW: [f32; 2] = [800.0, 600.0];
@@ -213,23 +213,22 @@ fn leaving_mid_transition_reverses_from_where_it_had_reached() {
 
 #[test]
 fn a_colour_step_invalidates_the_cached_render_node() {
-    // Colour is baked into the atlas by the builder, so unlike opacity a change
+    // Colour selects an immutable source in the writer, so unlike opacity a change
     // has to force a rebuild.
     let mut f = Fixture::new(snapping());
     let before = f
         .world
         .get::<RenderItem>(f.swatch)
         .expect("swatch draws")
-        .cache
-        .clone();
+        .revision;
 
     f.hover(true);
     f.tick(Duration::ZERO);
 
-    let after = f.world.get::<RenderItem>(f.swatch).unwrap().cache.clone();
+    let after = f.world.get::<RenderItem>(f.swatch).unwrap().revision;
     assert!(
-        !std::sync::Arc::ptr_eq(&before, &after),
-        "the cached node must be dropped when the colour moves"
+        !(before == after),
+        "the draw revision must advance when the colour moves"
     );
 }
 
@@ -251,7 +250,11 @@ fn a_re_declared_widget_keeps_its_cell_so_a_transition_is_not_restarted() {
     }
     .patch(&mut e);
 
-    assert_eq!(f.color(), mid, "re-declaring must not reset the live colour");
+    assert_eq!(
+        f.color(),
+        mid,
+        "re-declaring must not reset the live colour"
+    );
 }
 
 #[test]
@@ -266,7 +269,10 @@ fn a_button_declares_its_state_colours_onto_its_entity() {
                 .color(BASE)
                 .hover_color(HOVER)
                 .active_color([0.5, 0.5, 0.5, 1.0])
-                .transition(Duration::from_millis(10), matcha_ecs_widgets::Easing::Linear),
+                .transition(
+                    Duration::from_millis(10),
+                    matcha_ecs_widgets::Easing::Linear,
+                ),
         );
     });
 

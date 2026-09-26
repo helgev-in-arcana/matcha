@@ -1,34 +1,20 @@
-//! Rasterising box shapes, and caching what comes out.
+//! Native GPU generation and sharing of box MaskSources and colour TextureSources.
 //!
-//! This is the "how" layer under [`crate::box_style`]'s "what": one rasteriser
-//! covering every filled, ringed or blurred rounded rectangle the box model can
-//! ask for, plus the two caches that make redrawing one affordable.
+//! ShapeCtx caches immutable source definitions keyed by geometry/colour. The
+//! renderer invokes their GPU generators only on a resident-content miss. Rounded
+//! fills, asymmetric rings and three-pass separable shadows are rendered directly
+//! through MaskPrepareContext; no paint tree or Bitmap layer is involved.
 //!
-//! **How a shape is drawn.** `renderer` has no rounded-rect support:
-//! `MaskData.kind` reserves a slot for analytic SDF shapes but only coverage
-//! masks are implemented. So a rounded rect goes down the same path a glyph
-//! does — a flat tint quad from the colour atlas, masked by a CPU-rasterised
-//! coverage bitmap in the stencil atlas, composited by
-//! `RenderNode::with_stencil`.
-//!
-//! That indirection is not just expedience, it is the *correct* way to get
-//! antialiased edges here. Coverage multiplies all four channels
-//! (`renderer_render.wgsl`) and the pipeline blends premultiplied, so a
-//! half-covered edge pixel comes out correctly attenuated. Writing an
-//! antialiased RGBA bitmap into the colour atlas instead would blend as though
-//! every pixel were fully opaque, and the edges would read too bright.
-//!
-//! **Why the two caches are split the way they are.** Coverage is keyed on
-//! shape alone and tint on colour alone, so recolouring reuses the mask and
-//! resizing reuses the colour. That is what makes a hover transition affordable:
-//! it changes only which 1x1 texel the quad samples.
+//! The pure CPU rasterizer below is retained as an independent numerical oracle.
+//! Production coverage_source never calls it. Private shader programs are cached
+//! per current device, independently of renderer-owned output residency/atlases.
 
 use std::sync::Arc;
 
 use bevy_ecs::{resource::Resource, world::EntityWorldMut};
 use fxhash::FxHashMap;
-use gpu_utils::texture_atlas::AtlasRegion;
 use parking_lot::Mutex;
+use render_interface::{MaskDescriptor, MaskSource, TextureSource};
 
 use matcha_ecs::components::render::RenderCtx;
 
@@ -108,11 +94,12 @@ fn dequantize(v: u32) -> f32 {
 
 #[derive(Default)]
 struct ShapeCtxInner {
+    gpu: Arc<Mutex<Option<crate::shape_gpu::ShapeGpu>>>,
     /// Coverage bitmaps, keyed on shape alone — deliberately independent of
     /// colour, so recolouring reuses the mask.
-    coverage: Mutex<FxHashMap<CoverageKey, AtlasRegion>>,
-    /// 1x1 tint pixels, keyed on the premultiplied bytes actually uploaded.
-    tint: Mutex<FxHashMap<[u8; 4], AtlasRegion>>,
+    coverage: Mutex<FxHashMap<CoverageKey, MaskSource>>,
+    /// 1x1 tint definitions, keyed on their premultiplied encoded colour.
+    tint: Mutex<FxHashMap<[u8; 4], TextureSource>>,
 }
 
 /// World resource holding the shape caches. Lazily inserted on first use so the
@@ -123,9 +110,8 @@ struct ShapeCtxInner {
 /// Caching is what makes a decorated box affordable to redraw. A scrollbar thumb
 /// is rebuilt on every frame it moves (its `LayoutOutput` changes, so
 /// `invalidate_on_layout_change` fires), but its *shape* is constant for the
-/// whole drag — so a shape-keyed cache turns each of those rebuilds into
-/// assembling a `RenderNode` from regions that already exist, instead of an
-/// atlas allocation plus a rasterisation plus an upload.
+/// whole drag. Writers reuse the immutable mask definition while emitting fresh
+/// Objects; GPU generation and storage reuse remain the renderer's decision.
 #[derive(Resource, Clone, Default)]
 pub struct ShapeCtx(Arc<ShapeCtxInner>);
 
@@ -135,9 +121,9 @@ impl ShapeCtx {
         entity.world_scope(|world| world.get_resource_or_insert_with(ShapeCtx::default).clone())
     }
 
-    /// Fetch (rasterising and uploading on a miss) the coverage bitmap for
-    /// `key`, as a region of the stencil atlas.
-    pub fn coverage_region(&self, key: CoverageKey, ctx: &RenderCtx) -> Option<AtlasRegion> {
+    /// Fetch or define `key`'s coverage source. Creating the definition performs
+    /// no GPU work; its generator runs when the renderer needs its content.
+    pub fn coverage_source(&self, key: CoverageKey, _ctx: &RenderCtx) -> Option<MaskSource> {
         if key.w == 0 || key.h == 0 {
             return None;
         }
@@ -145,42 +131,42 @@ impl ShapeCtx {
             return Some(cached.clone());
         }
 
-        let bitmap = rasterize_box(key);
-        let region = match ctx
-            .stencil_atlas
-            .allocate(ctx.device, ctx.queue, [key.w, key.h])
-        {
-            Ok(region) => region,
-            Err(e) => {
-                log::error!("box coverage allocation failed: {e}");
-                return None;
+        let mut desc = MaskDescriptor::new([key.w, key.h], wgpu::TextureFormat::R8Unorm);
+        desc.usages = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        let programs = self.0.gpu.clone();
+        let region = MaskSource::new(desc, move |c| {
+            let mut programs = programs.lock();
+            if programs
+                .as_ref()
+                .is_none_or(|p| !p.for_device(c.gpu.device))
+            {
+                *programs = Some(crate::shape_gpu::ShapeGpu::new(c.gpu.device));
             }
-        };
-        if let Err(e) = region.write_data(ctx.queue, &bitmap) {
-            log::error!("box coverage upload failed: {e}");
-            return None;
-        }
+            programs
+                .as_ref()
+                .expect("programs initialized for this device")
+                .prepare(c, key)
+        });
 
         self.0.coverage.lock().insert(key, region.clone());
         Some(region)
     }
 
-    /// Fetch (allocating and uploading on a miss) a 1x1 region of the colour
-    /// atlas holding `color`, premultiplied.
+    /// Fetch or define a 1x1 premultiplied colour source.
     ///
     /// One texel is enough at any size: the shader clamps a sample into the
-    /// region's own texel centre, so stretching it over a whole quad samples
+    /// source's own texel centre, so stretching it over a whole quad samples
     /// that one texel everywhere. Same trick the core's `ClipMask` uses, and
     /// it is why recolouring a box costs no rasterisation at all.
-    pub fn tint_region(&self, color: [f32; 4], ctx: &RenderCtx) -> Option<AtlasRegion> {
-        // Keyed on the bytes actually uploaded, so two colours that encode
+    pub fn tint_source(&self, color: [f32; 4], ctx: &RenderCtx) -> Option<TextureSource> {
+        // Keyed on the encoded output bytes, so two colours that encode
         // identically share a texel.
         let bytes = premultiplied_srgb_bytes(color);
         if let Some(cached) = self.0.tint.lock().get(&bytes) {
             return Some(cached.clone());
         }
 
-        let region = crate::color::paint_tint_region(ctx, color, "box")?;
+        let region = crate::color::solid_source(ctx, color, "box")?;
         self.0.tint.lock().insert(bytes, region.clone());
         Some(region)
     }
@@ -212,8 +198,8 @@ fn coverage_of(d: f32) -> f32 {
     (0.5 - d).clamp(0.0, 1.0)
 }
 
-/// Rasterise `key` into a one-byte-per-pixel coverage bitmap (the stencil atlas
-/// is `R8Unorm`).
+/// CPU reference for `key`'s one-byte-per-pixel `R8Unorm` coverage. Production
+/// sources generate this coverage on the GPU; this function is a test oracle.
 ///
 /// A ring is the outer shape's coverage *minus* the inset shape's, which keeps
 /// both of its edges antialiased and costs one extra SDF evaluation per pixel —
@@ -311,8 +297,8 @@ fn blur_rows(src: &[u8], dst: &mut [u8], w: usize, h: usize, radius: usize) {
         let row = &src[y * w..(y + 1) * w];
         let at = |i: isize| row[i.clamp(0, w as isize - 1) as usize] as u32;
 
-        let mut sum: u32 = (0..=radius as isize).map(|i| at(i)).sum::<u32>()
-            + row[0] as u32 * radius as u32;
+        let mut sum: u32 =
+            (0..=radius as isize).map(|i| at(i)).sum::<u32>() + row[0] as u32 * radius as u32;
 
         for x in 0..w {
             dst[y * w + x] = (sum / window) as u8;
@@ -434,7 +420,11 @@ mod tests {
     #[test]
     fn blurring_softens_the_edge_without_moving_it() {
         let sharp = rasterize_box(CoverageKey::filled(60, 60, [0.0; 4]).inset(15.0));
-        let soft = rasterize_box(CoverageKey::filled(60, 60, [0.0; 4]).inset(15.0).blurred(4.0));
+        let soft = rasterize_box(
+            CoverageKey::filled(60, 60, [0.0; 4])
+                .inset(15.0)
+                .blurred(4.0),
+        );
 
         assert_eq!(at(&sharp, 60, 5, 30), 0, "well outside the sharp shape");
         assert!(

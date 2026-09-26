@@ -10,6 +10,7 @@ pub mod pick;
 pub mod pointer;
 pub mod render;
 pub mod resources;
+pub mod scene;
 pub mod systems;
 pub mod tab_order;
 pub mod task;

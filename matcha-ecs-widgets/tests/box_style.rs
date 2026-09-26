@@ -3,25 +3,23 @@
 //! Rasterisation itself is unit-tested inside `matcha-ecs-widgets::shape`
 //! (pure `Vec<u8>` in, `Vec<u8>` out). What is checked here is the part that
 //! needs a world: that declaring a border, radius or shadow reaches the entity,
-//! that a change to any of them invalidates the cached node while a no-op
+//! that a change to any of them advances the draw revision while a no-op
 //! re-declare does not, and that the border a `Panel` *paints* is the one it
 //! insets its child by.
 //!
 //! GPU-free, per this suite's convention: `RenderItem::builder` is never
-//! invoked, only `cache` identity and `LayoutOutput` are inspected.
-
-use std::sync::Arc;
+//! invoked, only the draw revision and `LayoutOutput` are inspected.
 
 use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::{
     components::{layout::LayoutOutput, render::RenderItem, view::ViewChildren},
-    layout::{layout_root, Constraints},
-    view::{run_view, Scope},
+    layout::{Constraints, layout_root},
+    view::{Scope, run_view},
 };
 use matcha_ecs_widgets::{
-    box_style::{BoxShadow, BoxStyle, Corners, Sides},
     Button, Checkbox, ColorRect, Panel,
+    box_style::{BoxShadow, BoxStyle, Corners, Sides},
 };
 
 const WINDOW: [f32; 2] = [800.0, 600.0];
@@ -39,16 +37,12 @@ fn children(world: &World, e: Entity) -> Vec<Entity> {
         .unwrap_or_default()
 }
 
-fn cache_of(world: &World, e: Entity) -> Arc<parking_lot::Mutex<Option<Arc<renderer::RenderNode>>>> {
-    world
-        .get::<RenderItem>(e)
-        .expect("entity draws")
-        .cache
-        .clone()
+fn cache_of(world: &World, e: Entity) -> u64 {
+    world.get::<RenderItem>(e).expect("entity draws").revision
 }
 
-/// Declare `build` twice and report whether the second pass dropped the cached
-/// render node — i.e. whether the change was recognised as draw-relevant.
+/// Declare `build` twice and report whether the second pass advanced the draw
+/// revision — i.e. whether the change was recognised as draw-relevant.
 fn rebuilds_between(
     first: impl Fn(&mut Scope) + Send + Sync + 'static,
     second: impl Fn(&mut Scope) + Send + Sync + 'static,
@@ -59,13 +53,13 @@ fn rebuilds_between(
     let before = cache_of(&world, target);
 
     run_view(&mut world, root, second);
-    !Arc::ptr_eq(&before, &cache_of(&world, target))
+    before != cache_of(&world, target)
 }
 
 #[test]
 fn a_panel_insets_its_child_by_the_border_it_paints() {
     // The one place the decoration and the layout have to agree: whatever
-    // `box_node` paints as the border is exactly what the child sits inside.
+    // `paint_box` paints as the border is exactly what the child sits inside.
     let (mut world, root) = setup();
     run_view(&mut world, root, |s| {
         s.node(
@@ -133,7 +127,7 @@ fn changing_a_panels_radius_rebuilds_it_and_re_declaring_the_same_one_does_not()
                 s.leaf(Panel::new(100.0, 100.0).radius(8.0));
             },
         ),
-        "re-declaring an unchanged panel must reuse the cached node"
+        "re-declaring an unchanged panel must preserve its draw revision"
     );
 }
 
@@ -144,7 +138,11 @@ fn changing_a_panels_shadow_rebuilds_it() {
             s.leaf(Panel::new(100.0, 100.0));
         },
         |s| {
-            s.leaf(Panel::new(100.0, 100.0).shadow(BoxShadow::drop(4.0, 12.0, [0.0, 0.0, 0.0, 0.5])));
+            s.leaf(Panel::new(100.0, 100.0).shadow(BoxShadow::drop(
+                4.0,
+                12.0,
+                [0.0, 0.0, 0.0, 0.5],
+            )));
         },
     ));
 }

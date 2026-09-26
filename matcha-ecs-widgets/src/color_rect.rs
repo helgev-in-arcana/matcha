@@ -3,14 +3,13 @@
 //!
 //! It is a layout *leaf*: `measure` returns its own `w`×`h` (clamped to the
 //! incoming constraints) and ignores children; `arrange` does nothing further
-//! since it has none. Its [`RenderItem`] rasterises a single-colour quad into
-//! the texture atlas.
+//! since it has none. Its [`RenderItem`] emits a quad referencing a shared
+//! colour source and, for rounded corners, a GPU-generated coverage source.
 
 use std::time::Duration;
 
 use bevy_ecs::{
-    bundle::Bundle, change_detection::DetectChangesMut, component::Component,
-    world::EntityWorldMut,
+    bundle::Bundle, change_detection::DetectChangesMut, component::Component, world::EntityWorldMut,
 };
 
 use matcha_ecs::{
@@ -23,7 +22,7 @@ use matcha_ecs::{
 };
 
 use crate::animation::{Easing, ExitFade, OpacityTween};
-use crate::box_style::{box_node, BoxStyle};
+use crate::box_style::{BoxStyle, paint_box};
 use crate::shape::ShapeCtx;
 use crate::sizing::{RectGeometry, Sizing};
 
@@ -120,7 +119,7 @@ impl ColorRect {
 /// (`ctx.size`) — not the widget's declared size, which a parent layout (e.g.
 /// `AlignItems::Stretch`) may have overridden.
 fn color_rect_render_item(shape: ShapeCtx, style: BoxStyle) -> RenderItem {
-    RenderItem::new(move |ctx: &RenderCtx| box_node(ctx, &shape, ctx.size, &style))
+    RenderItem::new(move |ctx: &RenderCtx, draw| paint_box(draw, ctx, &shape, ctx.size, &style))
 }
 
 impl Widget for ColorRect {
@@ -181,7 +180,7 @@ impl Widget for ColorRect {
         if let Some(mut r) = entity.get_mut::<RectRadius>() {
             changed |= r.set_if_neq(RectRadius(self.radius));
         }
-        // Rebuild the cached render node only when a draw-relevant prop changed.
+        // Replace the draw writer only when a draw-relevant prop changed.
         if changed {
             let shape = ShapeCtx::get(entity);
             let item = color_rect_render_item(shape, self.style());
@@ -209,4 +208,3 @@ impl Widget for ColorRect {
         }
     }
 }
-

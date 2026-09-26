@@ -8,9 +8,7 @@
 //!
 //! # Why the thumb is its own entity
 //!
-//! It would be shorter to draw the thumb inside the bar's own `RenderItem`, but
-//! then its position would be baked into a cached render node and moving it
-//! would need a hand-written invalidation path. As a child entity its position
+//! As a child entity the thumb's position
 //! is written by `arrange_child` like any other widget's, so the existing
 //! `invalidate_on_layout_change` handles redrawing, and the thumb's hit area is
 //! whatever picking already computed from its box. The bar and the thumb being
@@ -23,7 +21,6 @@ use bevy_ecs::{
     hierarchy::ChildOf, world::EntityWorldMut,
 };
 use nalgebra::Matrix4;
-use renderer::RenderNode;
 
 use matcha_ecs::{
     components::{
@@ -37,11 +34,11 @@ use matcha_ecs::{
 };
 
 use crate::{
+    box_style::{BoxStyle, paint_box},
     scroll_view::{
-        geometry::{self, Axis, ScrollbarStyle},
         DragAnchor, ScrollAxes, ScrollState,
+        geometry::{self, Axis, ScrollbarStyle},
     },
-    box_style::{box_node, BoxStyle},
     shape::ShapeCtx,
     sizing::RectGeometry,
 };
@@ -135,9 +132,9 @@ fn track_render_item(shape: ShapeCtx, style: ScrollbarStyle) -> RenderItem {
     let track = style
         .track_color
         .map(|color| BoxStyle::fill(color).radius(style.radius));
-    RenderItem::new(move |ctx: &RenderCtx| match &track {
-        Some(track) => box_node(ctx, &shape, ctx.size, track),
-        None => RenderNode::new(),
+    RenderItem::new(move |ctx: &RenderCtx, draw| match &track {
+        Some(track) => paint_box(draw, ctx, &shape, ctx.size, track),
+        None => {}
     })
 }
 
@@ -261,7 +258,12 @@ impl Layout for ScrollbarLayout {
             metrics.thumb[0] - metrics.track[0],
             metrics.thumb[1] - metrics.track[1],
         ];
-        ctx.arrange_child(thumb, origin, my_affine, [metrics.thumb[2], metrics.thumb[3]]);
+        ctx.arrange_child(
+            thumb,
+            origin,
+            my_affine,
+            [metrics.thumb[2], metrics.thumb[3]],
+        );
     }
 }
 
@@ -310,7 +312,7 @@ impl ScrollThumb {
 
 fn thumb_render_item(shape: ShapeCtx, style: ScrollbarStyle) -> RenderItem {
     let thumb = BoxStyle::fill(style.thumb_color).radius(style.radius);
-    RenderItem::new(move |ctx: &RenderCtx| box_node(ctx, &shape, ctx.size, &thumb))
+    RenderItem::new(move |ctx: &RenderCtx, draw| paint_box(draw, ctx, &shape, ctx.size, &thumb))
 }
 
 /// Pressing the thumb records where it was grabbed. The drag itself is handled

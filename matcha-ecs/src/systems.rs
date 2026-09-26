@@ -4,8 +4,8 @@ use bevy_ecs::{query::Changed, system::Query};
 
 use crate::components::{layout::LayoutOutput, render::RenderItem};
 
-/// Drop the cached render node of every entity whose [`LayoutOutput`] changed
-/// this frame (new placement/size), so the next extract rebuilds it.
+/// Advance the draw revision of every entity whose [`LayoutOutput`] changed
+/// this frame (new placement/size), so observers see a new draw-property revision.
 /// Registered in `MatchaSet::PreExtract`, after layout and before extract
 /// (`ECS_ARCHITECTURE.md` §8.5).
 pub fn invalidate_on_layout_change(mut query: Query<&mut RenderItem, Changed<LayoutOutput>>) {
