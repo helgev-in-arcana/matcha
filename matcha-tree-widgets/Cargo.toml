@@ -6,10 +6,10 @@ publish = false
 
 [dependencies]
 # matcha
-renderer = { workspace = true, features = ["legacy"] }
+render-interface.workspace = true
+scene-builder.workspace = true
 matcha-tree = { workspace = true }
 utils = { workspace = true }
-gpu-utils = { workspace = true, features = ["legacy-atlas"] }
 
 # runtime
 tokio = { workspace = true }
@@ -42,3 +42,7 @@ smallvec = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+gpu-utils = { workspace = true }
+scene-renderer = { workspace = true }

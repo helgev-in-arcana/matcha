@@ -1,19 +1,23 @@
-use std::sync::Arc;
+//! Decoding is CPU-owned and shared between clones. Prepared painters capture
+//! decoded pixels and resolved geometry only; GPU storage belongs to generation
+//! and the final renderer, never this style or a UI-owned atlas.
+use std::sync::{Arc, OnceLock};
 
-use crate::style::Style;
-use dashmap::DashMap;
-use image::EncodableLayout;
+use crate::{
+    paint::{self, ImageData},
+    style::{PreparedStyle, Style},
+};
 use matcha_tree::ui_tree::{
     context::UiContext,
     metrics::{Constraints, QRect},
 };
-use renderer::widgets_renderer::texture_copy::{RenderData, TargetData, TextureCopy};
+use parking_lot::Mutex;
 
 use crate::types::size::{ChildSize, Size};
 
 #[derive(Default)]
 struct ImageCache {
-    map: DashMap<ImageCacheKey, ImageCacheData, fxhash::FxBuildHasher>,
+    decoded: OnceLock<Option<Arc<ImageData>>>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -21,22 +25,6 @@ pub enum ImageSource {
     Path(String),
     StaticSlice { data: &'static [u8] },
     Arc(Arc<Vec<u8>>),
-}
-
-impl ImageSource {
-    fn to_key(&self) -> ImageCacheKey {
-        match self {
-            ImageSource::Path(path) => ImageCacheKey::Path(path.clone()),
-            ImageSource::StaticSlice { data } => ImageCacheKey::StaticSlice {
-                ptr: data.as_ptr() as usize,
-                size: data.len(),
-            },
-            ImageSource::Arc(data) => ImageCacheKey::Arc {
-                ptr: Arc::as_ptr(data) as usize,
-                size: data.len(),
-            },
-        }
-    }
 }
 
 impl From<&str> for ImageSource {
@@ -69,27 +57,6 @@ impl From<Vec<u8>> for ImageSource {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum ImageCacheKey {
-    /// Full path to the image file
-    Path(String),
-    /// pointer address (as usize) and size of the image data
-    /// This is safe because the data is guaranteed to be static
-    StaticSlice {
-        ptr: usize,
-        size: usize,
-    },
-    Arc {
-        ptr: usize,
-        size: usize,
-    },
-}
-
-struct ImageCacheData {
-    /// None if the image failed to load
-    texture: Option<wgpu::Texture>,
-}
-
 // MARK: Image Construct
 
 pub enum HAlign {
@@ -109,6 +76,7 @@ pub struct Image {
     size: [Size; 2],
     offset: [Size; 2],
     image_cache: Arc<ImageCache>,
+    prepared: Mutex<Option<([u32; 6], PreparedStyle)>>,
 }
 
 impl Clone for Image {
@@ -118,6 +86,7 @@ impl Clone for Image {
             size: self.size.clone(),
             offset: self.offset.clone(),
             image_cache: self.image_cache.clone(),
+            prepared: Mutex::new(None),
         }
     }
 }
@@ -135,6 +104,7 @@ impl Image {
             size: [Size::child_w(1.0), Size::child_h(1.0)],
             offset: [Size::px(0.0), Size::px(0.0)],
             image_cache: Arc::new(ImageCache::default()),
+            prepared: Mutex::new(None),
         }
     }
 
@@ -255,34 +225,24 @@ impl Image {
     }
 }
 
-impl Image {
-    fn key(&self) -> ImageCacheKey {
-        self.image.to_key()
-    }
-}
-
 // helper methods
 impl Image {
-    fn with_image<R>(&self, ctx: &UiContext, f: impl FnOnce(&wgpu::Texture) -> R) -> Option<R> {
-        let image_cache = self
-            .image_cache
-            .map
-            .entry(self.key())
-            .or_insert_with(|| load_image_to_texture(&self.image, ctx));
-
-        let Some(image) = &image_cache.value().texture else {
-            return None;
-        };
-        Some(f(image))
+    fn decoded(&self) -> Option<Arc<ImageData>> {
+        self.image_cache
+            .decoded
+            .get_or_init(|| {
+                let image = match &self.image {
+                    ImageSource::Path(path) => image::open(path).ok(),
+                    ImageSource::StaticSlice { data } => image::load_from_memory(data).ok(),
+                    ImageSource::Arc(data) => image::load_from_memory(data).ok(),
+                }?;
+                Some(Arc::new(paint::image_data(image)))
+            })
+            .clone()
     }
 
-    fn calc_layout(
-        &self,
-        boundary: [f32; 2],
-        pic_texture: &wgpu::Texture,
-        ctx: &UiContext,
-    ) -> QRect {
-        let image_size = [pic_texture.width() as f32, pic_texture.height() as f32];
+    fn calc_layout(&self, boundary: [f32; 2], image: &ImageData, ctx: &UiContext) -> QRect {
+        let image_size = image.size.map(|dimension| dimension as f32);
 
         let size_x = self.size[0].size(boundary, &mut ChildSize::new(|| image_size), ctx);
         let size_y = self.size[1].size(boundary, &mut ChildSize::new(|| image_size), ctx);
@@ -290,6 +250,43 @@ impl Image {
         let offset_y = self.offset[1].size(boundary, &mut ChildSize::new(|| image_size), ctx);
 
         QRect::new([offset_x, offset_y], [size_x, size_y])
+    }
+
+    fn prepare_resolved(
+        &self,
+        image: Arc<ImageData>,
+        rect: QRect,
+        offset: [f32; 2],
+    ) -> PreparedStyle {
+        let key = [
+            rect.min_x(),
+            rect.min_y(),
+            rect.width(),
+            rect.height(),
+            offset[0],
+            offset[1],
+        ]
+        .map(f32::to_bits);
+        let mut cache = self.prepared.lock();
+        if cache.as_ref().is_none_or(|(old, _)| *old != key) {
+            let vertices = paint::rectangle(
+                [rect.min_x(), rect.min_y()],
+                [rect.width(), rect.height()],
+                [1.; 4],
+                offset,
+            );
+            *cache = Some((
+                key,
+                PreparedStyle::new(move |mut context| {
+                    paint::draw(&mut context, &vertices, Some(&image))
+                }),
+            ));
+        }
+        cache
+            .as_ref()
+            .expect("resolved painter was cached")
+            .1
+            .clone()
     }
 }
 
@@ -299,7 +296,8 @@ impl Style for Image {
     fn required_region(&self, constraints: &Constraints, ctx: &UiContext) -> Option<QRect> {
         let boundary_size = constraints.max_size();
 
-        self.with_image(ctx, |texture| self.calc_layout(boundary_size, texture, ctx))
+        self.decoded()
+            .map(|image| self.calc_layout(boundary_size, &image, ctx))
     }
 
     fn is_inside(&self, position: [f32; 2], boundary_size: [f32; 2], ctx: &UiContext) -> bool {
@@ -311,170 +309,73 @@ impl Style for Image {
         }
     }
 
-    fn draw(
+    fn prepare(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
-        target: &gpu_utils::texture_atlas::atlas_simple::atlas::AtlasRegion,
-        boundary_size: [f32; 2],
+        boundary: [f32; 2],
         offset: [f32; 2],
         ctx: &UiContext,
-    ) {
-        let target_size = target.texture_size();
-        let target_format = target.format();
-        self.with_image(ctx, |texture| {
-            let rect: QRect = self.calc_layout(boundary_size, texture, ctx);
-
-            let draw_offset = [rect.min_x() - offset[0], rect.min_y() - offset[1]];
-            let draw_size = [rect.width(), rect.height()];
-
-            let mut render_pass = match target.begin_render_pass(encoder) {
-                Ok(rp) => rp,
-                Err(_) => return,
-            };
-
-            let texture_copy = TextureCopy::default();
-            texture_copy.render(
-                &mut render_pass,
-                TargetData {
-                    target_size,
-                    target_format,
-                },
-                RenderData {
-                    source_texture_view: &texture
-                        .create_view(&wgpu::TextureViewDescriptor::default()),
-                    source_texture_position_min: [draw_offset[0], draw_offset[1]],
-                    source_texture_position_max: [
-                        draw_offset[0] + draw_size[0],
-                        draw_offset[1] + draw_size[1],
-                    ],
-                    color_transformation: None,
-                    color_offset: None,
-                },
-                ctx.gpu_device(),
-            );
-        });
+    ) -> Option<PreparedStyle> {
+        let image = self.decoded()?;
+        let rect = self.calc_layout(boundary, &image, ctx);
+        if rect.area() <= 0. || offset.iter().any(|value| !value.is_finite()) {
+            return None;
+        }
+        Some(self.prepare_resolved(image, rect, offset))
     }
 }
 
-fn load_image_to_texture(image_source: &ImageSource, ctx: &UiContext) -> ImageCacheData {
-    let dynamic_image = match image_source {
-        ImageSource::Path(path) => image::open(path).ok(),
-        ImageSource::StaticSlice { data, .. } => image::load_from_memory(data).ok(),
-        ImageSource::Arc(data) => image::load_from_memory(data).ok(),
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let Some(dynamic_image) = dynamic_image else {
-        return ImageCacheData { texture: None };
-    };
-
-    let (image, format) = prepare_image_and_format(dynamic_image);
-    ImageCacheData {
-        texture: Some(make_cache(image, format, ctx)),
+    fn encoded_pixel() -> Vec<u8> {
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([255, 0, 0, 128]),
+        ));
+        let mut output = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut output, image::ImageFormat::Png)
+            .expect("encode fixture");
+        output.into_inner()
     }
-}
 
-fn prepare_image_and_format(
-    dynamic_image: image::DynamicImage,
-) -> (
-    image::ImageBuffer<image::Rgba<u8>, Vec<u8>>,
-    wgpu::TextureFormat,
-) {
-    let image_rgba8: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> = dynamic_image.to_rgba8();
-    (image_rgba8, wgpu::TextureFormat::Rgba8UnormSrgb)
-}
-
-fn make_cache(
-    image: image::ImageBuffer<image::Rgba<u8>, Vec<u8>>,
-    format: wgpu::TextureFormat,
-    ctx: &UiContext,
-) -> wgpu::Texture {
-    let (width, height) = image.dimensions();
-    let data = image.as_bytes();
-
-    let device = ctx.gpu_device();
-    let queue = ctx.gpu_queue();
-
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("Image Texture"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        data,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(4 * width),
-            rows_per_image: None,
-        },
-        wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-    );
-
-    texture
-}
-
-#[rustfmt::skip]
-fn _color_transform(color_type: image::ColorType) -> nalgebra::Matrix4<f32> {
-    match color_type {
-        image::ColorType::L8
-        | image::ColorType::L16 => nalgebra::Matrix4::new(
-            1.0, 0.0, 0.0, 0.0,
-            1.0, 0.0, 0.0, 0.0,
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0,
-        ),
-        image::ColorType::La8
-        | image::ColorType::La16 => nalgebra::Matrix4::new(
-            1.0, 0.0, 0.0, 0.0,
-            1.0, 0.0, 0.0, 0.0,
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-        ),
-        image::ColorType::Rgb8
-        | image::ColorType::Rgb16
-        | image::ColorType::Rgb32F
-        | image::ColorType::Rgba8
-        | image::ColorType::Rgba16
-        | image::ColorType::Rgba32F => nalgebra::Matrix4::new(
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0,
-        ),
-        _ => todo!(),
+    #[test]
+    fn clones_share_decoded_pixels_but_have_independent_prepared_identity() {
+        let image = Image::new(encoded_pixel());
+        let decoded = image.decoded().expect("valid encoded pixel");
+        let copy = image.clone();
+        let copied_pixels = copy.decoded().expect("shared decoded pixel");
+        assert!(Arc::ptr_eq(&decoded, &copied_pixels));
+        assert_eq!(decoded.size, [1, 1]);
+        assert_eq!(decoded.pixels, [188, 0, 0, 128]);
+        let rect = QRect::new([0., 0.], [1., 1.]);
+        let first = image.prepare_resolved(decoded.clone(), rect, [0., 0.]);
+        let warm = image.prepare_resolved(decoded, rect, [0., 0.]);
+        assert_eq!(first.ids(), warm.ids());
+        let independent = copy.prepare_resolved(copied_pixels, rect, [0., 0.]);
+        assert_ne!(first.ids(), independent.ids());
     }
-}
 
-fn _color_offset(color_type: image::ColorType) -> [f32; 4] {
-    match color_type {
-        image::ColorType::L8 | image::ColorType::L16 => [0.0, 0.0, 0.0, 1.0],
-        image::ColorType::La8
-        | image::ColorType::La16
-        | image::ColorType::Rgb8
-        | image::ColorType::Rgb16
-        | image::ColorType::Rgb32F
-        | image::ColorType::Rgba8
-        | image::ColorType::Rgba16
-        | image::ColorType::Rgba32F => [0.0, 0.0, 0.0, 0.0],
-        _ => todo!(),
+    #[test]
+    fn resolved_layout_and_subpixel_output_offset_change_painter_identity() {
+        let image = Image::new(encoded_pixel());
+        let decoded = image.decoded().expect("valid fixture");
+        let rect = QRect::new([0., 0.], [1., 1.]);
+        let first = image.prepare_resolved(decoded.clone(), rect, [0., 0.]);
+        let translated = image.prepare_resolved(decoded.clone(), rect, [1. / 4096., 0.]);
+        assert_ne!(first.ids(), translated.ids());
+        let resized =
+            image.prepare_resolved(decoded, QRect::new([0., 0.], [2., 1.]), [1. / 4096., 0.]);
+        assert_ne!(translated.ids(), resized.ids());
+    }
+
+    #[test]
+    fn failed_decodes_are_cached_without_creating_gpu_resources() {
+        let image = Image::new(vec![0, 1, 2]);
+        assert!(image.decoded().is_none());
+        assert!(image.image_cache.decoded.get().is_some());
+        assert!(image.clone().decoded().is_none());
     }
 }

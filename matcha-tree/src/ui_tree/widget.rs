@@ -1,6 +1,10 @@
+//! Widget reconciliation and redraw scheduling are independent from GPU residency.
+//! Pods append current Objects on every render call; concrete widgets may retain
+//! immutable Sources, while the window owns the complete Frame and final renderer.
+
 use std::any::Any;
 
-use renderer::render_node::RenderNode;
+use scene_builder::Draw;
 
 use super::metrics;
 use crate::ui_tree::context::UiContext;
@@ -56,7 +60,11 @@ pub trait Widget: utils::MaybeSendSync + Any {
 
     fn measure(&self, constraints: &metrics::Constraints, ctx: &UiContext) -> [f32; 2];
 
-    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext) -> RenderNode;
+    /// Append this widget's current drawing to the framework-owned frame.
+    /// Widgets may retain immutable Sources or geometry inputs, but must emit
+    /// their Objects on every call, including when their inputs are unchanged.
+    /// Source callbacks own their inputs and must not capture the borrowed ctx.
+    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>);
 }
 
 /// Wrapper trait to erase the concrete Widget type.
@@ -78,7 +86,7 @@ pub(super) trait AnyWidget: utils::MaybeSendSync + Any {
 
     fn measure(&self, constraints: &metrics::Constraints, ctx: &UiContext) -> [f32; 2];
 
-    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext) -> RenderNode;
+    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>);
 }
 
 impl<W, V> AnyWidget for W
@@ -115,8 +123,8 @@ where
         Widget::measure(self, constraints, ctx)
     }
 
-    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext) -> RenderNode {
-        Widget::render(self, bounds, ctx)
+    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>) {
+        Widget::render(self, bounds, ctx, draw);
     }
 }
 
@@ -126,9 +134,9 @@ pub struct WidgetPod {
 
     widget: Box<dyn AnyWidget>,
 
-    // cache
-    // NOTE: Use cache existency as redraw flag.
-    render_cache: Option<RenderNode>,
+    // Scheduling state only. Resource reuse belongs to the concrete widget's
+    // immutable Sources and the renderer; no per-widget drawing tree is kept.
+    redraw_needed: bool,
 }
 
 impl WidgetPod {
@@ -139,7 +147,7 @@ impl WidgetPod {
             label: None,
             id_hash,
             widget: Box::new(widget),
-            render_cache: None,
+            redraw_needed: true,
         }
     }
 
@@ -159,11 +167,11 @@ impl WidgetPod {
     }
 
     pub fn need_redraw(&self) -> bool {
-        self.render_cache.is_none()
+        self.redraw_needed
     }
 
-    pub fn invalidate_render_cache(&mut self) {
-        self.render_cache = None;
+    pub fn invalidate_render(&mut self) {
+        self.redraw_needed = true;
     }
 
     pub fn try_update(
@@ -174,7 +182,7 @@ impl WidgetPod {
         let result = self.widget.try_update(view, ctx)?;
         match result {
             WidgetInteractionResult::LayoutNeeded | WidgetInteractionResult::RedrawNeeded => {
-                self.invalidate_render_cache();
+                self.invalidate_render();
             }
             WidgetInteractionResult::NoChange => {}
         }
@@ -191,10 +199,10 @@ impl WidgetPod {
 
         match interaction_result {
             WidgetInteractionResult::LayoutNeeded => {
-                self.invalidate_render_cache();
+                self.invalidate_render();
             }
             WidgetInteractionResult::RedrawNeeded => {
-                self.invalidate_render_cache();
+                self.invalidate_render();
             }
             WidgetInteractionResult::NoChange => {}
         }
@@ -210,13 +218,11 @@ impl WidgetPod {
         self.widget.measure(constraints, ctx)
     }
 
-    pub fn render(&mut self, bounds: [f32; 2], ctx: &UiContext) -> RenderNode {
-        if let Some(render_node) = &self.render_cache {
-            return render_node.clone();
-        }
-
-        let render_node = self.widget.render(bounds, ctx);
-        self.render_cache = Some(render_node.clone());
-        render_node
+    pub fn render(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>) {
+        // A clean widget still contributes its objects to each complete frame.
+        // Mark first so a provider panic does not leave a false clean state.
+        self.redraw_needed = true;
+        self.widget.render(bounds, ctx, draw);
+        self.redraw_needed = false;
     }
 }

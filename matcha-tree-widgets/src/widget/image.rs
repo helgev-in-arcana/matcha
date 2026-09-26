@@ -1,10 +1,12 @@
+use crate::buffer::Buffer;
 use matcha_tree::event::device_event::DeviceEvent;
 use matcha_tree::ui_tree::{
     context::UiContext,
     metrics::Constraints,
     widget::{View, Widget, WidgetInteractionResult, WidgetPod},
 };
-use renderer::render_node::RenderNode;
+use scene_builder::Draw;
+use std::sync::Arc;
 
 use crate::style::Style as _;
 use crate::{style, types::size::Size};
@@ -41,6 +43,7 @@ impl View for Image {
             0usize,
             ImageWidget {
                 image_style: self.image_style.clone(),
+                buffer: Buffer::new(vec![Arc::new(self.image_style.clone())]),
             },
         );
         if let Some(label) = &self.label {
@@ -53,6 +56,7 @@ impl View for Image {
 // MARK: Widget
 
 pub struct ImageWidget {
+    buffer: Buffer,
     image_style: style::image::Image,
 }
 
@@ -62,6 +66,7 @@ impl Widget for ImageWidget {
     fn update(&mut self, view: &Image, _ctx: &UiContext) -> WidgetInteractionResult {
         if self.image_style != view.image_style {
             self.image_style = view.image_style.clone();
+            self.buffer = Buffer::new(vec![Arc::new(self.image_style.clone())]);
             WidgetInteractionResult::LayoutNeeded
         } else {
             WidgetInteractionResult::NoChange
@@ -84,34 +89,7 @@ impl Widget for ImageWidget {
             .unwrap_or([0.0, 0.0])
     }
 
-    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext) -> RenderNode {
-        let constraints = Constraints::from_boundary(bounds);
-        let Some(rect) = self.image_style.required_region(&constraints, ctx) else {
-            return RenderNode::new();
-        };
-        let size = rect.size();
-        if size[0] <= 0.0 || size[1] <= 0.0 {
-            return RenderNode::new();
-        }
-
-        let texture_size = [size[0].ceil() as u32, size[1].ceil() as u32];
-        let Ok(style_region) =
-            ctx.texture_atlas()
-                .allocate(ctx.gpu_device(), ctx.gpu_queue(), texture_size)
-        else {
-            return RenderNode::new();
-        };
-
-        let mut encoder =
-            ctx.gpu_device()
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Image Render Encoder"),
-                });
-
-        self.image_style
-            .draw(&mut encoder, &style_region, size, [0.0, 0.0], ctx);
-        ctx.gpu_queue().submit(Some(encoder.finish()));
-
-        RenderNode::new().with_texture(style_region, size, nalgebra::Matrix4::identity())
+    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>) {
+        self.buffer.paint(bounds, ctx, draw);
     }
 }

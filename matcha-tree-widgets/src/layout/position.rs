@@ -8,7 +8,7 @@ use matcha_tree::{
         widget::{View, Widget, WidgetInteractionResult, WidgetPod},
     },
 };
-use renderer::render_node::RenderNode;
+use scene_builder::Draw;
 
 use super::reconcile_single_child;
 
@@ -148,11 +148,11 @@ impl Widget for PositionWidget {
         self.top = view.top;
         self.right = view.right;
         self.bottom = view.bottom;
-        let child_changed = reconcile_single_child(&mut self.child, view.content.as_deref(), ctx);
-        if changed || child_changed {
+        let child_result = reconcile_single_child(&mut self.child, view.content.as_deref(), ctx);
+        if changed {
             WidgetInteractionResult::LayoutNeeded
         } else {
-            WidgetInteractionResult::NoChange
+            child_result
         }
     }
 
@@ -197,15 +197,15 @@ impl Widget for PositionWidget {
         [child_size[0] + h_margin, child_size[1] + v_margin]
     }
 
-    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext) -> RenderNode {
-        if self.child.is_none() {
-            return RenderNode::new();
-        }
-        let (child_size, affine) = {
-            let child = self.child.as_ref().unwrap();
-            self.child_layout(bounds, child, ctx)
+    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>) {
+        let Some(child) = self.child.as_ref() else {
+            return;
         };
-        let child_node = self.child.as_mut().unwrap().render(child_size, ctx);
-        RenderNode::new().add_child(child_node, affine)
+        let (child_size, affine) = self.child_layout(bounds, child, ctx);
+        let child = self
+            .child
+            .as_mut()
+            .expect("child exists and layout does not remove it");
+        draw.translated(affine, |draw| child.render(child_size, ctx, draw));
     }
 }

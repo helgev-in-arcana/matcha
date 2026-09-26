@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use renderer::RenderNode;
+use scene_builder::Draw;
 
 use super::widget::{View, Widget, WidgetInteractionResult, WidgetPod};
 use crate::ui_tree::{
@@ -215,7 +215,7 @@ impl<C: Component> Widget for ComponentWidget<C> {
         self.inner_widget.measure(constraints, ctx)
     }
 
-    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext) -> RenderNode {
-        self.inner_widget.render(bounds, ctx)
+    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>) {
+        self.inner_widget.render(bounds, ctx, draw);
     }
 }

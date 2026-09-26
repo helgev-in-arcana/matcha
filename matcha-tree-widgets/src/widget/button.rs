@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::buffer::Buffer;
 use crate::layout::reconcile_single_child;
 use crate::style::solid_box::SolidBox;
 use matcha_tree::color::Color;
@@ -12,9 +13,7 @@ use matcha_tree::ui_tree::{
     metrics::Constraints,
     widget::{View, Widget, WidgetInteractionResult, WidgetPod},
 };
-use renderer::render_node::RenderNode;
-
-use crate::style::Style as _;
+use scene_builder::Draw;
 
 // MARK: View
 
@@ -60,6 +59,7 @@ impl View for Button {
             ButtonWidget {
                 on_click: self.on_click.clone(),
                 state: ButtonState::Normal,
+                decoration: None,
                 child: Some(child),
             },
         );
@@ -80,6 +80,7 @@ enum ButtonState {
 }
 
 pub struct ButtonWidget {
+    decoration: Option<(ButtonState, Buffer)>,
     on_click: Option<Arc<dyn ClickFn>>,
     state: ButtonState,
     child: Option<WidgetPod>,
@@ -90,8 +91,7 @@ impl Widget for ButtonWidget {
 
     fn update(&mut self, view: &Button, ctx: &UiContext) -> WidgetInteractionResult {
         self.on_click = view.on_click.clone();
-        reconcile_single_child(&mut self.child, Some(view.content.as_ref()), ctx);
-        WidgetInteractionResult::NoChange
+        reconcile_single_child(&mut self.child, Some(view.content.as_ref()), ctx)
     }
 
     fn device_input(
@@ -164,14 +164,17 @@ impl Widget for ButtonWidget {
             }
         }
 
-        if let Some(child) = &mut self.child {
-            child.device_input(bounds, event, ctx);
-        }
-
-        if state_changed {
+        let child_result = self
+            .child
+            .as_mut()
+            .map(|child| child.device_input(bounds, event, ctx))
+            .unwrap_or(WidgetInteractionResult::NoChange);
+        if matches!(child_result, WidgetInteractionResult::LayoutNeeded) {
+            child_result
+        } else if state_changed {
             WidgetInteractionResult::RedrawNeeded
         } else {
-            WidgetInteractionResult::NoChange
+            child_result
         }
     }
 
@@ -182,54 +185,28 @@ impl Widget for ButtonWidget {
             .unwrap_or([0.0, 0.0])
     }
 
-    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext) -> RenderNode {
-        let bg_color = match self.state {
-            ButtonState::Normal => Color::RgbaF32 {
-                r: 0.8,
-                g: 0.8,
-                b: 0.8,
+    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>) {
+        if self
+            .decoration
+            .as_ref()
+            .is_none_or(|(state, _)| *state != self.state)
+        {
+            let v = match self.state {
+                ButtonState::Normal => 0.8,
+                ButtonState::Hovered => 0.9,
+                ButtonState::Pressed => 0.7,
+            };
+            let style = SolidBox::new(Color::RgbaF32 {
+                r: v,
+                g: v,
+                b: v,
                 a: 1.0,
-            },
-            ButtonState::Hovered => Color::RgbaF32 {
-                r: 0.9,
-                g: 0.9,
-                b: 0.9,
-                a: 1.0,
-            },
-            ButtonState::Pressed => Color::RgbaF32 {
-                r: 0.7,
-                g: 0.7,
-                b: 0.7,
-                a: 1.0,
-            },
-        };
-
-        let mut render_node = RenderNode::new();
-
-        if bounds[0] > 0.0 && bounds[1] > 0.0 {
-            let texture_size = [bounds[0].ceil() as u32, bounds[1].ceil() as u32];
-            if let Ok(style_region) =
-                ctx.texture_atlas()
-                    .allocate(ctx.gpu_device(), ctx.gpu_queue(), texture_size)
-            {
-                let mut encoder =
-                    ctx.gpu_device()
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("Button BG Render Encoder"),
-                        });
-                let bg_style = SolidBox::new(bg_color);
-                bg_style.draw(&mut encoder, &style_region, bounds, [0.0, 0.0], ctx);
-                ctx.gpu_queue().submit(Some(encoder.finish()));
-                render_node =
-                    render_node.with_texture(style_region, bounds, nalgebra::Matrix4::identity());
-            }
+            });
+            self.decoration = Some((self.state, Buffer::clipped(vec![Arc::new(style)])));
         }
-
+        self.decoration.as_mut().unwrap().1.paint(bounds, ctx, draw);
         if let Some(child) = &mut self.child {
-            let child_node = child.render(bounds, ctx);
-            render_node.push_child(child_node, nalgebra::Matrix4::identity());
+            child.render(bounds, ctx, draw);
         }
-
-        render_node
     }
 }
