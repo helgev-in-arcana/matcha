@@ -9,6 +9,9 @@
 //! MaskSources. Swash produces bitmap bounds and pixels together; its pixels
 //! are retained inside the source closure for regeneration, without a Bitmap
 //! wrapper. Scene Objects/PixelMasks reference those definitions directly.
+//! Writers retain only glyph definitions used by their current layout, in
+//! addition to the shared bounded LRU. A visible layout larger than that LRU
+//! remains complete and keeps stable IDs on subsequent redraws.
 //!
 //! **CSS text-property coverage (added in a later pass, see `CLAUDE.md`'s
 //! dated entry for the full design writeup)**: `RichText` now reproduces most
@@ -457,14 +460,51 @@ struct GlyphKey {
     coords_hash: u64,
 }
 
-/// Glyph stencils are cached in a fixed-capacity, LRU + batch-protected
-/// `GlyphCache` (see the `glyph-cache` crate) rather than an unbounded map:
-/// unlike `Text`'s `stencil_cache`, `RichText` is expected to draw arbitrary
-/// runtime text (timecodes, filenames, ...) where an unbounded cache would
-/// grow forever. Eviction drops the provider entry; definitions already imported
-/// by the framework remain alive through the submitted frame. A later miss may
-/// rasterize again and receive a new content ID.
+/// The shared LRU keeps definitions available across writers without retaining
+/// every glyph ever encountered. Each writer separately retains the definitions
+/// used by its current layout in ActiveGlyphs. Thus visible text may exceed this
+/// sharing budget without disappearing or acquiring fresh IDs on every redraw.
 const GLYPH_CACHE_CAPACITY: usize = 1024;
+
+type GlyphDefinition = Option<(MaskSource, [f32; 2], [i32; 2])>;
+
+/// Resource definitions used by a writer's current layout, not retained Objects.
+/// Revisit each key during drawing and discard keys no longer present afterward.
+/// Negative entries retain genuinely invisible glyphs, never capacity failures.
+#[derive(Default)]
+pub(crate) struct ActiveGlyphs {
+    entries: fxhash::FxHashMap<GlyphKey, (GlyphDefinition, bool)>,
+}
+
+impl ActiveGlyphs {
+    fn begin(&mut self) {
+        for (_, seen) in self.entries.values_mut() {
+            *seen = false;
+        }
+    }
+
+    fn glyph_source(
+        &mut self,
+        font_ctx: &ParleyFontCtx,
+        key: GlyphKey,
+        build: impl FnOnce() -> GlyphDefinition,
+    ) -> GlyphDefinition {
+        let (definition, seen) = self
+            .entries
+            .entry(key)
+            .or_insert_with(|| (font_ctx.glyph_source(key, build), true));
+        *seen = true;
+        definition.clone()
+    }
+
+    fn finish(&mut self) {
+        self.entries.retain(|_, (_, seen)| *seen);
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
 
 /// parley's per-glyph "paint" type — wraps a resolved RGBA colour. `Default`
 /// only matters for parley-internal bookkeeping; every real run gets an
@@ -481,8 +521,7 @@ pub(crate) struct ParleyFontCtxInner {
     /// visible bitmap, e.g. space — caching that avoids re-rasterising them
     /// every frame), shared across every `RichText` entity/frame drawing the
     /// same glyph at the same size.
-    stencil_cache:
-        Mutex<glyph_cache::GlyphCache<GlyphKey, Option<(MaskSource, [f32; 2], [i32; 2])>>>,
+    stencil_cache: Mutex<glyph_cache::GlyphCache<GlyphKey, GlyphDefinition>>,
 }
 
 /// World resource wrapping parley's `FontContext`/`LayoutContext`, swash's
@@ -513,20 +552,27 @@ impl ParleyFontCtx {
     /// Look up the native MaskSource defining
     /// `key`'s coverage bitmap, plus its pixel size and its placement
     /// (offset of the bitmap's top-left corner from the pen position).
-    /// Returns `None` both when the glyph has no visible bitmap and when the
-    /// cache had no room left this batch (see `GlyphCache::get_or_insert_with`)
-    /// — either way, the caller should simply skip drawing this glyph.
+    /// Returns `None` only for genuinely invisible/unsupported glyphs. If every
+    /// shared cache entry is protected, build outside that cache; ActiveGlyphs
+    /// retains the result for this writer's following frames.
     fn glyph_source(
         &self,
         key: GlyphKey,
-        build: impl FnOnce() -> Option<(MaskSource, [f32; 2], [i32; 2])>,
-    ) -> Option<(MaskSource, [f32; 2], [i32; 2])> {
-        self.0
+        build: impl FnOnce() -> GlyphDefinition,
+    ) -> GlyphDefinition {
+        let mut build = Some(build);
+        let cached = self
+            .0
             .stencil_cache
             .lock()
-            .get_or_insert_with(key, build)
-            .cloned()
-            .flatten()
+            .get_or_insert_with(key, || build.take().expect("cache miss builds once")())
+            .cloned();
+        match cached {
+            Some(definition) => definition,
+            None => build
+                .take()
+                .expect("a full protected cache does not invoke its builder")(),
+        }
     }
 }
 
@@ -750,10 +796,12 @@ pub(crate) fn draw_parley_layout(
     ctx: &RenderCtx,
     layout: &parley::Layout<RichTextBrush>,
     tints: &crate::shape::ShapeCtx,
+    glyphs: &mut ActiveGlyphs,
 ) {
     let tint_for = |color| tints.tint_source(color, ctx);
 
     font_ctx.begin_glyph_batch();
+    glyphs.begin();
     let mut scale_cx = font_ctx.0.scale_cx.lock();
 
     for line in layout.lines() {
@@ -798,17 +846,19 @@ pub(crate) fn draw_parley_layout(
                     coords_hash,
                 };
 
-                let Some((glyph_source, size, placement)) = font_ctx.glyph_source(key, || {
-                    // Creating a scaler can allocate and initialize font programs.
-                    // Warm draw writers only need the existing glyph definition.
-                    let mut scaler = scale_cx
-                        .builder(font_ref)
-                        .size(font_size_px)
-                        .hint(true)
-                        .normalized_coords(coords)
-                        .build();
-                    rasterize_bitmap(glyph.id as swash::GlyphId, &mut scaler)
-                }) else {
+                let Some((glyph_source, size, placement)) =
+                    glyphs.glyph_source(font_ctx, key, || {
+                        // Creating a scaler can allocate and initialize font programs.
+                        // Warm draw writers only need the existing glyph definition.
+                        let mut scaler = scale_cx
+                            .builder(font_ref)
+                            .size(font_size_px)
+                            .hint(true)
+                            .normalized_coords(coords)
+                            .build();
+                        rasterize_bitmap(glyph.id as swash::GlyphId, &mut scaler)
+                    })
+                else {
                     continue;
                 };
 
@@ -864,6 +914,7 @@ pub(crate) fn draw_parley_layout(
             }
         }
     }
+    glyphs.finish();
 }
 
 /// Build a writer that retains a shaped layout keyed by the
@@ -875,6 +926,7 @@ fn rich_text_render_item(
     style: RichTextStyle,
 ) -> RenderItem {
     let cached = Mutex::new(None);
+    let glyphs = Mutex::new(ActiveGlyphs::default());
     // Declared span colors live with this writer, not forever in the font context.
     let tints = crate::shape::ShapeCtx::default();
     RenderItem::new(move |ctx: &RenderCtx, draw| {
@@ -893,6 +945,7 @@ fn rich_text_render_item(
             ctx,
             &cached.as_ref().expect("shaped width").1,
             &tints,
+            &mut glyphs.lock(),
         )
     })
 }
@@ -1332,6 +1385,122 @@ mod tests {
     };
 
     use super::*;
+
+    fn synthetic_glyph_key(index: u32) -> GlyphKey {
+        GlyphKey {
+            font_blob_id: 1,
+            font_index: 0,
+            glyph_id: index,
+            font_size_bits: 16 * SUB_PIXEL_QUANTIZE as u32,
+            coords_hash: 0,
+        }
+    }
+
+    fn synthetic_glyph() -> GlyphDefinition {
+        Some((
+            MaskSource::new(
+                MaskDescriptor::new([1, 1], wgpu::TextureFormat::R8Unorm),
+                |_| panic!("CPU cache tests never prepare GPU content"),
+            ),
+            [1., 1.],
+            [0, 0],
+        ))
+    }
+
+    #[test]
+    fn active_glyphs_keep_overflow_definitions_and_prune_obsolete_layout_keys() {
+        let fonts = ParleyFontCtx::new();
+        let mut active = ActiveGlyphs::default();
+        let count = GLYPH_CACHE_CAPACITY + 3;
+        let mut first_ids = Vec::new();
+        fonts.begin_glyph_batch();
+        active.begin();
+        for index in 0..count {
+            let source = active
+                .glyph_source(&fonts, synthetic_glyph_key(index as u32), synthetic_glyph)
+                .expect("LRU capacity must not hide visible glyphs");
+            first_ids.push(source.0.id());
+        }
+        active.finish();
+        assert_eq!(fonts.0.stencil_cache.lock().len(), GLYPH_CACHE_CAPACITY);
+        assert_eq!(active.entries.len(), count);
+
+        fonts.begin_glyph_batch();
+        active.begin();
+        for (index, expected) in first_ids.iter().enumerate() {
+            let source = active
+                .glyph_source(&fonts, synthetic_glyph_key(index as u32), || {
+                    panic!("warm active glyphs must not rasterize again")
+                })
+                .expect("warm visible definition");
+            assert_eq!(source.0.id(), *expected);
+        }
+        active.finish();
+
+        // An editor changes to a layout containing only one former overflow
+        // glyph and an invisible glyph. Both survive; old layout keys do not.
+        let survivor = synthetic_glyph_key((count - 1) as u32);
+        let invisible = synthetic_glyph_key(count as u32);
+        active.begin();
+        let source = active
+            .glyph_source(&fonts, survivor, || panic!("retained overflow definition"))
+            .expect("overflow definition retained");
+        assert_eq!(source.0.id(), first_ids[count - 1]);
+        assert!(active.glyph_source(&fonts, invisible, || None).is_none());
+        active.finish();
+        assert_eq!(active.entries.len(), 2);
+
+        active.begin();
+        assert!(
+            active
+                .glyph_source(&fonts, invisible, || panic!("invisible glyph cached"))
+                .is_none()
+        );
+        active.finish();
+        assert_eq!(active.entries.len(), 1);
+        active.clear();
+        assert!(active.entries.is_empty());
+    }
+
+    #[test]
+    fn independent_writers_do_not_thrash_the_shared_lru_on_warm_frames() {
+        let fonts = ParleyFontCtx::new();
+        let mut writers = [ActiveGlyphs::default(), ActiveGlyphs::default()];
+        let per_writer = GLYPH_CACHE_CAPACITY / 2 + 64;
+        let built = std::cell::Cell::new(0);
+        let mut first_ids = Vec::new();
+        for frame in 0..3 {
+            let mut ids = Vec::new();
+            for (writer_index, writer) in writers.iter_mut().enumerate() {
+                fonts.begin_glyph_batch();
+                writer.begin();
+                for index in 0..per_writer {
+                    let key = synthetic_glyph_key((writer_index * per_writer + index) as u32);
+                    let definition = writer
+                        .glyph_source(&fonts, key, || {
+                            built.set(built.get() + 1);
+                            synthetic_glyph()
+                        })
+                        .expect("visible glyph");
+                    ids.push(definition.0.id());
+                }
+                writer.finish();
+            }
+            if frame == 0 {
+                first_ids = ids;
+            } else {
+                assert_eq!(
+                    ids, first_ids,
+                    "each writer retains the current layout definitions"
+                );
+            }
+            assert_eq!(
+                built.get(),
+                2 * per_writer,
+                "rasterize only the first frame"
+            );
+        }
+    }
 
     #[test]
     fn arrange_writes_its_resolved_width_into_rich_text_wrap_width() {

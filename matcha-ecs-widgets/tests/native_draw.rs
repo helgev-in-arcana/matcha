@@ -12,7 +12,7 @@ use matcha_ecs::{
     scene::Frame,
     view::run_view,
 };
-use matcha_ecs_widgets::{ColorRect, Image, ObjectFit};
+use matcha_ecs_widgets::{ColorRect, Image, ObjectFit, RichText};
 use nalgebra::{Matrix4, Vector3};
 
 fn children(world: &World, root: Entity) -> Vec<Entity> {
@@ -178,5 +178,65 @@ fn image_writers_resolve_each_fit_mode_and_reuse_decoded_sources() {
             );
         }
         previous = Some(ids);
+    }
+}
+
+#[test]
+fn active_rich_text_exceeds_shared_glyph_capacity_without_loss_or_id_churn() {
+    // Distinct sizes of a common Latin glyph exercise >1024 keys independently
+    // of which system font provides it. The second widget also evicts shared
+    // entries belonging to the first, before its next writer invocation.
+    const COUNTS: [usize; 2] = [1056, 64];
+    let mut world = World::new();
+    let root = world.spawn(ViewChildren::default()).id();
+    run_view(&mut world, root, |scope| {
+        for (writer, count) in COUNTS.into_iter().enumerate() {
+            let mut text = RichText::new("");
+            for index in 0..count {
+                let size = 16. + writer as f32 * 16. + index as f32 / 256.;
+                text = text.span("M", |span| span.font_size(size));
+            }
+            scope.leaf(text);
+        }
+    });
+    let entities = children(&world, root);
+    let mut frame = Frame::default();
+    let mut first_ids = None;
+    for _ in 0..3 {
+        frame.begin();
+        for (index, &entity) in entities.iter().enumerate() {
+            write(
+                &mut frame,
+                &world,
+                entity,
+                [20000., 100.],
+                [0., index as f32 * 100.],
+                1.,
+            );
+        }
+        frame.finish().expect("large text writer frame");
+        assert_eq!(
+            frame.scene.phases[0].objects.len(),
+            COUNTS.iter().sum::<usize>()
+        );
+        assert_eq!(frame.scene.pixel_masks.len(), COUNTS.iter().sum::<usize>());
+        let ids: Vec<_> = frame
+            .scene
+            .pixel_masks
+            .iter()
+            .map(|mask| mask.texture)
+            .collect();
+        assert_eq!(
+            ids.iter().collect::<std::collections::HashSet<_>>().len(),
+            ids.len()
+        );
+        if let Some(first) = &first_ids {
+            assert_eq!(
+                &ids, first,
+                "active glyph definitions must survive shared LRU eviction"
+            );
+        } else {
+            first_ids = Some(ids);
+        }
     }
 }

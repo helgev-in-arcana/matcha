@@ -1071,6 +1071,7 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
     });
     let shape_ctx = crate::shape::ShapeCtx::get(entity);
     let text_tints = crate::shape::ShapeCtx::default();
+    let glyphs = Mutex::new(crate::rich_text::ActiveGlyphs::default());
 
     RenderItem::new(move |ctx: &RenderCtx, draw| {
         let [w, h] = ctx.size;
@@ -1094,6 +1095,7 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
 
         let editor = editor.lock();
         let Some(layout) = editor.try_layout() else {
+            glyphs.lock().clear();
             return;
         };
 
@@ -1115,7 +1117,14 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
             );
         }
         draw.translated(place(0., 0.), |draw| {
-            draw_parley_layout(draw, &font_ctx, ctx, layout, &text_tints)
+            draw_parley_layout(
+                draw,
+                &font_ctx,
+                ctx,
+                layout,
+                &text_tints,
+                &mut glyphs.lock(),
+            )
         });
 
         if ctx.focused && live.caret_visible() {

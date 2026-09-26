@@ -188,13 +188,25 @@ impl ImageCtx {
     }
     fn lookup(&self, key: &ImageCacheKey) -> Option<(TextureSource, [f32; 2])> {
         let mut cache = self.0.lock();
+        // Writers run every frame. A warm hit must not sweep every other image
+        // (N visible images would otherwise make frame assembly quadratic).
+        if let Some(entry) = cache.get(key).filter(|entry| {
+            entry
+                .owner
+                .as_ref()
+                .is_none_or(|owner| owner.strong_count() > 0)
+        }) {
+            return Some(entry.value.clone());
+        }
+        // The weak owner also prevents pointer reuse from aliasing old content.
+        // Reclaim dead inputs on a miss; successful hot lookups remain O(1).
         cache.retain(|_, entry| {
             entry
                 .owner
                 .as_ref()
                 .is_none_or(|owner| owner.strong_count() > 0)
         });
-        cache.get(key).map(|entry| entry.value.clone())
+        None
     }
 }
 
@@ -222,6 +234,10 @@ fn decode(source: &ImageSource) -> Option<image::DynamicImage> {
 /// `w`×`h`; CSS `object-fit: contain`), decoding/resizing/uploading at most
 /// once per distinct `(source, box size)` pair via `image_ctx`.
 fn image_render_item(image_ctx: ImageCtx, source: ImageSource, fit: ObjectFit) -> RenderItem {
+    // Retain decoding independently of fitted texture definitions. Failed input
+    // is remembered for this writer too, avoiding repeated IO/errors each frame.
+    // Replacing the widget content installs a fresh writer and permits a retry.
+    let decoded = std::sync::OnceLock::new();
     RenderItem::new(move |ctx: &RenderCtx, draw| {
         let [box_w, box_h] = ctx.size;
         if box_w <= 0.0 || box_h <= 0.0 {
@@ -234,10 +250,10 @@ fn image_render_item(image_ctx: ImageCtx, source: ImageSource, fit: ObjectFit) -
             return compose(draw, &cached, box_w, box_h);
         }
 
-        let Some(decoded) = decode(&source) else {
+        let Some(decoded) = decoded.get_or_init(|| decode(&source)) else {
             return;
         };
-        let fitted = fit.apply(&decoded, target);
+        let fitted = fit.apply(decoded, target);
         let rgba = fitted.to_rgba8();
         let (w, h) = rgba.dimensions();
         if w == 0 || h == 0 {
