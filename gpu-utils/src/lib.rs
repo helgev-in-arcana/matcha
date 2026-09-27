@@ -1,13 +1,13 @@
-//! Shared GPU context with optional compatibility atlases.
+//! Shared GPU context with optional texture and buffer atlases.
 //!
-//! GPU initialization is always available. Enable `legacy-atlas` only for the
-//! UI-owned texture/buffer atlas APIs used by the old renderer and UI stacks.
+//! GPU initialization is always available. Enable `atlas` for the independent
+//! atlas APIs. Current tree/ECS rendering uses scene-renderer-owned placement.
 
-#[cfg(feature = "legacy-atlas")]
+#[cfg(feature = "atlas")]
 pub mod buffer_atlas;
 pub mod gpu;
 mod gpu_defaults;
-#[cfg(feature = "legacy-atlas")]
+#[cfg(feature = "atlas")]
 pub mod texture_atlas;
 
 #[cfg(debug_assertions)]

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 /// Descriptor used to configure and create a [`Gpu`] instance.
 ///
-/// `Default` preserves the existing UI's platform-specific feature requirements.
+/// `Default` preserves the original platform-specific feature requirements.
 /// New renderers requiring only standard WebGPU features can use
 /// [`GpuDescriptor::standard`], independently of Cargo feature unification.
 pub struct GpuDescriptor {
@@ -40,7 +40,7 @@ impl Default for GpuDescriptor {
 impl GpuDescriptor {
     /// Platform preset without optional GPU features, suitable for the Scene
     /// renderer. Backend selection, limits and surface format match `Default`.
-    /// This does not depend on whether compatibility atlases are compiled in.
+    /// This does not depend on whether the atlas APIs are compiled in.
     pub fn standard() -> Self {
         Self {
             required_features: wgpu::Features::empty(),
@@ -208,7 +208,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn standard_preset_does_not_inherit_the_legacy_feature_requirements() {
+    fn standard_preset_does_not_inherit_optional_feature_requirements() {
         assert!(GpuDescriptor::standard().required_features.is_empty());
         #[cfg(not(web))]
         assert!(

@@ -12,7 +12,6 @@ thiserror.workspace = true
 guillotiere = "0.6"
 
 [dev-dependencies]
-renderer = { workspace = true, features = ["legacy"] }
 gpu-utils.workspace = true
 futures.workspace = true
 image.workspace = true

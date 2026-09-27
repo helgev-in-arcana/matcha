@@ -6,8 +6,8 @@ publish = false
 
 [features]
 default = []
-# Old atlas implementations are retained only for consumers that request them.
-legacy-atlas = [
+# Texture/buffer atlas APIs are available only to consumers that request them.
+atlas = [
     "dep:guillotiere",
     "dep:uuid",
     "dep:dashmap",

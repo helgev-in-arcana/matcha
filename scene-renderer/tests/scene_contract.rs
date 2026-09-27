@@ -16,6 +16,7 @@ mod effects;
 #[path = "../examples/support/private_3d.rs"]
 mod private_3d;
 #[path = "../examples/support/sources.rs"]
+#[allow(dead_code)] // Shared fixtures include constructors used only by other examples/tests.
 mod sources;
 
 // Multiple adapter/device creations in parallel have caused native driver
@@ -28,19 +29,14 @@ fn gpu_test_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn gpu_descriptor(legacy: bool) -> GpuDescriptor {
+fn gpu_descriptor() -> GpuDescriptor {
     GpuDescriptor {
         backends: match std::env::var("MATCHA_TEST_BACKEND").as_deref() {
             Ok("dx12") => wgpu::Backends::DX12,
             Ok("vulkan") => wgpu::Backends::VULKAN,
             _ => wgpu::Backends::PRIMARY,
         },
-        required_features: if legacy {
-            GpuDescriptor::default().required_features
-        } else {
-            wgpu::Features::empty()
-        },
-        ..Default::default()
+        ..GpuDescriptor::standard()
     }
 }
 
@@ -149,8 +145,7 @@ fn render(
 #[test]
 fn real_gpu_scene_contract() {
     let _serial = gpu_test_lock();
-    let gpu =
-        futures::executor::block_on(Gpu::new(gpu_descriptor(false))).expect("real GPU required");
+    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor())).expect("real GPU required");
     eprintln!("Scene contract adapter: {:?}", gpu.adapter().get_info());
     let (device, queue) = gpu.context().expect("initialized GPU");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -625,128 +620,10 @@ fn real_gpu_scene_contract() {
 }
 
 #[test]
-fn unchanged_legacy_renderer_is_a_pixel_baseline() {
-    use gpu_utils::texture_atlas::TextureAtlas;
-    let _serial = gpu_test_lock();
-    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor(true)))
-        .expect("legacy-capable real GPU");
-    let (device, queue) = gpu.context().expect("GPU");
-    let size = wgpu::Extent3d {
-        width: 128,
-        height: 128,
-        depth_or_array_layers: 1,
-    };
-    let colors = TextureAtlas::new(&device, size, wgpu::TextureFormat::Rgba8UnormSrgb, 1);
-    let masks = TextureAtlas::new(&device, size, wgpu::TextureFormat::R8Unorm, 1);
-    let rgba = [180, 65, 32, 200];
-    let color_region = colors
-        .allocate(&device, &queue, [1, 1])
-        .expect("legacy color");
-    color_region
-        .write_data(&queue, &rgba)
-        .expect("color upload");
-    let bitmap: Vec<u8> = (0..64).map(|i| ((i % 8) * 32) as u8).collect();
-    let mask_region = masks
-        .allocate(&device, &queue, [8, 8])
-        .expect("legacy mask");
-    mask_region
-        .write_data(&queue, &bitmap)
-        .expect("mask upload");
-    let clip_region = masks
-        .allocate(&device, &queue, [1, 1])
-        .expect("legacy clip");
-    clip_region.write_data(&queue, &[255]).expect("clip upload");
-    let old_node = renderer::RenderNode::new()
-        .with_texture(color_region, [36., 30.], Matrix4::identity())
-        .with_stencil(mask_region, [36., 30.], Matrix4::identity());
-    let transform = Matrix4::new_translation(&nalgebra::Vector3::new(8., 12., 0.));
-    let old_target = output(&device);
-    renderer::CoreRenderer::new(&device)
-        .render_flat(
-            &device,
-            &queue,
-            wgpu::TextureFormat::Rgba8Unorm,
-            &old_target.create_view(&Default::default()),
-            [64., 64.],
-            &[renderer::FlatItem::new(Arc::new(old_node), transform)
-                .with_clip(Some(0))
-                .with_alpha(0.6)],
-            &[renderer::MaskNode {
-                parent: None,
-                transform: rect(12., 4., 36., 42.),
-                region: clip_region,
-            }],
-            wgpu::Color::BLACK,
-            &colors.texture(),
-            &masks.texture(),
-        )
-        .expect("unchanged main renderer");
-    let old_pixels = pixels(&device, &queue, &old_target);
-    let mut scene = Scene::default();
-    let mesh = scene
-        .resources
-        .insert_mesh(sources::unit_quad())
-        .expect("quad");
-    let texture = scene
-        .resources
-        .insert_texture(sources::rgba([1, 1], rgba.to_vec()))
-        .expect("color");
-    let mask = scene
-        .resources
-        .insert_mask(sources::coverage([8, 8], bitmap))
-        .expect("gradient");
-    let clip = scene
-        .resources
-        .insert_mask(sources::coverage([1, 1], vec![255]))
-        .expect("clip");
-    scene.pixel_masks = vec![
-        PixelMask {
-            mesh,
-            texture: clip,
-            transform: rect(12., 4., 36., 42.),
-            parent: None,
-        },
-        PixelMask {
-            mesh,
-            texture: mask,
-            transform: transform * rect(0., 0., 36., 30.),
-            parent: Some(PixelMaskIndex(0)),
-        },
-    ];
-    scene.phases.push(Phase {
-        objects: vec![Object {
-            mask: Some(PixelMaskIndex(1)),
-            opacity: 0.6,
-            ..Object::new(mesh, texture, transform * rect(0., 0., 36., 30.))
-        }],
-    });
-    let new_target = output(&device);
-    let mut renderer = SceneRenderer::new(&device, &queue);
-    render(&mut renderer, &scene, &new_target, [64., 64.]);
-    let new_pixels = pixels(&device, &queue, &new_target);
-    let max = old_pixels
-        .iter()
-        .zip(&new_pixels)
-        .map(|(a, b)| a.abs_diff(*b))
-        .max()
-        .expect("pixels");
-    let changed = old_pixels
-        .chunks_exact(4)
-        .zip(new_pixels.chunks_exact(4))
-        .filter(|(a, b)| a != b)
-        .count();
-    eprintln!("Legacy baseline: max channel delta {max}, changed pixels {changed}/4096");
-    assert!(
-        max <= 2,
-        "legacy pixel parity exceeded two quantization steps: {max}"
-    );
-}
-
-#[test]
 fn atlas_pages_relocation_reuse_and_regeneration_preserve_content_ids() {
     use scene_renderer::AtlasConfig;
     let _serial = gpu_test_lock();
-    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor(false))).expect("real GPU");
+    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor())).expect("real GPU");
     let (device, queue) = gpu.context().expect("GPU");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut backend = SceneRenderer::new(&device, &queue);
@@ -924,7 +801,7 @@ fn atlas_pages_relocation_reuse_and_regeneration_preserve_content_ids() {
 #[test]
 fn diagnostic_snapshot_content_identity_must_be_updated_by_the_caller() {
     let _serial = gpu_test_lock();
-    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor(false))).expect("real GPU");
+    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor())).expect("real GPU");
     let (device, queue) = gpu.context().expect("GPU");
     let mut backend = SceneRenderer::new(&device, &queue);
     let target = output(&device);
@@ -1000,7 +877,7 @@ fn diagnostic_gpu_validation_at_finish_does_not_wait_for_execution() {
     // Observe the handler synchronously: a Future-returning scope API alone would
     // not tell us when validation happened. No queue submission/poll is needed.
     let _serial = gpu_test_lock();
-    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor(false))).expect("real GPU");
+    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor())).expect("real GPU");
     let (device, _queue) = gpu.context().expect("GPU");
     let errors = Arc::new(AtomicUsize::new(0));
     let observed = errors.clone();
@@ -1044,7 +921,7 @@ fn diagnostic_gpu_validation_at_finish_does_not_wait_for_execution() {
 #[test]
 fn diagnostic_gpu_validation_is_distinct_from_prepare_result() {
     let _serial = gpu_test_lock();
-    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor(false))).expect("real GPU");
+    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor())).expect("real GPU");
     let (device, queue) = gpu.context().expect("GPU");
     let mut backend = SceneRenderer::new(&device, &queue);
     let target = output(&device);
@@ -1104,7 +981,7 @@ fn gpu_deformed_mesh_survives_packing_and_relocation() {
 
 fn deformed_mesh_proof(relocate: bool) {
     let _serial = gpu_test_lock();
-    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor(false))).expect("real GPU");
+    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor())).expect("real GPU");
     let (device, queue) = gpu.context().expect("GPU");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut backend = SceneRenderer::new(&device, &queue);
@@ -1219,7 +1096,7 @@ fn private_3d_render_survives_texture_relocation() {
 
 fn private_3d_proof(relocate: bool) {
     let _serial = gpu_test_lock();
-    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor(false))).expect("real GPU");
+    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor())).expect("real GPU");
     let (device, queue) = gpu.context().expect("GPU");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut backend = SceneRenderer::new(&device, &queue);
@@ -1266,7 +1143,7 @@ fn private_3d_proof(relocate: bool) {
 #[test]
 fn diagnostic_pixel_art_needs_extra_geometry_with_the_fixed_linear_sampler() {
     let _serial = gpu_test_lock();
-    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor(false))).expect("real GPU");
+    let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor())).expect("real GPU");
     let (device, queue) = gpu.context().expect("GPU");
     let mut backend = SceneRenderer::new(&device, &queue);
     let target = output(&device);

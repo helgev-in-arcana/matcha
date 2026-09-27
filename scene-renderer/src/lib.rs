@@ -1,7 +1,7 @@
 //! GUI scene composition and renderer-owned GPU residency.
 //!
 //! This crate depends on the upstream render-interface contract, not on either
-//! UI framework or the widget drawing helpers in the legacy renderer crate.
+//! UI framework or the widget drawing helpers in the `renderer` crate.
 //! Scene definitions are borrowed only during render. Internal planning, residency,
 //! placement and composition types are deliberately not part of the public API.
 //! CPU errors discard an unsubmitted recording. GPU errors remain on wgpu's error

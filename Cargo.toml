@@ -30,7 +30,6 @@ matcha-tree-widgets = { path = "matcha-tree-widgets" }
 matcha-ecs = { path = "matcha-ecs" }
 matcha-ecs-widgets = { path = "matcha-ecs-widgets" }
 shared-buffer = { path = "shared-buffer" }
-renderer = { path = "renderer" }
 utils = { path = "utils" }
 gpu-utils = { path = "gpu-utils" }
 glyph-cache = { path = "glyph-cache" }

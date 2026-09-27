@@ -3,52 +3,30 @@ name = "renderer"
 edition = "2024"
 version.workspace = true
 
-[features]
-default = []
-# The old UI stacks opt in to their renderer and UI-owned atlas API explicitly.
-legacy = [
-    "dep:wgpu",
-    "dep:log",
-    "dep:nalgebra",
-    "dep:bytemuck",
-    "dep:thiserror",
-    "dep:gpu-utils",
-    "gpu-utils/legacy-atlas",
-    "dep:fxhash",
-    "dep:utils",
-    "dep:smallvec",
-    "dep:parking_lot",
-    "dep:moka",
-]
-
 [dependencies]
-wgpu = { workspace = true, optional = true }
-log = { workspace = true, optional = true }
-nalgebra = { workspace = true, optional = true }
-bytemuck = { workspace = true, optional = true }
-thiserror = { workspace = true, optional = true }
-gpu-utils = { workspace = true, optional = true }
-fxhash = { workspace = true, optional = true }
-utils = { workspace = true, optional = true }
-smallvec = { workspace = true, optional = true }
-parking_lot = { workspace = true, optional = true }
+wgpu = { workspace = true }
+log = { workspace = true }
+nalgebra = { workspace = true }
+bytemuck = { workspace = true }
+thiserror = { workspace = true }
+gpu-utils = { workspace = true, features = ["atlas"] }
+fxhash = { workspace = true }
+utils = { workspace = true }
+smallvec = { workspace = true }
+parking_lot = { workspace = true }
 
 # moka spawns background threads and is unsupported on wasm; the pipeline
 # cache falls back to a locked map there (see src/pipeline_cache.rs).
 # NOTE: the `cfg` expression below must stay in sync with the `web` alias
 # defined in build.rs (`all(target_arch = "wasm32", target_os = "unknown")`).
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
-moka = { workspace = true, optional = true }
+moka = { workspace = true }
 
 [dev-dependencies]
 futures = { workspace = true }
 
 [build-dependencies]
 cfg_aliases = { workspace = true }
-
-[[test]]
-name = "noop_smoke"
-required-features = ["legacy"]
 
 [lints]
 workspace = true
