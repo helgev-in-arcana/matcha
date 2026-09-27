@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use render_interface::Matrix4;
-use scene_builder::{Draw, Frame};
+use render_interface::{Draw, Frame};
 use scene_renderer::{SceneRenderer, SceneTarget};
 
 use crate::ui_tree::{

@@ -33,8 +33,8 @@ use matcha_tree_widgets::{
     types::{grow_size::GrowSize, size::Size},
     widget::{image::Image, plain::Plain},
 };
+use render_interface::Frame;
 use render_interface::{Matrix4, TextureId};
-use scene_builder::Frame;
 use scene_renderer::{SceneRenderer, SceneTarget};
 
 const EDGE: u32 = 128;

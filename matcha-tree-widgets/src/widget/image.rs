@@ -5,7 +5,7 @@ use matcha_tree::ui_tree::{
     metrics::Constraints,
     widget::{View, Widget, WidgetInteractionResult, WidgetPod},
 };
-use scene_builder::Draw;
+use render_interface::Draw;
 use std::sync::Arc;
 
 use crate::style::Style as _;

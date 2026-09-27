@@ -6,8 +6,7 @@ publish = false
 
 [dependencies]
 # matcha
-render-interface.workspace = true
-scene-builder.workspace = true
+render-interface = { workspace = true, features = ["scene-builder"] }
 matcha-tree = { workspace = true }
 utils = { workspace = true }
 

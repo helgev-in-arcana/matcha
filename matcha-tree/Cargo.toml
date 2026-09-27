@@ -6,9 +6,8 @@ publish = false
 
 [dependencies]
 # self
-render-interface = { workspace = true }
+render-interface = { workspace = true, features = ["scene-builder"] }
 scene-renderer = { workspace = true }
-scene-builder = { workspace = true }
 utils = { workspace = true }
 gpu-utils = { workspace = true }
 shared-buffer = { workspace = true }

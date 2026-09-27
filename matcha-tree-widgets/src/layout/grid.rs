@@ -8,7 +8,7 @@ use matcha_tree::{
         widget::{View, Widget, WidgetInteractionResult, WidgetPod},
     },
 };
-use scene_builder::Draw;
+use render_interface::Draw;
 
 use crate::types::{
     grow_size::GrowSize,

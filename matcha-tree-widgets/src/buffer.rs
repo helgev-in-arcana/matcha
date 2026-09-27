@@ -13,11 +13,11 @@ use matcha_tree::ui_tree::{
     context::UiContext,
     metrics::{Constraints, QRect},
 };
+use render_interface::Draw;
 use render_interface::{
     Matrix4, MeshDescriptor, MeshSource, Object, TextureDescriptor, TextureSource, Vertex,
     upload_buffer,
 };
-use scene_builder::Draw;
 use std::sync::Arc;
 
 pub struct Buffer {
@@ -130,7 +130,7 @@ impl Buffer {
         if uv_max == [1., 1.] {
             // Integer regions use the same immutable quad definition as direct
             // framework drawing and clipping, rather than one copy per widget.
-            self.mesh = Some((key, scene_builder::unit_quad()));
+            self.mesh = Some((key, render_interface::unit_quad()));
             return;
         }
         let vertices = quad_vertices(uv_max);
@@ -256,7 +256,7 @@ mod tests {
         let mut second = Buffer::clipped(Vec::new());
         first.ensure_mesh([1., 1.]);
         second.ensure_mesh([1., 1.]);
-        let shared = scene_builder::unit_quad().id();
+        let shared = render_interface::unit_quad().id();
         assert_eq!(first.mesh.as_ref().expect("first quad").1.id(), shared);
         assert_eq!(second.mesh.as_ref().expect("second quad").1.id(), shared);
     }

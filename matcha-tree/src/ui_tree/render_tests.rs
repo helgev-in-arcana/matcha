@@ -7,8 +7,8 @@ use std::sync::{
 
 use dashmap::DashMap;
 use gpu_utils::gpu::{Gpu, GpuDescriptor};
+use render_interface::{Draw, Frame};
 use render_interface::{Matrix4, TextureDescriptor, TextureSource, upload_texture};
-use scene_builder::{Draw, Frame};
 use scene_renderer::{SceneRenderer, SceneTarget};
 
 use super::{

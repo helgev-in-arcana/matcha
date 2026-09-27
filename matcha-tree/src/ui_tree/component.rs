@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use scene_builder::Draw;
+use render_interface::Draw;
 
 use super::widget::{View, Widget, WidgetInteractionResult, WidgetPod};
 use crate::ui_tree::{
