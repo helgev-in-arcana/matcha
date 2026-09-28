@@ -39,14 +39,25 @@
 //! Definitions must exist even on a warm cache. Caches may ignore pool retention
 //! hints, but must not regenerate a source from a later phase's snapshot.
 //!
-//! GPU callbacks may record copy/compute/render work into their dedicated output.
-//! They must initialize it, never mutate the snapshot, retain output/snapshot
+//! GPU callbacks record copy/compute/render work into their logical output. The
+//! default [`PrepareOutputLayout::WholeResource`] guarantees a whole allocation;
+//! generators declaring [`PrepareOutputLayout::AnyRegion`] also accept texture
+//! rectangles or buffer slices inside larger allocations. They initialize only
+//! that output, preserving neighbouring data. Snapshot readers always honor its
+//! region, independently of output layout. Renderer placement remains private.
+//! Callbacks must never mutate the snapshot, retain output/snapshot
 //! handles, destroy borrowed resources or submit work themselves. Device clones
 //! and privately created pipelines/work resources may be retained by providers.
 //! CPU preparation errors abort
 //! submission and publication of newly generated cache entries for the frame.
 //! This does not roll back a callback's external CPU side effects. Exposing
 //! raw wgpu handles is a trusted extension contract, not a security sandbox.
+//! [`TextureRegion::begin_render_pass`] sets viewport/scissor and implements
+//! region-local colour Clear. Its raw pass can still override these settings.
+//! Storage shaders must offset and bound their own writes. A renderer must
+//! prevent incompatible read/write use of the same physical subresource; pixel
+//! rectangles do not create independent GPU usage scopes. Failure fallback is a
+//! placement decision before invoking a callback, not a retry after its error.
 //! A logical output need not be a fresh allocation: it can be reused after its
 //! commands and placement copy have been recorded. Never retain its identity or
 //! depend on previous contents. A snapshot can likewise alias the accumulation

@@ -170,7 +170,7 @@ impl ResourcePool {
     }
 
     /// Merge definitions contributed by independent resource pools under the
-    /// immutable-content-ID contract. Descriptor conflicts fail; closure semantic
+    /// immutable-content-ID contract. Descriptor or output-layout conflicts fail; closure semantic
     /// equivalence remains the producer's responsibility, not pointer identity.
     /// Public insert_* still rejects duplicates within one pool. This explicit
     /// composition operation materializes one definition per ID. No source
@@ -268,6 +268,7 @@ macro_rules! source {
         pub struct $name {
             id: $id,
             desc: $desc,
+            output_layout: PrepareOutputLayout,
             prepare: std::sync::Arc<$prepare>,
         }
         impl $name {
@@ -287,8 +288,18 @@ macro_rules! source {
                 Self {
                     id,
                     desc,
+                    output_layout: PrepareOutputLayout::WholeResource,
                     prepare: std::sync::Arc::new(prepare),
                 }
+            }
+            /// Declare which physical output placements this generator accepts.
+            /// This changes preparation requirements, not logical content or ID.
+            pub fn with_output_layout(mut self, layout: PrepareOutputLayout) -> Self {
+                self.output_layout = layout;
+                self
+            }
+            pub fn output_layout(&self) -> PrepareOutputLayout {
+                self.output_layout
             }
             pub fn id(&self) -> $id {
                 self.id
@@ -300,10 +311,26 @@ macro_rules! source {
                 (self.prepare)(ctx)
             }
             fn same_definition(&self, other: &Self) -> bool {
-                self.id == other.id && self.desc == other.desc
+                self.id == other.id
+                    && self.desc == other.desc
+                    && self.output_layout == other.output_layout
             }
         }
     };
+}
+
+/// Physical output layouts accepted by a generator, independent of content IDs.
+/// Snapshot readers always honor the snapshot region, regardless of this choice.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PrepareOutputLayout {
+    /// Texture origin / buffer offset is zero and physical size equals logical
+    /// output size. A renderer may prepare separately and copy into residency.
+    #[default]
+    WholeResource,
+    /// Also accepts a region of a larger allocation. The generator initializes
+    /// only that region and preserves every byte/texel outside it. Dedicated
+    /// output is still allowed; direct atlas placement is not guaranteed.
+    AnyRegion,
 }
 
 source!(
@@ -419,19 +446,221 @@ pub type MaskDescriptor = TextureDescriptor;
 pub type PrepareError = Box<dyn Error + Send + Sync + 'static>;
 pub type PrepareResult = Result<(), PrepareError>;
 
-/// Read-only image at the start of the source's first referenced phase.
+/// A logical rectangle in a single-layer, single-mip, single-sample 2D texture.
 ///
-/// The full single-mip, single-sample 2D colour image supports TEXTURE_BINDING
-/// and COPY_SRC. Its actual size and format are reported here; a generator must
-/// not assume they match its own output. No storage or writable usage is promised.
-/// The renderer may alias its accumulation image if all generation reads precede
-/// that phase's drawing writes. It must not substitute a later-phase snapshot.
+/// The view must be a D2 view of that entire subresource with `view_format`.
+/// wgpu exposes its texture but not its descriptor, so the provider guarantees
+/// the view dimension, aspect and declared format. `new` checks everything
+/// observable. A view does not isolate a pixel rectangle: raw render/compute
+/// commands must honor this region explicitly. Sampling helpers below clamp
+/// to texel centers inside the region; sampler ClampToEdge alone is insufficient.
+#[derive(Debug, Clone, Copy)]
+pub struct TextureRegion<'a> {
+    view: &'a wgpu::TextureView,
+    view_format: wgpu::TextureFormat,
+    origin: [u32; 2],
+    size: [u32; 2],
+}
+
+impl<'a> TextureRegion<'a> {
+    pub fn new(
+        view: &'a wgpu::TextureView,
+        view_format: wgpu::TextureFormat,
+        origin: [u32; 2],
+        size: [u32; 2],
+    ) -> Result<Self, PrepareError> {
+        let texture = view.texture();
+        if texture.dimension() != wgpu::TextureDimension::D2
+            || texture.depth_or_array_layers() != 1
+            || texture.mip_level_count() != 1
+            || texture.sample_count() != 1
+            || texture.format().remove_srgb_suffix() != view_format.remove_srgb_suffix()
+            || view_format.is_depth_stencil_format()
+            || view_format.is_compressed()
+        {
+            return Err("region requires an uncompressed colour 2D texture with one layer, mip and sample, and a compatible view format".into());
+        }
+        validate_region_bounds([texture.width(), texture.height()], origin, size)?;
+        Ok(Self {
+            view,
+            view_format,
+            origin,
+            size,
+        })
+    }
+
+    pub fn whole(
+        view: &'a wgpu::TextureView,
+        view_format: wgpu::TextureFormat,
+    ) -> Result<Self, PrepareError> {
+        Self::new(
+            view,
+            view_format,
+            [0, 0],
+            [view.texture().width(), view.texture().height()],
+        )
+    }
+
+    pub fn view(&self) -> &'a wgpu::TextureView {
+        self.view
+    }
+    pub fn texture(&self) -> &'a wgpu::Texture {
+        self.view.texture()
+    }
+    pub fn origin(&self) -> [u32; 2] {
+        self.origin
+    }
+    pub fn size(&self) -> [u32; 2] {
+        self.size
+    }
+    pub fn view_format(&self) -> wgpu::TextureFormat {
+        self.view_format
+    }
+
+    /// `[scale_x, scale_y, bias_x, bias_y]` mapping logical normalized UV to
+    /// physical UV: `physical_uv = logical_uv * scale + bias`.
+    pub fn uv_scale_bias(&self) -> [f32; 4] {
+        let w = self.texture().width() as f32;
+        let h = self.texture().height() as f32;
+        [
+            self.size[0] as f32 / w,
+            self.size[1] as f32 / h,
+            self.origin[0] as f32 / w,
+            self.origin[1] as f32 / h,
+        ]
+    }
+
+    /// `[min_u, min_v, max_u, max_v]`, inset by half a texel for linear
+    /// sampling without filtering neighbouring allocations. Apply after UV mapping.
+    pub fn uv_clamp(&self) -> [f32; 4] {
+        let w = self.texture().width() as f32;
+        let h = self.texture().height() as f32;
+        [
+            (self.origin[0] as f32 + 0.5) / w,
+            (self.origin[1] as f32 + 0.5) / h,
+            ((self.origin[0] + self.size[0]) as f32 - 0.5) / w,
+            ((self.origin[1] + self.size[1]) as f32 - 0.5) / h,
+        ]
+    }
+
+    /// Copy corresponding logical rectangles, cropping both ends to their
+    /// regions. Negative coordinates are allowed; cropping preserves the pixel
+    /// correspondence. Returns the copied extent. An empty intersection records
+    /// no commands. No rescaling, format conversion or sRGB conversion occurs.
+    /// Copies within the same texture subresource are rejected conservatively,
+    /// even when the two logical rectangles do not overlap.
+    pub fn copy_to(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        destination: &TextureRegion<'_>,
+        src_origin: [i32; 2],
+        dst_origin: [i32; 2],
+        size: [u32; 2],
+    ) -> Result<[u32; 2], PrepareError> {
+        let Some(copy) = crop_copy(self.size, destination.size, src_origin, dst_origin, size)
+        else {
+            return Ok([0, 0]);
+        };
+        if self.texture() == destination.texture() {
+            return Err("copy within the same texture subresource is unsupported".into());
+        }
+        if self.texture().format().remove_srgb_suffix()
+            != destination.texture().format().remove_srgb_suffix()
+            || !self
+                .texture()
+                .usage()
+                .contains(wgpu::TextureUsages::COPY_SRC)
+            || !destination
+                .texture()
+                .usage()
+                .contains(wgpu::TextureUsages::COPY_DST)
+        {
+            return Err(
+                "region copy needs compatible physical formats and COPY_SRC/COPY_DST usages".into(),
+            );
+        }
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                origin: wgpu::Origin3d {
+                    x: self.origin[0] + copy.src[0],
+                    y: self.origin[1] + copy.src[1],
+                    z: 0,
+                },
+                ..self.texture().as_image_copy()
+            },
+            wgpu::TexelCopyTextureInfo {
+                origin: wgpu::Origin3d {
+                    x: destination.origin[0] + copy.dst[0],
+                    y: destination.origin[1] + copy.dst[1],
+                    z: 0,
+                },
+                ..destination.texture().as_image_copy()
+            },
+            wgpu::Extent3d {
+                width: copy.size[0],
+                height: copy.size[1],
+                depth_or_array_layers: 1,
+            },
+        );
+        Ok(copy.size)
+    }
+}
+
+fn validate_region_bounds(physical: [u32; 2], origin: [u32; 2], size: [u32; 2]) -> PrepareResult {
+    if (0..2).any(|axis| {
+        size[axis] == 0
+            || origin[axis]
+                .checked_add(size[axis])
+                .is_none_or(|end| end > physical[axis])
+    }) {
+        return Err("texture region is empty or outside its physical texture".into());
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CroppedCopy {
+    src: [u32; 2],
+    dst: [u32; 2],
+    size: [u32; 2],
+}
+
+fn crop_copy(
+    src_size: [u32; 2],
+    dst_size: [u32; 2],
+    src: [i32; 2],
+    dst: [i32; 2],
+    size: [u32; 2],
+) -> Option<CroppedCopy> {
+    let mut result = CroppedCopy {
+        src: [0; 2],
+        dst: [0; 2],
+        size: [0; 2],
+    };
+    for axis in 0..2 {
+        let s = i64::from(src[axis]);
+        let d = i64::from(dst[axis]);
+        let start = 0.max(-s).max(-d);
+        let end = i64::from(size[axis])
+            .min(i64::from(src_size[axis]) - s)
+            .min(i64::from(dst_size[axis]) - d);
+        if start >= end {
+            return None;
+        }
+        result.src[axis] = (s + start) as u32;
+        result.dst[axis] = (d + start) as u32;
+        result.size[axis] = (end - start) as u32;
+    }
+    Some(result)
+}
+
+/// Read-only logical image at the start of the first referenced phase. Its
+/// region may occupy part of a larger texture, regardless of output layout.
+/// Supports TEXTURE_BINDING and COPY_SRC; no writable usage is promised.
+/// A renderer may alias accumulation when all reads precede phase drawing.
 #[derive(Clone, Copy)]
 pub struct RenderSnapshot<'a> {
-    pub color_texture: &'a wgpu::Texture,
-    pub color_view: &'a wgpu::TextureView,
-    pub size: [u32; 2],
-    pub format: wgpu::TextureFormat,
+    pub color: TextureRegion<'a>,
 }
 
 /// Borrowed recording access for a resource generator.
@@ -442,32 +671,234 @@ pub struct RenderSnapshot<'a> {
 /// caches scoped to device identity. Callbacks may record
 /// copy, compute and render work and create private intermediates. Every declared
 /// output byte/texel must be initialized; prior output contents are unspecified.
-/// The output is a logical resource at offset/origin zero, never an atlas region.
-/// Its identity and fresh allocation are not guaranteed. A renderer may copy it
+/// Output placement follows the Source's [`PrepareOutputLayout`]. Region-aware
+/// generators preserve all bytes/texels outside their output. Its identity and
+/// fresh allocation are not guaranteed. A renderer may copy it
 /// into resident storage and reuse it later in the same ordered command stream.
 /// These are trusted extension rules: raw wgpu access is not a sandbox.
 pub struct GpuPrepareContext<'a> {
     pub device: &'a wgpu::Device,
     pub encoder: &'a mut wgpu::CommandEncoder,
     pub snapshot: RenderSnapshot<'a>,
+    pub render_pass_cache: &'a mut RegionRenderPassCache,
+}
+
+/// Pass handle returned by the region helper. Keep helper-dependent code using
+/// this name so a future checked wrapper need not change its construction API.
+pub type RegionRenderPass<'a> = wgpu::RenderPass<'a>;
+
+/// One colour attachment with automatic region viewport/scissor. Partial
+/// regions require Store and cannot have a depth/stencil attachment: attachment
+/// discard and depth/stencil clears are not confined by colour scissor.
+pub struct RegionRenderPassDescriptor<'a> {
+    pub label: Option<&'a str>,
+    pub load: wgpu::LoadOp<wgpu::Color>,
+    pub store: wgpu::StoreOp,
+    pub depth_stencil_attachment: Option<wgpu::RenderPassDepthStencilAttachment<'a>>,
+}
+
+impl Default for RegionRenderPassDescriptor<'_> {
+    fn default() -> Self {
+        Self {
+            label: None,
+            load: wgpu::LoadOp::Load,
+            store: wgpu::StoreOp::Store,
+            depth_stencil_attachment: None,
+        }
+    }
+}
+
+/// Renderer-owned, device-scoped helper pipelines. It retains no output or
+/// snapshot handles; dropping the renderer can release all these resources.
+pub struct RegionRenderPassCache {
+    device: wgpu::Device,
+    clear_pipelines: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+}
+
+impl RegionRenderPassCache {
+    pub fn new(device: &wgpu::Device) -> Self {
+        Self {
+            device: device.clone(),
+            clear_pipelines: HashMap::new(),
+        }
+    }
+
+    fn clear_pipeline(&mut self, format: wgpu::TextureFormat) -> &wgpu::RenderPipeline {
+        self.clear_pipelines.entry(format).or_insert_with(|| {
+            let shader = self
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("region clear shader"),
+                    source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+                        r#"
+@group(0) @binding(0) var<uniform> color: vec4<f32>;
+@vertex fn vertex(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    let positions = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+    return vec4(positions[index], 0.0, 1.0);
+}
+@fragment fn fragment() -> @location(0) vec4<f32> { return color; }
+"#,
+                    )),
+                });
+            self.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("region clear pipeline"),
+                    layout: None,
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vertex"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fragment"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+        })
+    }
+}
+
+impl TextureRegion<'_> {
+    /// Begin a colour pass scoped to this region. A partial Clear is encoded as
+    /// an initial unblended triangle in the same pass; neighbouring texels load
+    /// and store unchanged. Subsequent draws must set their pipeline and bind
+    /// groups normally. Raw pass methods can override the viewport/scissor, so
+    /// this helper does not sandbox a generator. Fragment position remains in
+    /// physical attachment coordinates; subtract `origin()` for local pixels.
+    pub fn begin_render_pass<'encoder>(
+        &self,
+        gpu: &'encoder mut GpuPrepareContext<'_>,
+        descriptor: RegionRenderPassDescriptor<'_>,
+    ) -> Result<RegionRenderPass<'encoder>, PrepareError> {
+        use wgpu::util::DeviceExt;
+        if !self
+            .texture()
+            .usage()
+            .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+        {
+            return Err("region render target lacks RENDER_ATTACHMENT".into());
+        }
+        let whole =
+            self.origin == [0, 0] && self.size == [self.texture().width(), self.texture().height()];
+        if !whole
+            && (descriptor.depth_stencil_attachment.is_some()
+                || descriptor.store != wgpu::StoreOp::Store)
+        {
+            return Err(
+                "partial region passes require Store and no depth/stencil attachment".into(),
+            );
+        }
+        if &gpu.render_pass_cache.device != gpu.device {
+            return Err("region pass cache belongs to a different device".into());
+        }
+        let partial_clear = match descriptor.load {
+            wgpu::LoadOp::Clear(color) if !whole => Some(color),
+            _ => None,
+        };
+        let clear = if let Some(color) = partial_clear {
+            if !matches!(
+                self.view_format
+                    .sample_type(None, Some(gpu.device.features())),
+                Some(wgpu::TextureSampleType::Float { .. })
+            ) {
+                return Err("partial region clear requires a floating-point colour format".into());
+            }
+            let rgba = [
+                color.r as f32,
+                color.g as f32,
+                color.b as f32,
+                color.a as f32,
+            ];
+            if !rgba.iter().all(|v| v.is_finite()) {
+                return Err(
+                    "partial region clear colour must be finite and representable as f32".into(),
+                );
+            }
+            let pipeline = gpu.render_pass_cache.clear_pipeline(self.view_format);
+            let uniform = gpu
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("region clear colour"),
+                    contents: bytemuck::cast_slice(&rgba),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+            let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("region clear colour"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                }],
+            });
+            Some((pipeline.clone(), group))
+        } else {
+            None
+        };
+        let attachments = [Some(wgpu::RenderPassColorAttachment {
+            view: self.view,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations {
+                load: if partial_clear.is_some() {
+                    wgpu::LoadOp::Load
+                } else {
+                    descriptor.load
+                },
+                store: descriptor.store,
+            },
+        })];
+        let mut pass = gpu.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: descriptor.label,
+            color_attachments: &attachments,
+            depth_stencil_attachment: descriptor.depth_stencil_attachment,
+            ..Default::default()
+        });
+        pass.set_viewport(
+            self.origin[0] as f32,
+            self.origin[1] as f32,
+            self.size[0] as f32,
+            self.size[1] as f32,
+            0.0,
+            1.0,
+        );
+        pass.set_scissor_rect(self.origin[0], self.origin[1], self.size[0], self.size[1]);
+        if let Some((pipeline, group)) = clear {
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        Ok(pass)
+    }
 }
 
 pub struct MeshTarget<'a> {
     pub desc: &'a MeshDescriptor,
-    /// Exactly `vertex_count * size_of::<Vertex>()` bytes at offset zero;
+    /// Exactly `vertex_count * size_of::<Vertex>()` accessible bytes;
     /// usages include COPY_SRC | COPY_DST | VERTEX and descriptor additions.
-    pub vertices: &'a wgpu::Buffer,
+    pub vertices: wgpu::BufferSlice<'a>,
     /// Present exactly when `index_count != 0`, with `index_count * 4` bytes at
-    /// offset zero and COPY_SRC | COPY_DST | INDEX plus descriptor additions.
-    pub indices: Option<&'a wgpu::Buffer>,
+    /// COPY_SRC | COPY_DST | INDEX plus descriptor additions.
+    pub indices: Option<wgpu::BufferSlice<'a>>,
 }
 
-/// Full logical 2D image matching `desc`, not a view into a resident atlas.
+/// Logical 2D image matching `desc`; `region.size()` equals `desc.size` and
+/// `region.view_format()` equals `desc.format`. The enclosing texture may be larger.
 /// Its usages include TEXTURE_BINDING | COPY_SRC | COPY_DST and descriptor additions.
 pub struct TextureTarget<'a> {
     pub desc: &'a TextureDescriptor,
-    pub texture: &'a wgpu::Texture,
-    pub view: &'a wgpu::TextureView,
+    pub region: TextureRegion<'a>,
 }
 pub struct MeshPrepareContext<'a> {
     pub gpu: GpuPrepareContext<'a>,
@@ -486,19 +917,27 @@ pub struct MaskPrepareContext<'a> {
 // staging copies into the supplied encoder and never submit work themselves.
 
 /// Record a byte upload without Queue access; submit remains renderer-owned.
-/// Empty data is a no-op. Nonempty data must fit and be copy-aligned; this helper
+/// Empty data is a no-op. Nonempty data must fit the slice and both its length
+/// and physical offset must be copy-aligned; this helper
 /// may write a prefix, but the generator must initialize its complete output.
 pub fn upload_buffer(
     gpu: &mut GpuPrepareContext<'_>,
-    target: &wgpu::Buffer,
+    target: wgpu::BufferSlice<'_>,
     bytes: &[u8],
 ) -> PrepareResult {
     use wgpu::util::DeviceExt;
-    let size = buffer_upload_size(target.size(), bytes.len())?;
+    let size = buffer_upload_size(target.size().get(), bytes.len())?;
     if size == 0 {
         return Ok(());
     }
-    if !target.usage().contains(wgpu::BufferUsages::COPY_DST) {
+    if target.offset() % wgpu::COPY_BUFFER_ALIGNMENT != 0 {
+        return Err("buffer upload target offset is not copy aligned".into());
+    }
+    if !target
+        .buffer()
+        .usage()
+        .contains(wgpu::BufferUsages::COPY_DST)
+    {
         return Err("buffer upload target lacks COPY_DST".into());
     }
     if size > gpu.device.limits().max_buffer_size {
@@ -512,7 +951,7 @@ pub fn upload_buffer(
             usage: wgpu::BufferUsages::COPY_SRC,
         });
     gpu.encoder
-        .copy_buffer_to_buffer(&staging, 0, target, 0, size);
+        .copy_buffer_to_buffer(&staging, 0, target.buffer(), target.offset(), size);
     Ok(())
 }
 
@@ -532,18 +971,11 @@ pub fn upload_texture(
         gpu.device.limits().max_buffer_size,
     )?;
     let [w, h] = target.desc.size;
-    if target.texture.size()
-        != (wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        })
-        || target.texture.format() != target.desc.format
-        || target.texture.dimension() != wgpu::TextureDimension::D2
-        || target.texture.mip_level_count() != 1
-        || target.texture.sample_count() != 1
+    if target.region.size() != target.desc.size
+        || target.region.view_format() != target.desc.format
         || !target
-            .texture
+            .region
+            .texture()
             .usage()
             .contains(wgpu::TextureUsages::COPY_DST)
     {
@@ -566,7 +998,14 @@ pub fn upload_texture(
                 rows_per_image: Some(h),
             },
         },
-        target.texture.as_image_copy(),
+        wgpu::TexelCopyTextureInfo {
+            origin: wgpu::Origin3d {
+                x: target.region.origin()[0],
+                y: target.region.origin()[1],
+                z: 0,
+            },
+            ..target.region.texture().as_image_copy()
+        },
         wgpu::Extent3d {
             width: w,
             height: h,
@@ -651,6 +1090,97 @@ fn padded_texture_data(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn region_bounds_reject_empty_overflow_and_outside_extent() {
+        assert!(validate_region_bounds([8, 9], [3, 4], [5, 5]).is_ok());
+        for (origin, size) in [
+            ([0, 0], [0, 1]),
+            ([8, 0], [1, 1]),
+            ([0, 8], [1, 2]),
+            ([u32::MAX, 0], [2, 1]),
+        ] {
+            assert!(validate_region_bounds([8, 9], origin, size).is_err());
+        }
+    }
+
+    #[test]
+    fn cropped_copies_preserve_pixel_correspondence_for_both_edges() {
+        // Compare interval clipping to independent enumeration of every requested
+        // pixel pair, including empty requests and both negative origins.
+        for src in -5..=6 {
+            for dst in -5..=6 {
+                for size in 0..=8 {
+                    let pairs: Vec<_> = (0..size as i32)
+                        .filter_map(|i| {
+                            ((0..3).contains(&(src + i)) && (0..4).contains(&(dst + i)))
+                                .then_some(((src + i) as u32, (dst + i) as u32))
+                        })
+                        .collect();
+                    let result = crop_copy([3, 1], [4, 1], [src, 0], [dst, 0], [size, 1]);
+                    match pairs.first() {
+                        None => assert_eq!(result, None),
+                        Some(&(s, d)) => assert_eq!(
+                            result,
+                            Some(CroppedCopy {
+                                src: [s, 0],
+                                dst: [d, 0],
+                                size: [pairs.len() as u32, 1]
+                            })
+                        ),
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            crop_copy([8, 7], [9, 8], [-2, 1], [1, -3], [10, 10]),
+            Some(CroppedCopy {
+                src: [0, 4],
+                dst: [3, 0],
+                size: [6, 3]
+            })
+        );
+        assert_eq!(
+            crop_copy([1, 1], [1, 1], [i32::MIN, 0], [i32::MAX, 0], [u32::MAX, 1]),
+            None
+        );
+    }
+
+    #[test]
+    fn layout_requirements_are_immutable_definition_metadata_not_content_ids() {
+        let desc = TextureDescriptor::new([1, 1], wgpu::TextureFormat::R8Unorm);
+        let source = TextureSource::new(desc, |_| Ok(()));
+        assert_eq!(source.output_layout(), PrepareOutputLayout::WholeResource);
+        let region_source = source
+            .clone()
+            .with_output_layout(PrepareOutputLayout::AnyRegion);
+        assert_eq!(source.id(), region_source.id());
+        let mut a = ResourcePool::default();
+        a.share_texture(&source).expect("first definition");
+        assert!(a.share_texture(&region_source).is_err());
+        let mut b = ResourcePool::default();
+        b.share_texture(&region_source)
+            .expect("independent definition");
+        assert!(a.import(&b).is_err());
+        assert_eq!(
+            a.texture(source.id())
+                .expect("unchanged definition")
+                .output_layout(),
+            PrepareOutputLayout::WholeResource
+        );
+        assert_eq!(
+            MeshSource::new(MeshDescriptor::triangles(3, 0), |_| Ok(()))
+                .with_output_layout(PrepareOutputLayout::AnyRegion)
+                .output_layout(),
+            PrepareOutputLayout::AnyRegion
+        );
+        assert_eq!(
+            MaskSource::new(desc, |_| Ok(()))
+                .with_output_layout(PrepareOutputLayout::AnyRegion)
+                .output_layout(),
+            PrepareOutputLayout::AnyRegion
+        );
+    }
 
     #[test]
     fn buffer_upload_rejects_unaligned_or_oversized_data_but_allows_empty() {

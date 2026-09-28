@@ -81,6 +81,7 @@ static QUAD: LazyLock<MeshSource> = LazyLock::new(|| {
             bytemuck::cast_slice(&vertices),
         )
     })
+    .with_output_layout(PrepareOutputLayout::AnyRegion)
 });
 
 /// Reusable framework storage. Call begin, invoke draw writers in paint order,

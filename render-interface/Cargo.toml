@@ -13,5 +13,8 @@ nalgebra.workspace = true
 bytemuck.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+futures.workspace = true
+
 [lints]
 workspace = true
