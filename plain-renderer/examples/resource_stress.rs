@@ -1,4 +1,4 @@
-//! UI-independent residency stress: cargo run -p scene-renderer --release
+//! UI-independent residency stress: cargo run -p plain-renderer --release
 //! --example resource_stress -- resource-stress. Outputs stay under target/.
 //! MATCHA_TEST_BACKEND selects vulkan or dx12. No optional device features.
 //!
@@ -12,8 +12,8 @@ mod allocations;
 #[path = "support/sources.rs"]
 mod sources;
 use gpu_utils::gpu::{Gpu, GpuDescriptor};
+use plain_renderer::{AtlasConfig, PlacementMode, PlainRenderer, PlainTarget, RenderStats};
 use render_interface::*;
-use scene_renderer::{AtlasConfig, PlacementMode, RenderStats, SceneRenderer, SceneTarget};
 use std::{
     fmt::Write,
     path::{Component, PathBuf},
@@ -101,7 +101,7 @@ fn fixed_scene(calls: &Calls) -> Scene {
     scene
 }
 fn render(
-    renderer: &mut SceneRenderer,
+    renderer: &mut PlainRenderer,
     device: &wgpu::Device,
     scene: &Scene,
     view: &wgpu::TextureView,
@@ -112,7 +112,7 @@ fn render(
     let (result, allocations) = allocations::measure(|| {
         renderer.render(
             scene,
-            SceneTarget {
+            PlainTarget {
                 view,
                 format: wgpu::TextureFormat::Rgba8UnormSrgb,
                 viewport: [SIZE[0] as f32, SIZE[1] as f32],
@@ -223,7 +223,7 @@ fn main() {
     report.push_str("label\trender_api_ms\tcompletion_wait_ms\tallocations\treallocations\trequested_bytes\tprepared\thits\tlogical_bytes\ttexture_pages\tmesh_pages\tpage_capacity_bytes\tscratch_retained_bytes\tscratch_peak_bytes\tparameter_bytes\tworking_bytes\tevicted\tover_budget_bytes\tdraws\tdraw_batches\tmask_passes\tbind_groups\n");
     let mut baseline = None;
     for mode in [PlacementMode::Dedicated, PlacementMode::Atlas] {
-        let mut renderer = SceneRenderer::new(&device, &queue);
+        let mut renderer = PlainRenderer::new(&device, &queue);
         renderer.set_placement_mode(mode);
         renderer
             .set_atlas_config(AtlasConfig {
@@ -396,7 +396,7 @@ fn main() {
             &mut report,
         );
         assert_eq!(drained.cache_bytes, 0);
-        assert_eq!(drained.placement, scene_renderer::PlacementStats::default());
+        assert_eq!(drained.placement, plain_renderer::PlacementStats::default());
         assert_eq!(drained.scratch_bytes, 0);
     }
     let error = futures::executor::block_on(validation.pop());

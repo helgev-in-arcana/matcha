@@ -70,7 +70,7 @@ pub(crate) struct Compositor {
 impl Compositor {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("scene resources"),
+            label: Some("plain renderer resources"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -94,12 +94,12 @@ impl Compositor {
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("scene layout"),
+            label: Some("plain renderer layout"),
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("scene compositor"),
+            label: Some("plain renderer compositor"),
             source: wgpu::ShaderSource::Wgsl(include_str!("compositor.wgsl").into()),
         });
         let color_pipeline = pipeline(
@@ -128,7 +128,7 @@ impl Compositor {
         );
         let clear_pipeline = pipeline(device, &pipeline_layout, &shader, COVERAGE, "color", None);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("scene clamp"),
+            label: Some("plain renderer clamp"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
@@ -263,7 +263,7 @@ impl Compositor {
         let entry = frame.storage.groups.entry(key).or_insert_with(|| {
             *created += 1;
             let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("scene resident pages"),
+                label: Some("plain renderer resident pages"),
                 layout: &self.layout,
                 entries: &[
                     wgpu::BindGroupEntry {
@@ -382,7 +382,7 @@ pub(crate) fn flush(frame: &mut DrawFrame) {
         let mut pass = frame
             .encoder
             .begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("scene ordered batch"),
+                label: Some("plain renderer ordered batch"),
                 color_attachments: &attachments,
                 ..Default::default()
             });
@@ -425,7 +425,7 @@ pub(crate) fn clear(
         },
     })];
     let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("scene clear"),
+        label: Some("plain renderer clear"),
         color_attachments: &attachments,
         ..Default::default()
     });
@@ -451,7 +451,7 @@ pub(crate) fn pipeline(
     blend: Option<wgpu::BlendState>,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("scene pipeline"),
+        label: Some("plain renderer pipeline"),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,

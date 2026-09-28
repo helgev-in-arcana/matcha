@@ -1,18 +1,18 @@
 //! Records one frame without submitting it. The facade submits only after all
 //! CPU callbacks succeed; resource publication follows the same boundary.
 use crate::compositor::plan::{DrawOp, DrawPlan};
-use crate::{RenderStats, SceneError, SceneTarget, compositor::*, plan::FramePlan, resources::*};
+use crate::{PlainError, PlainTarget, RenderStats, compositor::*, plan::FramePlan, resources::*};
 use render_interface::*;
 
 /// An unwind is transported to the submission owner only after the encoder and
 /// compositor workspace have been recovered. It is resumed there, never changed
 /// into a successful render or a provider's ordinary PrepareError.
 pub(crate) enum FrameFailure {
-    Recording(SceneError),
+    Recording(PlainError),
     Unwind(Box<dyn std::any::Any + Send>),
 }
-impl From<SceneError> for FrameFailure {
-    fn from(error: SceneError) -> Self {
+impl From<PlainError> for FrameFailure {
+    fn from(error: PlainError) -> Self {
         Self::Recording(error)
     }
 }
@@ -51,7 +51,7 @@ pub(crate) fn encode(
     resources: &mut ResourceStore,
     scene: &Scene,
     plan: &FramePlan,
-    target: SceneTarget<'_>,
+    target: PlainTarget<'_>,
     s: &Surfaces,
     stats: &mut RenderStats,
 ) -> Result<DrawFrame, FrameFailure> {
@@ -79,7 +79,7 @@ fn encode_planned(
     scene: &Scene,
     plan: &FramePlan,
     draw_plan: &DrawPlan,
-    target: SceneTarget<'_>,
+    target: PlainTarget<'_>,
     s: &Surfaces,
     stats: &mut RenderStats,
 ) -> Result<DrawFrame, FrameFailure> {
@@ -88,18 +88,18 @@ fn encode_planned(
         .checked_add(alignment.saturating_sub(1))
         .and_then(|size| size.checked_div(alignment))
         .and_then(|units| units.checked_mul(alignment))
-        .ok_or_else(|| SceneError::Invalid("draw parameter alignment overflow".into()))?;
+        .ok_or_else(|| PlainError::Invalid("draw parameter alignment overflow".into()))?;
     let uniform_count = draw_plan
         .uniform_count
         .checked_add(usize::from(target.initial.is_some()))
         .and_then(|count| count.checked_add(1))
         .and_then(|count| u64::try_from(count).ok())
-        .ok_or_else(|| SceneError::Invalid("draw operation count overflow".into()))?;
+        .ok_or_else(|| PlainError::Invalid("draw operation count overflow".into()))?;
     let uniform_size = stride
         .checked_mul(uniform_count)
-        .ok_or_else(|| SceneError::Invalid("draw parameter capacity overflow".into()))?;
+        .ok_or_else(|| PlainError::Invalid("draw parameter capacity overflow".into()))?;
     if uniform_size > device.limits().max_buffer_size || uniform_size > u64::from(u32::MAX) {
-        return Err(SceneError::Invalid("too many draw parameters".into()).into());
+        return Err(PlainError::Invalid("too many draw parameters".into()).into());
     }
     if compositor
         .parameter_buffer
@@ -118,7 +118,7 @@ fn encode_planned(
     }
     let mut frame = DrawFrame {
         encoder: device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("scene frame"),
+            label: Some("plain renderer frame"),
         }),
         uniforms: compositor
             .parameter_buffer
@@ -157,7 +157,7 @@ fn encode_planned(
         drop(frame.encoder);
         compositor.abort_workspace(frame.storage);
         return Err(
-            SceneError::Invalid("draw plan and recorded uniform count differ".into()).into(),
+            PlainError::Invalid("draw plan and recorded uniform count differ".into()).into(),
         );
     }
     Ok(frame)
@@ -171,11 +171,11 @@ fn record_operations(
     scene: &Scene,
     plan: &FramePlan,
     draw_plan: &DrawPlan,
-    target: SceneTarget<'_>,
+    target: PlainTarget<'_>,
     s: &Surfaces,
     stats: &mut RenderStats,
     frame: &mut DrawFrame,
-) -> Result<(), SceneError> {
+) -> Result<(), PlainError> {
     clear(&mut frame.encoder, &s.color.view, target.clear);
     let full = Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(
         target.viewport[0],

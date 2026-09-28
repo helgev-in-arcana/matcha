@@ -1,8 +1,8 @@
 //! GPU residency budgets and transient-output budgets have different lifetimes.
 //! These proofs observe generated content, not private eviction-policy types.
 use gpu_utils::gpu::{Gpu, GpuDescriptor};
+use plain_renderer::{PlainError, PlainRenderer, PlainTarget};
 use render_interface::*;
-use scene_renderer::{SceneError, SceneRenderer, SceneTarget};
 use std::sync::{
     Arc, Mutex, MutexGuard,
     atomic::{AtomicUsize, Ordering},
@@ -74,13 +74,13 @@ fn pixels(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -
     buffer.slice(..).get_mapped_range().to_vec()
 }
 fn render(
-    renderer: &mut SceneRenderer,
+    renderer: &mut PlainRenderer,
     scene: &Scene,
     target: &wgpu::Texture,
-) -> Result<(), SceneError> {
+) -> Result<(), PlainError> {
     renderer.render(
         scene,
-        SceneTarget {
+        PlainTarget {
             view: &target.create_view(&Default::default()),
             format: target.format(),
             viewport: [64., 64.],
@@ -135,7 +135,7 @@ fn least_recent_use_is_evicted_but_pool_presence_is_a_soft_retention_hint() {
     // Run both variants with fresh residency: equal hints choose the oldest
     // actual use; a retained definition can outweigh a newer absent definition.
     for keep_old_hint_only in [false, true] {
-        let mut backend = SceneRenderer::new(&device, &queue);
+        let mut backend = PlainRenderer::new(&device, &queue);
         let mesh = sources::unit_quad();
         let counts: [Arc<AtomicUsize>; 3] = std::array::from_fn(|_| Arc::new(AtomicUsize::new(0)));
         let a = texture([8, 8], [255, 0, 0, 255], &counts[0]);
@@ -217,7 +217,7 @@ fn zero_budget_protects_the_whole_frame_reference_set_across_phases() {
     let (device, queue) = gpu.context().expect("GPU ready");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let target = output(&device);
-    let mut backend = SceneRenderer::new(&device, &queue);
+    let mut backend = PlainRenderer::new(&device, &queue);
     backend.set_cache_budget(0);
     let mesh = sources::unit_quad();
     let calls_a = Arc::new(AtomicUsize::new(0));
@@ -262,7 +262,7 @@ fn sequential_equal_outputs_reuse_scratch_without_overwriting_prior_content() {
     let (device, queue) = gpu.context().expect("GPU ready");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let target = output(&device);
-    let mut backend = SceneRenderer::new(&device, &queue);
+    let mut backend = PlainRenderer::new(&device, &queue);
     backend.set_scratch_budget(1024);
     let mesh = sources::unit_quad();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -311,7 +311,7 @@ fn varying_size_churn_bounds_retained_scratch_and_abort_clears_outstanding_outpu
     let (device, queue) = gpu.context().expect("GPU ready");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let target = output(&device);
-    let mut backend = SceneRenderer::new(&device, &queue);
+    let mut backend = PlainRenderer::new(&device, &queue);
     const SCRATCH_BUDGET: u64 = 2048;
     backend.set_scratch_budget(SCRATCH_BUDGET);
     backend.set_cache_budget(0);
@@ -369,7 +369,7 @@ fn varying_size_churn_bounds_retained_scratch_and_abort_clears_outstanding_outpu
     let retry = scene(&mesh, &[&failing], &[failing.id()]);
     let error = render(&mut backend, &retry, &target);
     assert!(
-        matches!(error, Err(SceneError::Prepare { .. })),
+        matches!(error, Err(PlainError::Prepare { .. })),
         "{error:?}"
     );
     assert!(backend.stats().scratch_bytes <= SCRATCH_BUDGET);

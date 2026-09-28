@@ -3,8 +3,8 @@
 //! pixels additionally have direct expected values, so common compositor errors
 //! cannot make the comparison vacuously pass.
 use gpu_utils::gpu::{Gpu, GpuDescriptor};
+use plain_renderer::{AtlasConfig, PlacementMode, PlainError, PlainRenderer, PlainTarget};
 use render_interface::*;
-use scene_renderer::{AtlasConfig, PlacementMode, SceneError, SceneRenderer, SceneTarget};
 use std::sync::{
     Arc, Mutex, MutexGuard,
     atomic::{AtomicUsize, Ordering},
@@ -80,13 +80,13 @@ fn pixels(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -
 }
 
 fn render(
-    renderer: &mut SceneRenderer,
+    renderer: &mut PlainRenderer,
     scene: &Scene,
     target: &wgpu::Texture,
-) -> Result<(), SceneError> {
+) -> Result<(), PlainError> {
     renderer.render(
         scene,
-        SceneTarget {
+        PlainTarget {
             view: &target.create_view(&Default::default()),
             format: target.format(),
             viewport: [64., 64.],
@@ -258,13 +258,13 @@ fn shared_and_dedicated_placements_have_identical_pixels_and_lazy_regeneration()
         .expect("unused definition");
 
     let target = output(&device);
-    let mut dedicated = SceneRenderer::new(&device, &queue);
+    let mut dedicated = PlainRenderer::new(&device, &queue);
     dedicated.set_placement_mode(PlacementMode::Dedicated);
     render(&mut dedicated, &scene, &target).expect("dedicated oracle");
     let expected = pixels(&device, &queue, &target);
     let count = calls.load(Ordering::SeqCst);
     assert_eq!(dedicated.stats().prepared, count);
-    let mut atlas = SceneRenderer::new(&device, &queue);
+    let mut atlas = PlainRenderer::new(&device, &queue);
     atlas
         .set_atlas_config(AtlasConfig {
             texture_edge: 16,
@@ -352,7 +352,7 @@ fn rollback_proof(force_new_pages: bool, layout: PrepareOutputLayout) {
     let gpu = gpu();
     let (device, queue) = gpu.context().expect("GPU ready");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut backend = SceneRenderer::new(&device, &queue);
+    let mut backend = PlainRenderer::new(&device, &queue);
     backend
         .set_atlas_config(AtlasConfig {
             texture_edge: 16,
@@ -459,7 +459,7 @@ fn rollback_proof(force_new_pages: bool, layout: PrepareOutputLayout) {
     });
     let error = render(&mut backend, &next, &target);
     assert!(
-        matches!(error, Err(SceneError::Prepare { .. })),
+        matches!(error, Err(PlainError::Prepare { .. })),
         "{error:?}"
     );
     assert_eq!(

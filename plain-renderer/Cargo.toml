@@ -1,5 +1,5 @@
 [package]
-name = "scene-renderer"
+name = "plain-renderer"
 version.workspace = true
 edition = "2024"
 

@@ -1,6 +1,6 @@
 //! Device/descriptor checks precede recording, including warm-cache submissions.
 use crate::{
-    SceneError, SceneTarget,
+    PlainError, PlainTarget,
     resources::{Entry, Image, Mesh, ResourceStore, ValidationScratch},
 };
 use render_interface::*;
@@ -13,9 +13,9 @@ pub(crate) fn validate(
     device: &wgpu::Device,
     resources: &mut ResourceStore,
     scene: &Scene,
-    target: &SceneTarget<'_>,
-) -> Result<(), SceneError> {
-    let invalid = |msg: &str| SceneError::Invalid(msg.into());
+    target: &PlainTarget<'_>,
+) -> Result<(), PlainError> {
+    let invalid = |msg: &str| PlainError::Invalid(msg.into());
     let destination = target.view.texture();
     if destination.dimension() != wgpu::TextureDimension::D2
         || destination.depth_or_array_layers() != 1
@@ -101,10 +101,10 @@ fn validate_scene(
     textures: &HashMap<TextureId, Entry<Image>>,
     masks: &HashMap<MaskId, Entry<Image>>,
     scratch: &mut ValidationScratch,
-) -> Result<(), SceneError> {
+) -> Result<(), PlainError> {
     scratch.clear();
-    let invalid = |msg: &str| SceneError::Invalid(msg.into());
-    let check_mesh = |id| -> Result<(), SceneError> {
+    let invalid = |msg: &str| PlainError::Invalid(msg.into());
+    let check_mesh = |id| -> Result<(), PlainError> {
         let source = scene
             .resources
             .mesh(id)
@@ -136,7 +136,7 @@ fn validate_scene(
         }
         Ok(())
     };
-    let check_image = |d: &TextureDescriptor| -> Result<(), SceneError> {
+    let check_image = |d: &TextureDescriptor| -> Result<(), PlainError> {
         validate_texture_usages(d.usages)?;
         if d.size
             .iter()
@@ -222,7 +222,7 @@ fn validate_scene(
 fn validate_target_format(
     texture_format: wgpu::TextureFormat,
     view_format: wgpu::TextureFormat,
-) -> Result<(), SceneError> {
+) -> Result<(), PlainError> {
     if !matches!(
         view_format,
         wgpu::TextureFormat::Rgba8Unorm
@@ -231,20 +231,20 @@ fn validate_target_format(
             | wgpu::TextureFormat::Bgra8UnormSrgb
             | wgpu::TextureFormat::Rgba16Float
     ) {
-        return Err(SceneError::Invalid("unsupported destination format".into()));
+        return Err(PlainError::Invalid("unsupported destination format".into()));
     }
     // wgpu does not expose a view's descriptor. The caller supplies its actual
     // format; verify the compatible format family without pretending to inspect
     // the view. View creation itself validates that reinterpretation was enabled.
     if view_format.remove_srgb_suffix() != texture_format.remove_srgb_suffix() {
-        return Err(SceneError::Invalid(
+        return Err(PlainError::Invalid(
             "destination view format is incompatible with its texture".into(),
         ));
     }
     Ok(())
 }
 
-fn validate_mesh_usages(usages: wgpu::BufferUsages) -> Result<(), SceneError> {
+fn validate_mesh_usages(usages: wgpu::BufferUsages) -> Result<(), PlainError> {
     let supported = wgpu::BufferUsages::COPY_SRC
         | wgpu::BufferUsages::COPY_DST
         | wgpu::BufferUsages::VERTEX
@@ -256,14 +256,14 @@ fn validate_mesh_usages(usages: wgpu::BufferUsages) -> Result<(), SceneError> {
     // Outputs are not mappable. Ray-tracing inputs and unknown/future flags are
     // deliberately outside this backend's supported preparation capabilities.
     if !supported.contains(usages) {
-        return Err(SceneError::Invalid("unsupported mesh output usage".into()));
+        return Err(PlainError::Invalid("unsupported mesh output usage".into()));
     }
     Ok(())
 }
 
-fn validate_texture_usages(usages: wgpu::TextureUsages) -> Result<(), SceneError> {
+fn validate_texture_usages(usages: wgpu::TextureUsages) -> Result<(), PlainError> {
     if !wgpu::TextureUsages::all().contains(usages) {
-        return Err(SceneError::Invalid("unknown texture output usage".into()));
+        return Err(PlainError::Invalid("unknown texture output usage".into()));
     }
     Ok(())
 }

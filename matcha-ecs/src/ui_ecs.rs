@@ -144,7 +144,7 @@ where
     F: Fn(&M, &mut Scope) + Send + Sync + 'static,
     R: Fn(&mut M, Msg) + Send + Sync + 'static,
 {
-    /// Build a `UiEcs`: initialise the GPU and Scene renderer, insert them
+    /// Build a `UiEcs`: initialise the GPU and plain renderer, insert them
     /// (plus the initial model) as world resources, and wire the render
     /// schedule. `reducer` applies a `Msg` dispatched by a click (`device_event`)
     /// to the model, the same way `ModelHandle::update` applies a queued

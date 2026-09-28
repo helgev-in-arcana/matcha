@@ -1,8 +1,8 @@
 //! A caller may catch a provider panic; unsubmitted cache entries must not then
 //! masquerade as generated content. Panic payloads and old submitted pixels survive.
 use gpu_utils::gpu::{Gpu, GpuDescriptor};
+use plain_renderer::{PlacementMode, PlainRenderer, PlainTarget};
 use render_interface::*;
-use scene_renderer::{PlacementMode, SceneRenderer, SceneTarget};
 use std::{
     panic::{AssertUnwindSafe, catch_unwind, panic_any},
     sync::{
@@ -34,11 +34,11 @@ fn target(device: &wgpu::Device) -> wgpu::Texture {
         view_formats: &[],
     })
 }
-fn render(renderer: &mut SceneRenderer, scene: &Scene, target: &wgpu::Texture) {
+fn render(renderer: &mut PlainRenderer, scene: &Scene, target: &wgpu::Texture) {
     renderer
         .render(
             scene,
-            SceneTarget {
+            PlainTarget {
                 view: &target.create_view(&Default::default()),
                 format: target.format(),
                 viewport: [4., 4.],
@@ -108,7 +108,7 @@ fn provider_unwind_rolls_back_all_modes_and_resource_kinds_then_resumes_original
             PrepareOutputLayout::AnyRegion,
         ] {
             for kind in ["mesh", "texture", "mask"] {
-                let mut renderer = SceneRenderer::new(&device, &queue);
+                let mut renderer = PlainRenderer::new(&device, &queue);
                 renderer.set_placement_mode(mode);
                 let output = target(&device);
                 let mesh = sources::unit_quad().with_output_layout(layout);

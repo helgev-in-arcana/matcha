@@ -19,7 +19,7 @@ use allocator::{
     RectangleAllocator, RectangleToken,
 };
 
-use crate::SceneError;
+use crate::PlainError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AtlasConfig {
@@ -158,15 +158,15 @@ pub(crate) struct Placement {
     buffers: Vec<Option<BufferPage>>,
 }
 
-fn invalid(message: impl Into<String>) -> SceneError {
-    SceneError::Invalid(message.into())
+fn invalid(message: impl Into<String>) -> PlainError {
+    PlainError::Invalid(message.into())
 }
 
-fn allocation_error(error: AllocationError) -> SceneError {
+fn allocation_error(error: AllocationError) -> PlainError {
     invalid(format!("placement allocation: {error}"))
 }
 
-fn aligned_buffer_size(bytes: u64) -> Result<u64, SceneError> {
+fn aligned_buffer_size(bytes: u64) -> Result<u64, PlainError> {
     if bytes == 0 {
         return Err(invalid("placement buffer size must be nonzero"));
     }
@@ -179,7 +179,7 @@ fn aligned_buffer_size(bytes: u64) -> Result<u64, SceneError> {
 pub(crate) fn validate_config(
     device: &wgpu::Device,
     config: AtlasConfig,
-) -> Result<(), SceneError> {
+) -> Result<(), PlainError> {
     let limits = device.limits();
     if config.texture_edge == 0
         || config.texture_edge > limits.max_texture_dimension_2d
@@ -228,7 +228,7 @@ impl Placement {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         size: [u32; 2],
-    ) -> Result<TextureLease, SceneError> {
+    ) -> Result<TextureLease, PlainError> {
         self.texture_with_usage(device, format, size, wgpu::TextureUsages::empty())
     }
 
@@ -238,7 +238,7 @@ impl Placement {
         format: wgpu::TextureFormat,
         size: [u32; 2],
         usages: wgpu::TextureUsages,
-    ) -> Result<TextureLease, SceneError> {
+    ) -> Result<TextureLease, PlainError> {
         validate_config(device, self.config)?;
         let usages = usages
             | wgpu::TextureUsages::TEXTURE_BINDING
@@ -290,7 +290,7 @@ impl Placement {
         let mut allocator = RectangleAllocator::new(page_size).map_err(allocation_error)?;
         let allocation = allocator.allocate(size).map_err(allocation_error)?;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("scene resident texture page"),
+            label: Some("plain renderer resident texture page"),
             size: wgpu::Extent3d {
                 width: page_size[0],
                 height: page_size[1],
@@ -325,7 +325,7 @@ impl Placement {
         &mut self,
         device: &wgpu::Device,
         size: u64,
-    ) -> Result<BufferLease, SceneError> {
+    ) -> Result<BufferLease, PlainError> {
         self.buffer_with_usage(
             device,
             size,
@@ -340,7 +340,7 @@ impl Placement {
         size: u64,
         usages: wgpu::BufferUsages,
         class: BufferClass,
-    ) -> Result<BufferLease, SceneError> {
+    ) -> Result<BufferLease, PlainError> {
         validate_config(device, self.config)?;
         let usages = usages | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
         let alignment = buffer_alignment(device, usages);
@@ -365,7 +365,7 @@ impl Placement {
             .allocate(size, alignment)
             .map_err(allocation_error)?;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("scene resident mesh page"),
+            label: Some("plain renderer resident mesh page"),
             size: capacity,
             usage: usages,
             mapped_at_creation: false,
@@ -384,7 +384,7 @@ impl Placement {
             .lease(index, allocation))
     }
 
-    pub(crate) fn release_texture(&mut self, lease: TextureLease) -> Result<(), SceneError> {
+    pub(crate) fn release_texture(&mut self, lease: TextureLease) -> Result<(), PlainError> {
         let page = self
             .textures
             .get_mut(lease.page)
@@ -397,7 +397,7 @@ impl Placement {
         Ok(())
     }
 
-    pub(crate) fn release_buffer(&mut self, lease: BufferLease) -> Result<(), SceneError> {
+    pub(crate) fn release_buffer(&mut self, lease: BufferLease) -> Result<(), PlainError> {
         let page = self
             .buffers
             .get_mut(lease.page)

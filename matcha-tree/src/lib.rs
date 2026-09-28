@@ -1,7 +1,7 @@
 //! Tree UI frontend with framework-owned Scene assembly.
 //!
 //! Widgets use Draw from render-interface's optional `scene-builder` feature
-//! and may reuse owned immutable Sources. Each window owns its Frame and SceneRenderer;
+//! and may reuse owned immutable Sources. Each window owns its Frame and PlainRenderer;
 //! texture/mesh placement and GPU residency are private to the backend. Redraw
 //! requests do not retain a second widget-local rendering tree.
 

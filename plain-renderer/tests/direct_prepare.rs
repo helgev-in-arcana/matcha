@@ -1,8 +1,8 @@
 //! Real provider work in shared placements: render attachments, storage meshes,
 //! warm reuse and relocation, with exact pixels and preparation-copy accounting.
 use gpu_utils::gpu::{Gpu, GpuDescriptor};
+use plain_renderer::{AtlasConfig, PlacementMode, PlainRenderer, PlainTarget};
 use render_interface::*;
-use scene_renderer::{AtlasConfig, PlacementMode, SceneRenderer, SceneTarget};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
@@ -127,11 +127,11 @@ fn output(device: &wgpu::Device) -> wgpu::Texture {
     })
 }
 
-fn render(renderer: &mut SceneRenderer, scene: &Scene, texture: &wgpu::Texture) {
+fn render(renderer: &mut PlainRenderer, scene: &Scene, texture: &wgpu::Texture) {
     renderer
         .render(
             scene,
-            SceneTarget {
+            PlainTarget {
                 view: &texture.create_view(&Default::default()),
                 format: texture.format(),
                 viewport: [16., 8.],
@@ -218,7 +218,7 @@ fn region_providers_write_shared_outputs_without_copies_and_survive_relocation()
                     .objects
                     .push(Object::new(mesh, image, transform));
             }
-            let mut renderer = SceneRenderer::new(&device, &queue);
+            let mut renderer = PlainRenderer::new(&device, &queue);
             renderer
                 .set_atlas_config(AtlasConfig {
                     texture_edge: 16,

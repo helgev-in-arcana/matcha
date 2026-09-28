@@ -33,9 +33,9 @@ use matcha_tree_widgets::{
     types::{grow_size::GrowSize, size::Size},
     widget::{image::Image, plain::Plain},
 };
+use plain_renderer::{PlainRenderer, PlainTarget};
 use render_interface::Frame;
 use render_interface::{Matrix4, TextureId};
-use scene_renderer::{SceneRenderer, SceneTarget};
 
 const EDGE: u32 = 128;
 
@@ -49,7 +49,7 @@ fn fractional_outputs_preserve_pixel_scale_and_natural_images_use_their_actual_r
     let _serial = serial();
     let h = Harness::new();
     let validation = h.device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut renderer = SceneRenderer::new(&h.device, &h.queue);
+    let mut renderer = PlainRenderer::new(&h.device, &h.queue);
     let mut frame = Frame::default();
     let stripe = Polygon::new(Mesh::TriangleList {
         vertices: [
@@ -204,11 +204,11 @@ impl Harness {
         });
         frame.finish().expect("valid tree submission");
     }
-    fn render(&self, renderer: &mut SceneRenderer, frame: &Frame) -> Vec<u8> {
+    fn render(&self, renderer: &mut PlainRenderer, frame: &Frame) -> Vec<u8> {
         renderer
             .render(
                 &frame.scene,
-                SceneTarget {
+                PlainTarget {
                     view: &self.output.create_view(&Default::default()),
                     format: self.output.format(),
                     viewport: [EDGE as f32; 2],
@@ -324,7 +324,7 @@ fn stock_sources_reuse_change_prune_and_relocate_through_the_real_tree() {
     let _serial = serial();
     let h = Harness::new();
     let validation = h.device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut renderer = SceneRenderer::new(&h.device, &h.queue);
+    let mut renderer = PlainRenderer::new(&h.device, &h.queue);
     let mut frame = Frame::default();
     let size = [Size::px(64.), Size::px(64.)];
     let mut view = Row::new().push(
@@ -419,7 +419,7 @@ fn gradients_private_clears_and_png_alpha_keep_their_visual_meaning() {
     let _serial = serial();
     let h = Harness::new();
     let validation = h.device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut renderer = SceneRenderer::new(&h.device, &h.queue);
+    let mut renderer = PlainRenderer::new(&h.device, &h.queue);
     let mut frame = Frame::default();
     let triangle = Polygon::new(Mesh::TriangleList {
         vertices: vec![
@@ -495,7 +495,7 @@ fn row_grid_position_resize_and_visibility_emit_resolved_geometry() {
     let _serial = serial();
     let h = Harness::new();
     let validation = h.device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut renderer = SceneRenderer::new(&h.device, &h.queue);
+    let mut renderer = PlainRenderer::new(&h.device, &h.queue);
     let mut frame = Frame::default();
     let relative = Plain::new().size([Size::vw(0.5), Size::vh(0.25)]);
     for viewport in [[64.; 2], [128.; 2]] {

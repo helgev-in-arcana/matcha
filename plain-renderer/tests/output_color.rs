@@ -2,8 +2,8 @@
 //! canvas presentation. In particular, sRGB encoding must not affect alpha or
 //! become unconditional gamma encoding for linear offscreen render targets.
 use gpu_utils::gpu::{Gpu, GpuDescriptor};
+use plain_renderer::{PlainRenderer, PlainTarget};
 use render_interface::*;
-use scene_renderer::{SceneRenderer, SceneTarget};
 
 #[path = "../examples/support/sources.rs"]
 #[allow(dead_code)]
@@ -38,7 +38,7 @@ fn float_color(scene: &mut Scene, rgba: [f64; 4]) -> TextureId {
 fn output_bytes(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    renderer: &mut SceneRenderer,
+    renderer: &mut PlainRenderer,
     scene: &Scene,
     storage: wgpu::TextureFormat,
     format: wgpu::TextureFormat,
@@ -65,7 +65,7 @@ fn output_bytes(
     renderer
         .render(
             scene,
-            SceneTarget {
+            PlainTarget {
                 view: &view,
                 format,
                 viewport: [WIDTH as f32, 1.],
@@ -125,7 +125,7 @@ fn linear_srgb_and_reinterpreted_outputs_preserve_their_numeric_and_alpha_contra
     .expect("real GPU required for colour encoding proof");
     let (device, queue) = gpu.context().expect("GPU ready");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut renderer = SceneRenderer::new(&device, &queue);
+    let mut renderer = PlainRenderer::new(&device, &queue);
     let mut scene = Scene::default();
     let mesh = scene
         .resources

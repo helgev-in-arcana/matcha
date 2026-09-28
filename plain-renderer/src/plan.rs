@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use render_interface::{MaskId, MeshId, Scene, TextureId};
 
-use crate::SceneError;
+use crate::PlainError;
 
 #[derive(Default)]
 pub(crate) struct PhasePlan {
@@ -24,12 +24,12 @@ pub(crate) struct FramePlan {
 
 impl FramePlan {
     #[cfg(test)]
-    pub(crate) fn build(scene: &Scene) -> Result<Self, SceneError> {
+    pub(crate) fn build(scene: &Scene) -> Result<Self, PlainError> {
         let mut plan = Self::default();
         plan.rebuild(scene)?;
         Ok(plan)
     }
-    pub(crate) fn rebuild(&mut self, scene: &Scene) -> Result<(), SceneError> {
+    pub(crate) fn rebuild(&mut self, scene: &Scene) -> Result<(), PlainError> {
         self.meshes.clear();
         self.textures.clear();
         self.masks.clear();
@@ -44,7 +44,7 @@ impl FramePlan {
         // Check topology first, so following a parent is finite and in bounds.
         for (index, mask) in scene.pixel_masks.iter().enumerate() {
             if mask.parent.is_some_and(|p| p.0 as usize >= index) {
-                return Err(SceneError::Invalid("mask parent must precede child".into()));
+                return Err(PlainError::Invalid("mask parent must precede child".into()));
             }
         }
         for (phase, plan) in scene.phases.iter().zip(&mut self.phases) {
@@ -58,7 +58,7 @@ impl FramePlan {
                 let mut index = object.mask;
                 while let Some(current) = index {
                     let mask = scene.pixel_masks.get(current.0 as usize).ok_or_else(|| {
-                        SceneError::Invalid("object mask index out of bounds".into())
+                        PlainError::Invalid("object mask index out of bounds".into())
                     })?;
                     if !self.visited_masks.insert(current) {
                         break;

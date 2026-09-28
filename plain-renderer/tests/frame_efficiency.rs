@@ -2,8 +2,8 @@
 //! once per possible ancestor of every object. Reusable frame state must also
 //! survive resource replacement and aborted preparation.
 use gpu_utils::gpu::{Gpu, GpuDescriptor};
+use plain_renderer::{PlacementMode, PlainError, PlainRenderer, PlainTarget};
 use render_interface::*;
-use scene_renderer::{PlacementMode, SceneError, SceneRenderer, SceneTarget};
 use std::sync::{
     Arc, Mutex, MutexGuard,
     atomic::{AtomicUsize, Ordering},
@@ -88,13 +88,13 @@ fn pixels(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -
         .collect()
 }
 fn render(
-    renderer: &mut SceneRenderer,
+    renderer: &mut PlainRenderer,
     scene: &Scene,
     target: &wgpu::Texture,
-) -> Result<(), SceneError> {
+) -> Result<(), PlainError> {
     renderer.render(
         scene,
-        SceneTarget {
+        PlainTarget {
             view: &target.create_view(&Default::default()),
             format: target.format(),
             viewport: [16., 16.],
@@ -168,7 +168,7 @@ fn ten_thousand_objects_share_one_hundred_masks_with_a_small_uniform_arena() {
     let gpu = gpu();
     let (device, queue) = gpu.context().expect("GPU ready");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut backend = SceneRenderer::new(&device, &queue);
+    let mut backend = PlainRenderer::new(&device, &queue);
     let target = output(&device, 16);
     const OBJECTS: usize = 10_000;
     const DEPTH: u32 = 100;
@@ -224,7 +224,7 @@ fn workspace_and_bind_groups_recover_after_resize_cache_replacement_and_prepare_
     let gpu = gpu();
     let (device, queue) = gpu.context().expect("GPU ready");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut backend = SceneRenderer::new(&device, &queue);
+    let mut backend = PlainRenderer::new(&device, &queue);
     let mut scene = scene(4, 8);
     let small = output(&device, 16);
     render(&mut backend, &scene, &small).expect("first frame");
@@ -286,7 +286,7 @@ fn workspace_and_bind_groups_recover_after_resize_cache_replacement_and_prepare_
     scene.phases[0].objects[0].texture = texture;
     let error = render(&mut backend, &scene, &target);
     assert!(
-        matches!(error, Err(SceneError::Prepare { .. })),
+        matches!(error, Err(PlainError::Prepare { .. })),
         "{error:?}"
     );
     assert_color(&device, &queue, &target);

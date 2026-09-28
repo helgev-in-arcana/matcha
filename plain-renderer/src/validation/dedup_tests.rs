@@ -42,7 +42,7 @@ fn repeated_scene() -> (Scene, MeshId) {
     (scene, mesh)
 }
 
-fn check(scene: &Scene, scratch: &mut ValidationScratch) -> Result<(), SceneError> {
+fn check(scene: &Scene, scratch: &mut ValidationScratch) -> Result<(), PlainError> {
     validate_scene(
         scene,
         &wgpu::Limits::default(),

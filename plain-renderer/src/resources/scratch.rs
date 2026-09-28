@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use render_interface::{TextureDescriptor, wgpu};
 
 use super::{Image, make_image};
-use crate::SceneError;
+use crate::PlainError;
 
 const DEFAULT_RETAINED_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -108,9 +108,9 @@ impl ScratchPool {
     /// Start per-frame counters while preserving bounded reusable outputs.
     /// An unreturned output requires explicit abort after the previous recording
     /// is abandoned; silently zeroing its accounting could hide a lifetime bug.
-    pub(crate) fn begin_frame(&mut self) -> Result<(), SceneError> {
+    pub(crate) fn begin_frame(&mut self) -> Result<(), PlainError> {
         if !self.image_loans.is_empty() || !self.buffer_loans.is_empty() {
-            return Err(SceneError::Invalid(
+            return Err(PlainError::Invalid(
                 "scratch outputs remain checked out; return them or reconcile an aborted recording"
                     .into(),
             ));
@@ -225,7 +225,7 @@ impl ScratchPool {
         } else {
             self.stats.buffer_allocations += 1;
             device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("scene logical scratch output"),
+                label: Some("plain renderer logical scratch output"),
                 size,
                 usage,
                 mapped_at_creation: false,

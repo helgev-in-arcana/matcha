@@ -19,8 +19,8 @@ use matcha_ecs_widgets::{
     shape::{CoverageKey, ShapeCtx, rasterize_box},
 };
 use parking_lot::Mutex;
+use plain_renderer::{PlainRenderer, PlainTarget};
 use render_interface::*;
-use scene_renderer::{SceneRenderer, SceneTarget};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -283,7 +283,7 @@ fn verify_framework_order(device: &wgpu::Device, queue: &wgpu::Queue, directory:
             .render_extracted(
                 &items,
                 &ClipArena::default(),
-                SceneTarget {
+                PlainTarget {
                     view: &view,
                     format: view.texture().format(),
                     viewport: [32., 16.],
@@ -343,7 +343,7 @@ fn verify_framework_order(device: &wgpu::Device, queue: &wgpu::Queue, directory:
             .backend
             .render(
                 &renderer.frame.scene,
-                SceneTarget {
+                PlainTarget {
                     view: &view,
                     format: view.texture().format(),
                     viewport: [32., 16.],
@@ -423,7 +423,7 @@ fn main() {
     .expect("real GPU");
     let (device, queue) = gpu.context().expect("GPU ready");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut backend = SceneRenderer::new(&device, &queue);
+    let mut backend = PlainRenderer::new(&device, &queue);
     let mut report = format!("Adapter: {:?}\n", gpu.adapter().get_info());
     let mut world = World::new();
     let entity = world.spawn_empty().id();
@@ -462,7 +462,7 @@ fn main() {
         backend
             .render(
                 &frame.scene,
-                SceneTarget {
+                PlainTarget {
                     view: &output.create_view(&Default::default()),
                     format: output.format(),
                     viewport: ctx.size,
@@ -551,7 +551,7 @@ fn main() {
             .render_extracted(
                 &frame.items,
                 &frame.clips,
-                SceneTarget {
+                PlainTarget {
                     view: &output_view,
                     format: output_view.texture().format(),
                     viewport: [512., 176.],
@@ -600,7 +600,7 @@ fn main() {
         .backend
         .render(
             &renderer.frame.scene,
-            SceneTarget {
+            PlainTarget {
                 view: &output_view,
                 format: output_view.texture().format(),
                 viewport: [512., 176.],
@@ -644,7 +644,7 @@ fn main() {
         .backend
         .render(
             &renderer.frame.scene,
-            SceneTarget {
+            PlainTarget {
                 view: &output_view,
                 format: output_view.texture().format(),
                 viewport: [512., 176.],
@@ -699,7 +699,7 @@ fn main() {
         .render_extracted(
             &frame.items,
             &frame.clips,
-            SceneTarget {
+            PlainTarget {
                 view: &output_view,
                 format: output_view.texture().format(),
                 viewport: [512., 176.],

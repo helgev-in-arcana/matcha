@@ -6,7 +6,7 @@
 //! of `(RenderItem, transform)` into a [`RenderSnapshot`], and hands it to a
 //! [`RenderDriver`]. The default [`ThreadDriver`] forwards each snapshot to a
 //! per-window worker thread that invokes lightweight draw writers, calls
-//! [`SceneRenderer::render`], and presents. The `RenderItem` builders run on
+//! [`PlainRenderer::render`], and presents. The `RenderItem` builders run on
 //! that worker thread, not the main thread.
 //!
 //! [`InlineDriver`] runs the same `build_and_present` synchronously; it exists to
@@ -18,9 +18,9 @@ use bevy_ecs::{entity::Entity, world::World};
 use matcha_window::window::WindowId;
 use nalgebra::Matrix4;
 use parking_lot::{Condvar, Mutex};
+use plain_renderer::{PlainError, PlainRenderer, PlainTarget};
 use render_interface::PixelMaskIndex;
 use render_interface::{MaskDescriptor, MaskSource, MeshSource, PixelMask};
-use scene_renderer::{SceneError, SceneRenderer, SceneTarget};
 
 use crate::{
     clip::ClipArena,
@@ -87,7 +87,7 @@ pub struct RenderSnapshot {
 /// without moving Sources or sharing each Source through an Arc.
 pub struct GuiRenderer {
     pub frame: crate::scene::Frame,
-    pub backend: SceneRenderer,
+    pub backend: PlainRenderer,
     quad: MeshSource,
     clip: MaskSource,
 }
@@ -108,7 +108,7 @@ impl GuiRenderer {
         .with_output_layout(render_interface::PrepareOutputLayout::AnyRegion);
         Self {
             frame: crate::scene::Frame::default(),
-            backend: SceneRenderer::new(device, queue),
+            backend: PlainRenderer::new(device, queue),
             quad: crate::scene::unit_quad(),
             clip,
         }
@@ -119,8 +119,8 @@ impl GuiRenderer {
         &mut self,
         items: &[RenderItemSnapshot],
         clips: &ClipArena,
-        target: SceneTarget<'_>,
-    ) -> Result<(), SceneError> {
+        target: PlainTarget<'_>,
+    ) -> Result<(), PlainError> {
         self.assemble(items, clips, target.viewport)?;
         self.backend.render(&self.frame.scene, target)
     }
@@ -131,7 +131,7 @@ impl GuiRenderer {
         items: &[RenderItemSnapshot],
         clips: &ClipArena,
         viewport: [f32; 2],
-    ) -> Result<(), SceneError> {
+    ) -> Result<(), PlainError> {
         self.frame.begin();
         {
             let mut draw = self.frame.draw(Matrix4::identity(), None, 1.);
@@ -161,7 +161,7 @@ impl GuiRenderer {
                     .draw(item.transform, item.clip.map(PixelMaskIndex), item.opacity);
             (item.builder)(&ctx, &mut draw);
         }
-        self.frame.finish().map_err(SceneError::Invalid)
+        self.frame.finish().map_err(PlainError::Invalid)
     }
 }
 
@@ -247,7 +247,7 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
     if let Err(e) = renderer.render_extracted(
         &items,
         &clips,
-        SceneTarget {
+        PlainTarget {
             view: &view,
             format,
             viewport: viewport_size,
@@ -255,7 +255,7 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
             initial: None,
         },
     ) {
-        log::error!("Scene render failed for window {window_id:?}: {e}");
+        log::error!("Plain renderer failed for window {window_id:?}: {e}");
         return;
     }
 

@@ -1,8 +1,8 @@
 //! Invalid CPU input must fail before preparation. A failed preparation must
 //! preserve submitted pixels and old residency while discarding new residency.
 use gpu_utils::gpu::{Gpu, GpuDescriptor};
+use plain_renderer::{PlainError, PlainRenderer, PlainTarget};
 use render_interface::*;
-use scene_renderer::{SceneError, SceneRenderer, SceneTarget};
 use std::sync::{
     Arc, Mutex, MutexGuard,
     atomic::{AtomicUsize, Ordering},
@@ -78,13 +78,13 @@ fn pixels(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -
 }
 
 fn render(
-    renderer: &mut SceneRenderer,
+    renderer: &mut PlainRenderer,
     scene: &Scene,
     texture: &wgpu::Texture,
-) -> Result<(), SceneError> {
+) -> Result<(), PlainError> {
     renderer.render(
         scene,
-        SceneTarget {
+        PlainTarget {
             view: &texture.create_view(&Default::default()),
             format: texture.format(),
             viewport: [64., 64.],
@@ -167,7 +167,7 @@ fn invalid_references_and_nonfinite_values_fail_before_any_generator_runs() {
     let gpu = gpu();
     let (device, queue) = gpu.context().expect("initialized GPU");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut renderer = SceneRenderer::new(&device, &queue);
+    let mut renderer = PlainRenderer::new(&device, &queue);
     let target = output(&device);
     let baseline = Fixture::new([255, 0, 0, 255]);
     render(&mut renderer, &baseline.scene, &target).expect("baseline");
@@ -228,7 +228,7 @@ fn invalid_references_and_nonfinite_values_fail_before_any_generator_runs() {
         };
         let error = render(&mut renderer, &fixture.scene, &target);
         assert!(
-            matches!(error, Err(SceneError::Invalid(_))),
+            matches!(error, Err(PlainError::Invalid(_))),
             "{name}: {error:?}"
         );
         assert_eq!(
@@ -255,7 +255,7 @@ fn warm_cache_rejects_changed_descriptors_for_all_three_resource_kinds() {
     let gpu = gpu();
     let (device, queue) = gpu.context().expect("initialized GPU");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut renderer = SceneRenderer::new(&device, &queue);
+    let mut renderer = PlainRenderer::new(&device, &queue);
     let target = output(&device);
     let mut fixture = Fixture::new([255, 0, 0, 255]);
     render(&mut renderer, &fixture.scene, &target).expect("populate cache");
@@ -314,7 +314,7 @@ fn warm_cache_rejects_changed_descriptors_for_all_three_resource_kinds() {
         }
         let error = render(&mut renderer, &fixture.scene, &target);
         assert!(
-            matches!(error, Err(SceneError::Invalid(_))),
+            matches!(error, Err(PlainError::Invalid(_))),
             "kind {kind}: {error:?}"
         );
         assert_eq!(before, pixels(&device, &queue, &target));
@@ -355,7 +355,7 @@ fn prepare_failure_preserves_old_residency_and_rolls_back_every_new_resource_kin
     let gpu = gpu();
     let (device, queue) = gpu.context().expect("initialized GPU");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut renderer = SceneRenderer::new(&device, &queue);
+    let mut renderer = PlainRenderer::new(&device, &queue);
     let target = output(&device);
     let old = Fixture::new([255, 0, 0, 255]);
     render(&mut renderer, &old.scene, &target).expect("old submitted frame");
@@ -385,7 +385,7 @@ fn prepare_failure_preserves_old_residency_and_rolls_back_every_new_resource_kin
     });
     let error = render(&mut renderer, &new.scene, &target);
     assert!(
-        matches!(error, Err(SceneError::Prepare { .. })),
+        matches!(error, Err(PlainError::Prepare { .. })),
         "{error:?}"
     );
     assert!(
@@ -439,7 +439,7 @@ fn srgb_reinterpretation_uses_declared_view_format_and_rejects_incompatible_base
     let gpu = gpu();
     let (device, queue) = gpu.context().expect("initialized GPU");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut renderer = SceneRenderer::new(&device, &queue);
+    let mut renderer = PlainRenderer::new(&device, &queue);
     let make_target = |format, view_formats: &[wgpu::TextureFormat]| {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some("sRGB view proof"),
@@ -472,7 +472,7 @@ fn srgb_reinterpretation_uses_declared_view_format_and_rejects_incompatible_base
     renderer
         .render(
             &fixture.scene,
-            SceneTarget {
+            PlainTarget {
                 view: &srgb_view,
                 format: wgpu::TextureFormat::Rgba8UnormSrgb,
                 viewport: [64., 64.],
@@ -492,7 +492,7 @@ fn srgb_reinterpretation_uses_declared_view_format_and_rejects_incompatible_base
 
     let error = renderer.render(
         &fixture.scene,
-        SceneTarget {
+        PlainTarget {
             view: &srgb_view,
             format: wgpu::TextureFormat::Bgra8UnormSrgb,
             viewport: [64., 64.],
@@ -501,7 +501,7 @@ fn srgb_reinterpretation_uses_declared_view_format_and_rejects_incompatible_base
         },
     );
     assert!(
-        matches!(error, Err(SceneError::Invalid(_))),
+        matches!(error, Err(PlainError::Invalid(_))),
         "a declaration with incompatible base format is a CPU error: {error:?}"
     );
     assert_eq!(

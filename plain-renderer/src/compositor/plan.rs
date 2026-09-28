@@ -15,7 +15,7 @@
 use render_interface::{MeshDescriptor, MeshId, Scene};
 
 use super::{intersection, mask_slot, pixel_bounds};
-use crate::SceneError;
+use crate::PlainError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DrawOp {
@@ -52,12 +52,12 @@ pub(crate) struct DrawPlan {
     mask_bounds: Vec<[u32; 4]>,
 }
 
-fn descriptor(scene: &Scene, id: MeshId) -> Result<&MeshDescriptor, SceneError> {
+fn descriptor(scene: &Scene, id: MeshId) -> Result<&MeshDescriptor, PlainError> {
     scene
         .resources
         .mesh(id)
         .map(|source| source.descriptor())
-        .ok_or_else(|| SceneError::Invalid("draw plan references a missing mesh definition".into()))
+        .ok_or_else(|| PlainError::Invalid("draw plan references a missing mesh definition".into()))
 }
 
 impl DrawPlan {
@@ -66,7 +66,7 @@ impl DrawPlan {
         scene: &Scene,
         viewport: [f32; 2],
         size: [u32; 2],
-    ) -> Result<(), SceneError> {
+    ) -> Result<(), PlainError> {
         for phase in &mut self.phases {
             phase.clear();
         }
@@ -105,13 +105,13 @@ impl DrawPlan {
         scene: &Scene,
         viewport: [f32; 2],
         size: [u32; 2],
-    ) -> Result<(), SceneError> {
+    ) -> Result<(), PlainError> {
         if viewport
             .iter()
             .any(|value| !value.is_finite() || *value <= 0.)
             || size.contains(&0)
         {
-            return Err(SceneError::Invalid(
+            return Err(PlainError::Invalid(
                 "invalid draw-plan viewport or target extent".into(),
             ));
         }
@@ -125,7 +125,7 @@ impl DrawPlan {
             let bounds = if let Some(parent) = mask.parent {
                 let parent = parent.0 as usize;
                 if parent >= index {
-                    return Err(SceneError::Invalid("mask parent must precede child".into()));
+                    return Err(PlainError::Invalid("mask parent must precede child".into()));
                 }
                 intersection(self.mask_bounds[parent], own)
             } else {
@@ -142,7 +142,7 @@ impl DrawPlan {
                 let object_mask = object.mask.map(|mask| mask.0 as usize);
                 let local_mask = if let Some(mask_index) = object_mask {
                     let mask = scene.pixel_masks.get(mask_index).ok_or_else(|| {
-                        SceneError::Invalid("object mask index out of bounds".into())
+                        PlainError::Invalid("object mask index out of bounds".into())
                     })?;
                     (mask.mesh == object.mesh
                         && mask.transform == object.transform
@@ -216,7 +216,7 @@ impl DrawPlan {
             self.uniform_count = self
                 .uniform_count
                 .checked_add(operations.len())
-                .ok_or_else(|| SceneError::Invalid("draw operation count overflow".into()))?;
+                .ok_or_else(|| PlainError::Invalid("draw operation count overflow".into()))?;
         }
         Ok(())
     }

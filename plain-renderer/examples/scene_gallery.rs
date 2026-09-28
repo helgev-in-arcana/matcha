@@ -1,4 +1,4 @@
-//! Reproducible visual PoC: `cargo run -p scene-renderer --example scene_gallery -- target`.
+//! Reproducible visual PoC: `cargo run -p plain-renderer --example scene_gallery -- target`.
 //! All images come from the public Scene API on a real GPU, not CPU mockups.
 //! Set `MATCHA_TEST_BACKEND=vulkan` or `dx12` to compare native backends.
 #[path = "support/effects.rs"]
@@ -8,8 +8,8 @@ mod private_3d;
 #[path = "support/sources.rs"]
 mod sources;
 use gpu_utils::gpu::{Gpu, GpuDescriptor};
+use plain_renderer::{PlainRenderer, PlainTarget};
 use render_interface::*;
-use scene_renderer::{SceneRenderer, SceneTarget};
 fn rect(x: f32, y: f32, w: f32, h: f32) -> Matrix4<f32> {
     Matrix4::new_translation(&nalgebra::Vector3::new(x, y, 0.))
         * Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(w, h, 1.))
@@ -57,7 +57,7 @@ fn main() {
     }))
     .expect("real GPU");
     let (device, queue) = gpu.context().expect("GPU ready");
-    let mut renderer = SceneRenderer::new(&device, &queue);
+    let mut renderer = PlainRenderer::new(&device, &queue);
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("gallery"),
         size: wgpu::Extent3d {
@@ -212,7 +212,7 @@ fn main() {
         renderer
             .render(
                 &scene,
-                SceneTarget {
+                PlainTarget {
                     view: &view,
                     format: target.format(),
                     viewport: [256., 256.],

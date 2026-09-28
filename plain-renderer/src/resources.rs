@@ -7,7 +7,7 @@ use std::{
     ops::Range,
 };
 
-use crate::SceneError;
+use crate::PlainError;
 mod cache;
 pub(crate) mod placement;
 pub(crate) mod relocation;
@@ -177,7 +177,7 @@ pub(crate) fn extent([width, height]: [u32; 2]) -> wgpu::Extent3d {
 }
 pub(crate) fn make_image(device: &wgpu::Device, desc: TextureDescriptor) -> Image {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("scene image"),
+        label: Some("plain renderer image"),
         size: extent(desc.size),
         mip_level_count: 1,
         sample_count: 1,
@@ -225,7 +225,7 @@ impl ResourceStore {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         max_copy_bytes: u64,
-    ) -> Result<relocation::RelocationPlan, SceneError> {
+    ) -> Result<relocation::RelocationPlan, PlainError> {
         relocation::RelocationPlan::build(
             &self.device,
             &self.meshes,
@@ -298,7 +298,7 @@ impl ResourceStore {
             pending_meshes: Vec::new(),
         }
     }
-    pub(crate) fn begin(&mut self) -> Result<(), SceneError> {
+    pub(crate) fn begin(&mut self) -> Result<(), PlainError> {
         self.frame = self
             .frame
             .checked_add(1)
@@ -367,7 +367,7 @@ impl ResourceStore {
     pub(crate) fn placement_mode(&self) -> PlacementMode {
         self.mode
     }
-    pub(crate) fn set_config(&mut self, config: AtlasConfig) -> Result<(), SceneError> {
+    pub(crate) fn set_config(&mut self, config: AtlasConfig) -> Result<(), PlainError> {
         placement::validate_config(&self.device, config)?;
         self.config = config;
         self.clear();
@@ -489,7 +489,7 @@ impl ResourceStore {
         &mut self,
         desc: TextureDescriptor,
         usages: wgpu::TextureUsages,
-    ) -> Result<(), SceneError> {
+    ) -> Result<(), PlainError> {
         let lease = if usages.is_empty() {
             self.placement
                 .texture(&self.device, desc.format, desc.size)?
@@ -507,7 +507,7 @@ impl ResourceStore {
         Ok(())
     }
 
-    fn reserve_mesh(&mut self, desc: MeshDescriptor, direct: bool) -> Result<(), SceneError> {
+    fn reserve_mesh(&mut self, desc: MeshDescriptor, direct: bool) -> Result<(), PlainError> {
         let vertex_bytes = u64::from(desc.vertex_count) * std::mem::size_of::<Vertex>() as u64;
         let vertex_lease = if direct {
             self.placement.buffer_with_usage(
@@ -557,7 +557,7 @@ impl ResourceStore {
         &mut self,
         image: Image,
         encoder: &mut wgpu::CommandEncoder,
-    ) -> Result<Image, SceneError> {
+    ) -> Result<Image, PlainError> {
         debug_assert!(
             image.texture_lease.is_none(),
             "packing accepts logical outputs; relocation owns old leases separately"
@@ -597,7 +597,7 @@ impl ResourceStore {
         &mut self,
         mesh: Mesh,
         encoder: &mut wgpu::CommandEncoder,
-    ) -> Result<Mesh, SceneError> {
+    ) -> Result<Mesh, PlainError> {
         debug_assert!(
             mesh.vertex_lease.is_none() && mesh.index_lease.is_none(),
             "packing accepts logical outputs; relocation owns old leases separately"
@@ -645,7 +645,7 @@ impl ResourceStore {
         id: MeshId,
         encoder: &mut wgpu::CommandEncoder,
         snapshot: RenderSnapshot<'_>,
-    ) -> Result<(), SceneError> {
+    ) -> Result<(), PlainError> {
         if let Some(entry) = self.meshes.get_mut(&id) {
             entry.last_used = self.frame;
             self.stats.cache_hits += 1;
@@ -678,7 +678,7 @@ impl ResourceStore {
                             .map(|buffer| buffer.slice(mesh.index_range.clone())),
                     },
                 })
-                .map_err(|source| SceneError::Prepare {
+                .map_err(|source| PlainError::Prepare {
                     id: id.get(),
                     source,
                 })?;
@@ -710,7 +710,7 @@ impl ResourceStore {
                         indices: indices.as_ref().map(|buffer| buffer.slice(..)),
                     },
                 })
-                .map_err(|source| SceneError::Prepare {
+                .map_err(|source| PlainError::Prepare {
                     id: id.get(),
                     source,
                 })?;
@@ -751,7 +751,7 @@ impl ResourceStore {
         id: TextureId,
         encoder: &mut wgpu::CommandEncoder,
         snapshot: RenderSnapshot<'_>,
-    ) -> Result<(), SceneError> {
+    ) -> Result<(), PlainError> {
         if let Some(entry) = self.textures.get_mut(&id) {
             entry.last_used = self.frame;
             self.stats.cache_hits += 1;
@@ -777,7 +777,7 @@ impl ResourceStore {
                     },
                     target: image.target(),
                 })
-                .map_err(|source| SceneError::Prepare {
+                .map_err(|source| PlainError::Prepare {
                     id: id.get(),
                     source,
                 })?;
@@ -796,7 +796,7 @@ impl ResourceStore {
                     },
                     target: image.target(),
                 })
-                .map_err(|source| SceneError::Prepare {
+                .map_err(|source| PlainError::Prepare {
                     id: id.get(),
                     source,
                 })?;
@@ -823,7 +823,7 @@ impl ResourceStore {
         id: MaskId,
         encoder: &mut wgpu::CommandEncoder,
         snapshot: RenderSnapshot<'_>,
-    ) -> Result<(), SceneError> {
+    ) -> Result<(), PlainError> {
         if let Some(entry) = self.masks.get_mut(&id) {
             entry.last_used = self.frame;
             self.stats.cache_hits += 1;
@@ -849,7 +849,7 @@ impl ResourceStore {
                     },
                     target: image.target(),
                 })
-                .map_err(|source| SceneError::Prepare {
+                .map_err(|source| PlainError::Prepare {
                     id: id.get(),
                     source,
                 })?;
@@ -868,7 +868,7 @@ impl ResourceStore {
                     },
                     target: image.target(),
                 })
-                .map_err(|source| SceneError::Prepare {
+                .map_err(|source| PlainError::Prepare {
                     id: id.get(),
                     source,
                 })?;

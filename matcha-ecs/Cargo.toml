@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 # self
 render-interface = { workspace = true, features = ["scene-builder"] }
-scene-renderer = { workspace = true }
+plain-renderer = { workspace = true }
 gpu-utils = { workspace = true }
 matcha-window = { workspace = true }
 

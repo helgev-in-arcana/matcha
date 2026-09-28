@@ -5,8 +5,8 @@
 //! the fixed contract. They document those boundaries; they do not make invalid
 //! GPU commands or stale content IDs supported renderer inputs.
 use gpu_utils::gpu::{Gpu, GpuDescriptor};
+use plain_renderer::{PlainRenderer, PlainTarget};
 use render_interface::*;
-use scene_renderer::{SceneRenderer, SceneTarget};
 use std::sync::{
     Arc, Mutex, MutexGuard,
     atomic::{AtomicUsize, Ordering},
@@ -123,7 +123,7 @@ fn close(actual: [u8; 4], expected: [u8; 4]) {
     }
 }
 fn render(
-    renderer: &mut SceneRenderer,
+    renderer: &mut PlainRenderer,
     scene: &Scene,
     texture: &wgpu::Texture,
     viewport: [f32; 2],
@@ -131,7 +131,7 @@ fn render(
     renderer
         .render(
             scene,
-            SceneTarget {
+            PlainTarget {
                 view: &texture.create_view(&Default::default()),
                 format: texture.format(),
                 viewport,
@@ -149,7 +149,7 @@ fn real_gpu_scene_contract() {
     eprintln!("Scene contract adapter: {:?}", gpu.adapter().get_info());
     let (device, queue) = gpu.context().expect("initialized GPU");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut renderer = SceneRenderer::new(&device, &queue);
+    let mut renderer = PlainRenderer::new(&device, &queue);
     let target = output(&device);
     let mut scene = Scene::default();
     let quad = scene
@@ -316,7 +316,7 @@ fn real_gpu_scene_contract() {
         renderer
             .render(
                 &scene,
-                SceneTarget {
+                PlainTarget {
                     view: &target.create_view(&Default::default()),
                     format: target.format(),
                     viewport: [64., 64.],
@@ -355,7 +355,7 @@ fn real_gpu_scene_contract() {
         renderer
             .render(
                 &failing,
-                SceneTarget {
+                PlainTarget {
                     view: &target.create_view(&Default::default()),
                     format: target.format(),
                     viewport: [64., 64.],
@@ -578,7 +578,7 @@ fn real_gpu_scene_contract() {
     renderer
         .render(
             &Scene::default(),
-            SceneTarget {
+            PlainTarget {
                 view: &initial_target.create_view(&Default::default()),
                 format: initial_target.format(),
                 viewport: [64., 64.],
@@ -598,7 +598,7 @@ fn real_gpu_scene_contract() {
         renderer
             .render(
                 &projected,
-                SceneTarget {
+                PlainTarget {
                     view: &target.create_view(&Default::default()),
                     format: target.format(),
                     viewport: [64., 64.],
@@ -614,12 +614,12 @@ fn real_gpu_scene_contract() {
 
 #[test]
 fn atlas_pages_relocation_reuse_and_regeneration_preserve_content_ids() {
-    use scene_renderer::AtlasConfig;
+    use plain_renderer::AtlasConfig;
     let _serial = gpu_test_lock();
     let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor())).expect("real GPU");
     let (device, queue) = gpu.context().expect("GPU");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut backend = SceneRenderer::new(&device, &queue);
+    let mut backend = PlainRenderer::new(&device, &queue);
     backend
         .set_atlas_config(AtlasConfig {
             texture_edge: 16,
@@ -798,7 +798,7 @@ fn diagnostic_snapshot_content_identity_must_be_updated_by_the_caller() {
     let _serial = gpu_test_lock();
     let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor())).expect("real GPU");
     let (device, queue) = gpu.context().expect("GPU");
-    let mut backend = SceneRenderer::new(&device, &queue);
+    let mut backend = PlainRenderer::new(&device, &queue);
     let target = output(&device);
     let mut scene = Scene::default();
     let mesh = scene
@@ -920,7 +920,7 @@ fn diagnostic_gpu_validation_is_distinct_from_prepare_result() {
     let _serial = gpu_test_lock();
     let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor())).expect("real GPU");
     let (device, queue) = gpu.context().expect("GPU");
-    let mut backend = SceneRenderer::new(&device, &queue);
+    let mut backend = PlainRenderer::new(&device, &queue);
     let target = output(&device);
     let mut scene = Scene::default();
     let mesh = scene
@@ -949,7 +949,7 @@ fn diagnostic_gpu_validation_is_distinct_from_prepare_result() {
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let cpu_result = backend.render(
         &scene,
-        SceneTarget {
+        PlainTarget {
             view: &target.create_view(&Default::default()),
             format: target.format(),
             viewport: [64., 64.],
@@ -981,10 +981,10 @@ fn deformed_mesh_proof(relocate: bool) {
     let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor())).expect("real GPU");
     let (device, queue) = gpu.context().expect("GPU");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut backend = SceneRenderer::new(&device, &queue);
+    let mut backend = PlainRenderer::new(&device, &queue);
     if relocate {
         backend
-            .set_atlas_config(scene_renderer::AtlasConfig {
+            .set_atlas_config(plain_renderer::AtlasConfig {
                 texture_edge: 16,
                 mesh_page_bytes: 256,
             })
@@ -1096,7 +1096,7 @@ fn private_3d_proof(relocate: bool) {
     let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor())).expect("real GPU");
     let (device, queue) = gpu.context().expect("GPU");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut backend = SceneRenderer::new(&device, &queue);
+    let mut backend = PlainRenderer::new(&device, &queue);
     let target = output(&device);
     let mut scene = Scene::default();
     let mesh = scene
@@ -1142,7 +1142,7 @@ fn diagnostic_pixel_art_needs_extra_geometry_with_the_fixed_linear_sampler() {
     let _serial = gpu_test_lock();
     let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor())).expect("real GPU");
     let (device, queue) = gpu.context().expect("GPU");
-    let mut backend = SceneRenderer::new(&device, &queue);
+    let mut backend = PlainRenderer::new(&device, &queue);
     let target = output(&device);
     let mut scene = Scene::default();
     let texture = scene

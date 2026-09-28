@@ -61,7 +61,7 @@ pub fn capture(view: impl FnOnce(&mut Scope), path: &str, size: [u32; 2]) {
             .backend
             .render(
                 &renderer.frame.scene,
-                scene_renderer::SceneTarget {
+                plain_renderer::PlainTarget {
                     view: &target_view,
                     format: target.format(),
                     viewport: size.map(|v| v as f32),

@@ -26,7 +26,7 @@ use super::{
     Entry, Image, Mesh, PlacementMode, extent, make_image,
     placement::{self, AtlasConfig, BufferClass, Placement, PlacementStats},
 };
-use crate::SceneError;
+use crate::PlainError;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RelocationStats {
@@ -61,7 +61,7 @@ impl RelocationPlan {
         mode: PlacementMode,
         max_copy_bytes: u64,
         encoder: &mut wgpu::CommandEncoder,
-    ) -> Result<Self, SceneError> {
+    ) -> Result<Self, PlainError> {
         placement::validate_config(device, config)?;
         let mut copied_bytes = 0;
         for entry in meshes.values() {
@@ -162,7 +162,7 @@ fn copy_image(
     mode: PlacementMode,
     source: &Image,
     encoder: &mut wgpu::CommandEncoder,
-) -> Result<Image, SceneError> {
+) -> Result<Image, PlainError> {
     let image = match mode {
         PlacementMode::Dedicated => make_image(device, source.desc),
         PlacementMode::Atlas => {
@@ -207,7 +207,7 @@ fn copy_mesh(
     mode: PlacementMode,
     source: &Mesh,
     encoder: &mut wgpu::CommandEncoder,
-) -> Result<Mesh, SceneError> {
+) -> Result<Mesh, PlainError> {
     let vertex_bytes = range_bytes(&source.vertex_range)?;
     let index_bytes = range_bytes(&source.index_range)?;
     let (vertices, vertex_range, vertex_lease) = match mode {
@@ -298,13 +298,13 @@ fn buffer(device: &wgpu::Device, size: u64, usages: wgpu::BufferUsages) -> wgpu:
     })
 }
 
-fn range_bytes(range: &Range<u64>) -> Result<u64, SceneError> {
+fn range_bytes(range: &Range<u64>) -> Result<u64, PlainError> {
     range
         .end
         .checked_sub(range.start)
         .ok_or_else(|| invalid("invalid resident mesh range"))
 }
-fn mesh_copy_bytes(mesh: &Mesh) -> Result<u64, SceneError> {
+fn mesh_copy_bytes(mesh: &Mesh) -> Result<u64, PlainError> {
     let indices = if mesh.indices.is_some() {
         range_bytes(&mesh.index_range)?
     } else {
@@ -314,7 +314,7 @@ fn mesh_copy_bytes(mesh: &Mesh) -> Result<u64, SceneError> {
         .checked_add(indices)
         .ok_or_else(|| invalid("mesh relocation byte count overflow"))
 }
-fn add_copy_bytes(current: u64, bytes: u64, limit: u64) -> Result<u64, SceneError> {
+fn add_copy_bytes(current: u64, bytes: u64, limit: u64) -> Result<u64, PlainError> {
     current
         .checked_add(bytes)
         .filter(|total| *total <= limit)
@@ -327,7 +327,7 @@ fn add_copy_bytes(current: u64, bytes: u64, limit: u64) -> Result<u64, SceneErro
 fn resident_stats<'a>(
     meshes: impl Iterator<Item = &'a Mesh>,
     images: impl Iterator<Item = &'a Image>,
-) -> Result<PlacementStats, SceneError> {
+) -> Result<PlacementStats, PlainError> {
     let mut stats = PlacementStats::default();
     let mut textures = HashSet::new();
     let mut buffers = HashSet::new();
@@ -358,12 +358,12 @@ fn resident_stats<'a>(
     }
     Ok(stats)
 }
-fn checked_sum(left: u64, right: u64) -> Result<u64, SceneError> {
+fn checked_sum(left: u64, right: u64) -> Result<u64, PlainError> {
     left.checked_add(right)
         .ok_or_else(|| invalid("resident byte count overflow"))
 }
-fn invalid(message: &str) -> SceneError {
-    SceneError::Invalid(message.into())
+fn invalid(message: &str) -> PlainError {
+    PlainError::Invalid(message.into())
 }
 
 #[cfg(test)]

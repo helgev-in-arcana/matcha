@@ -44,4 +44,4 @@ workspace = true
 
 [dev-dependencies]
 gpu-utils = { workspace = true }
-scene-renderer = { workspace = true }
+plain-renderer = { workspace = true }

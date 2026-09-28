@@ -56,7 +56,7 @@ pub use resources::{
 /// An opaque result can use the sRGB view directly for sRGB-encoded presentation;
 /// transparent presentation may need unpremultiply, encode, and re-premultiply.
 /// This renderer performs no gamut, tone-mapping, or presentation-alpha conversion.
-pub struct SceneTarget<'a> {
+pub struct PlainTarget<'a> {
     /// Full, single-sample 2D attachment; size is taken from its texture.
     pub view: &'a wgpu::TextureView,
     /// Actual attachment view format, including any sRGB reinterpretation.
@@ -72,7 +72,7 @@ pub struct SceneTarget<'a> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SceneError {
+pub enum PlainError {
     #[error("invalid scene: {0}")]
     Invalid(String),
     #[error("resource {id} preparation failed: {source}")]
@@ -118,7 +118,7 @@ pub struct RenderStats {
 }
 
 /// Owns the renderer's device-local resources and submission order.
-pub struct SceneRenderer {
+pub struct PlainRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     compositor: Compositor,
@@ -127,7 +127,7 @@ pub struct SceneRenderer {
     surfaces: Option<Surfaces>,
     stats: RenderStats,
 }
-impl SceneRenderer {
+impl PlainRenderer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         Self {
             device: device.clone(),
@@ -154,7 +154,7 @@ impl SceneRenderer {
         self.compositor.clear_bind_groups();
         self.refresh_resource_stats();
     }
-    pub fn set_atlas_config(&mut self, config: AtlasConfig) -> Result<(), SceneError> {
+    pub fn set_atlas_config(&mut self, config: AtlasConfig) -> Result<(), PlainError> {
         self.resources.set_config(config)?;
         self.compositor.clear_bind_groups();
         self.refresh_resource_stats();
@@ -170,7 +170,7 @@ impl SceneRenderer {
     /// readback. Old and replacement capacity coexist while copies are in flight.
     /// This heuristic need not reduce capacity for every distribution of sizes.
     /// Dedicated storage has no shared-page fragmentation and is left unchanged.
-    pub fn compact_resources(&mut self) -> Result<RelocationStats, SceneError> {
+    pub fn compact_resources(&mut self) -> Result<RelocationStats, PlainError> {
         self.compact_resources_with_budget(u64::MAX)
     }
     /// Declines the complete relocation before allocation/recording if its
@@ -178,7 +178,7 @@ impl SceneRenderer {
     pub fn compact_resources_with_budget(
         &mut self,
         max_copy_bytes: u64,
-    ) -> Result<RelocationStats, SceneError> {
+    ) -> Result<RelocationStats, PlainError> {
         if self.resources.placement_mode() == PlacementMode::Dedicated {
             let placement = self.resources.placement_stats();
             return Ok(RelocationStats {
@@ -191,7 +191,7 @@ impl SceneRenderer {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("transactional scene relocation"),
+                label: Some("plain renderer transactional relocation"),
             });
         let plan = self
             .resources
@@ -213,7 +213,7 @@ impl SceneRenderer {
     /// A caller catching it can render again without clearing previously valid
     /// residents. Provider-owned side effects are not rolled back; panic=abort
     /// terminates the process and cannot run this cleanup.
-    pub fn render(&mut self, scene: &Scene, target: SceneTarget<'_>) -> Result<(), SceneError> {
+    pub fn render(&mut self, scene: &Scene, target: PlainTarget<'_>) -> Result<(), PlainError> {
         self.stats = RenderStats::default();
         self.resources.begin()?;
         if let Err(error) = self.preparation.rebuild(scene).and_then(|()| {
@@ -290,10 +290,10 @@ impl SceneRenderer {
             .map_or(0, wgpu::Buffer::size);
     }
 }
-impl Renderer for SceneRenderer {
-    type Target<'a> = SceneTarget<'a>;
-    type Error = SceneError;
-    fn render(&mut self, scene: &Scene, target: SceneTarget<'_>) -> Result<(), SceneError> {
-        SceneRenderer::render(self, scene, target)
+impl Renderer for PlainRenderer {
+    type Target<'a> = PlainTarget<'a>;
+    type Error = PlainError;
+    fn render(&mut self, scene: &Scene, target: PlainTarget<'_>) -> Result<(), PlainError> {
+        PlainRenderer::render(self, scene, target)
     }
 }

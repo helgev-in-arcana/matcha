@@ -7,9 +7,9 @@ use std::sync::{
 
 use dashmap::DashMap;
 use gpu_utils::gpu::{Gpu, GpuDescriptor};
+use plain_renderer::{PlainRenderer, PlainTarget};
 use render_interface::{Draw, Frame};
 use render_interface::{Matrix4, TextureDescriptor, TextureSource, upload_texture};
-use scene_renderer::{SceneRenderer, SceneTarget};
 
 use super::{
     context::{EventSender, SharedCtx, UiContext},
@@ -142,7 +142,7 @@ fn clean_widgets_emit_each_frame_while_the_backend_reuses_source_content() {
         };
         let mut pod = view.build(ctx);
         let mut frame = Frame::default();
-        let mut renderer = SceneRenderer::new(ctx.gpu_device(), ctx.gpu_queue());
+        let mut renderer = PlainRenderer::new(ctx.gpu_device(), ctx.gpu_queue());
         let target = ctx.gpu_device().create_texture(&wgpu::TextureDescriptor {
             label: Some("tree direct scene test"),
             size: wgpu::Extent3d {
@@ -158,11 +158,11 @@ fn clean_widgets_emit_each_frame_while_the_backend_reuses_source_content() {
             view_formats: &[],
         });
         let target_view = target.create_view(&Default::default());
-        let render = |renderer: &mut SceneRenderer, frame: &Frame| {
+        let render = |renderer: &mut PlainRenderer, frame: &Frame| {
             renderer
                 .render(
                     &frame.scene,
-                    SceneTarget {
+                    PlainTarget {
                         view: &target_view,
                         format: wgpu::TextureFormat::Rgba8Unorm,
                         viewport: [32., 32.],

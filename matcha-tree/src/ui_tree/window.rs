@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use plain_renderer::{PlainRenderer, PlainTarget};
 use render_interface::Matrix4;
 use render_interface::{Draw, Frame};
-use scene_renderer::{SceneRenderer, SceneTarget};
 
 use crate::ui_tree::{
     context::{UiContext, WindowCtx},
@@ -105,7 +105,7 @@ pub struct WindowWidgetInstance {
     /// One complete borrowed submission per window. Widgets retain Sources,
     /// while this owner retains the reusable drawing arrays and backend cache.
     frame: Frame,
-    renderer: Option<SceneRenderer>,
+    renderer: Option<PlainRenderer>,
 }
 
 impl WindowWidgetInstance {
@@ -254,7 +254,7 @@ impl AnyWindowWidgetInstance for WindowWidgetInstance {
 
         let renderer = self
             .renderer
-            .get_or_insert_with(|| SceneRenderer::new(device, queue));
+            .get_or_insert_with(|| PlainRenderer::new(device, queue));
         // Presentation belongs to the framework. A failed prepare leaves the
         // acquired texture untouched, so discard it instead of presenting it.
         let result = self
@@ -266,7 +266,7 @@ impl AnyWindowWidgetInstance for WindowWidgetInstance {
                     let view = surface.texture.create_view(&Default::default());
                     renderer.render(
                         &self.frame.scene,
-                        SceneTarget {
+                        PlainTarget {
                             view: &view,
                             format,
                             viewport: size,
@@ -280,7 +280,7 @@ impl AnyWindowWidgetInstance for WindowWidgetInstance {
                         },
                     )?;
                     surface.present();
-                    Ok::<(), scene_renderer::SceneError>(())
+                    Ok::<(), plain_renderer::PlainError>(())
                 })
             });
         match result {

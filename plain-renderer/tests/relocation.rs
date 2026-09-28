@@ -1,8 +1,8 @@
 //! Relocation copies immutable contents and changes placement transactionally.
 //! No source callbacks or GPU waits are needed to move resident content.
 use gpu_utils::gpu::{Gpu, GpuDescriptor};
+use plain_renderer::{AtlasConfig, PlacementMode, PlainError, PlainRenderer, PlainTarget};
 use render_interface::*;
-use scene_renderer::{AtlasConfig, PlacementMode, SceneError, SceneRenderer, SceneTarget};
 use std::sync::{
     Arc, Mutex, MutexGuard,
     atomic::{AtomicUsize, Ordering},
@@ -73,11 +73,11 @@ fn pixels(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -
         .expect("GPU completion");
     buffer.slice(..).get_mapped_range().to_vec()
 }
-fn render(renderer: &mut SceneRenderer, scene: &Scene, target: &wgpu::Texture) {
+fn render(renderer: &mut PlainRenderer, scene: &Scene, target: &wgpu::Texture) {
     renderer
         .render(
             scene,
-            SceneTarget {
+            PlainTarget {
                 view: &target.create_view(&Default::default()),
                 format: target.format(),
                 viewport: [64., 64.],
@@ -144,7 +144,7 @@ fn relocation_limit_is_atomic_and_exact_budget_moves_snapshot_dependent_content(
     let (device, queue) = gpu.context().expect("GPU ready");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     for mode in [PlacementMode::Dedicated, PlacementMode::Atlas] {
-        let mut backend = SceneRenderer::new(&device, &queue);
+        let mut backend = PlainRenderer::new(&device, &queue);
         backend
             .set_atlas_config(AtlasConfig {
                 texture_edge: 16,
@@ -232,7 +232,7 @@ fn relocation_limit_is_atomic_and_exact_budget_moves_snapshot_dependent_content(
         match mode {
             PlacementMode::Atlas => {
                 let error = backend.compact_resources_with_budget(bytes - 1);
-                assert!(matches!(error, Err(SceneError::Invalid(_))), "{error:?}");
+                assert!(matches!(error, Err(PlainError::Invalid(_))), "{error:?}");
             }
             PlacementMode::Dedicated => {
                 let unchanged = backend
@@ -315,7 +315,7 @@ fn queue_order_preserves_old_frames_through_relocation_clear_and_new_allocations
     let (device, queue) = gpu.context().expect("GPU ready");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     for mode in [PlacementMode::Dedicated, PlacementMode::Atlas] {
-        let mut backend = SceneRenderer::new(&device, &queue);
+        let mut backend = PlainRenderer::new(&device, &queue);
         backend
             .set_atlas_config(AtlasConfig {
                 texture_edge: 16,
