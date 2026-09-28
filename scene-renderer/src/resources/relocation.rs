@@ -24,7 +24,7 @@ use render_interface::{MaskId, MeshId, TextureId};
 
 use super::{
     Entry, Image, Mesh, PlacementMode, extent, make_image,
-    placement::{self, AtlasConfig, Placement, PlacementStats},
+    placement::{self, AtlasConfig, BufferClass, Placement, PlacementStats},
 };
 use crate::SceneError;
 
@@ -166,7 +166,12 @@ fn copy_image(
     let image = match mode {
         PlacementMode::Dedicated => make_image(device, source.desc),
         PlacementMode::Atlas => {
-            let lease = placement.texture(device, source.desc.format, source.desc.size)?;
+            let lease = placement.texture_with_usage(
+                device,
+                source.desc.format,
+                source.desc.size,
+                source.texture.usage(),
+            )?;
             Image {
                 desc: source.desc,
                 texture: lease.texture.clone(),
@@ -216,11 +221,20 @@ fn copy_mesh(
             None,
         ),
         PlacementMode::Atlas => {
-            let lease = placement.buffer(device, vertex_bytes)?;
+            let class = source
+                .vertex_lease
+                .as_ref()
+                .map_or(BufferClass::Resident, |lease| lease.class);
+            let lease = placement.buffer_with_usage(
+                device,
+                vertex_bytes,
+                source.vertices.usage(),
+                class,
+            )?;
             (lease.buffer.clone(), lease.range.clone(), Some(lease))
         }
     };
-    let (indices, index_range, index_lease) = if source.indices.is_some() {
+    let (indices, index_range, index_lease) = if let Some(source_indices) = &source.indices {
         match mode {
             PlacementMode::Dedicated => (
                 Some(buffer(
@@ -232,7 +246,16 @@ fn copy_mesh(
                 None,
             ),
             PlacementMode::Atlas => {
-                let lease = placement.buffer(device, index_bytes)?;
+                let class = source
+                    .index_lease
+                    .as_ref()
+                    .map_or(BufferClass::Resident, |lease| lease.class);
+                let lease = placement.buffer_with_usage(
+                    device,
+                    index_bytes,
+                    source_indices.usage(),
+                    class,
+                )?;
                 (Some(lease.buffer.clone()), lease.range.clone(), Some(lease))
             }
         }

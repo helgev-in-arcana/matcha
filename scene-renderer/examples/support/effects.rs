@@ -41,7 +41,11 @@ pub fn compute_triangle() -> MeshSource {
                 layout: &pipeline.get_bind_group_layout(0),
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: ctx.target.vertices.as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: ctx.target.vertices.buffer(),
+                        offset: ctx.target.vertices.offset(),
+                        size: Some(ctx.target.vertices.size()),
+                    }),
                 }],
             });
         let mut pass = ctx.gpu.encoder.begin_compute_pass(&Default::default());
@@ -50,6 +54,7 @@ pub fn compute_triangle() -> MeshSource {
         pass.dispatch_workgroups(1, 1, 1);
         Ok(())
     })
+    .with_output_layout(PrepareOutputLayout::AnyRegion)
 }
 
 /// Mode 0: 9x9 box blur; 1: wave refraction; 2: Mandelbrot coverage;
@@ -59,18 +64,23 @@ pub fn compute_image(
     target: &TextureTarget<'_>,
     mode: u32,
 ) -> PrepareResult {
+    let [input_x, input_y] = gpu.snapshot.color.origin();
+    let [input_w, input_h] = gpu.snapshot.color.size();
+    let [output_x, output_y] = target.region.origin();
+    let [output_w, output_h] = target.region.size();
     let code = format!(
         r#"
 @group(0) @binding(0) var input_image: texture_2d<f32>;
 @group(0) @binding(1) var output_image: texture_storage_2d<rgba8unorm,write>;
 fn sample_at(p:vec2<i32>) -> vec4<f32> {{
-    return textureLoad(input_image,clamp(p,vec2<i32>(0),vec2<i32>(textureDimensions(input_image))-vec2<i32>(1)),0);
+    let local=clamp(p,vec2<i32>(0),vec2<i32>({input_w},{input_h})-vec2<i32>(1));
+    return textureLoad(input_image,vec2<i32>({input_x},{input_y})+local,0);
 }}
 @compute @workgroup_size(8,8) fn main(@builtin(global_invocation_id) id:vec3<u32>) {{
-    let size=textureDimensions(output_image);
+    let size=vec2<u32>({output_w}u,{output_h}u);
     if any(id.xy>=size) {{return;}}
     let uv=(vec2<f32>(id.xy)+0.5)/vec2<f32>(size);
-    let p=vec2<i32>(uv*vec2<f32>(textureDimensions(input_image)));
+    let p=vec2<i32>(uv*vec2<f32>({input_w}.,{input_h}.));
     var result=vec4<f32>(0.);
     if {mode}u==0u {{
         for(var y=-4;y<=4;y++) {{for(var x=-4;x<=4;x++) {{result+=sample_at(p+vec2<i32>(x,y))/81.;}}}}
@@ -86,7 +96,7 @@ fn sample_at(p:vec2<i32>) -> vec4<f32> {{
         let coverage=select(f32(n)/48.,1.,n==48u);
         result=vec4<f32>(coverage,coverage,coverage,1.);
     }} else {{let c=sample_at(p);result=vec4<f32>(vec3<f32>(c.a)-c.rgb,c.a);}}
-    textureStore(output_image,vec2<i32>(id.xy),result);
+    textureStore(output_image,vec2<i32>({output_x},{output_y})+vec2<i32>(id.xy),result);
 }}
 "#
     );
@@ -112,11 +122,11 @@ fn sample_at(p:vec2<i32>) -> vec4<f32> {{
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(gpu.snapshot.color_view),
+                resource: wgpu::BindingResource::TextureView(gpu.snapshot.color.view()),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::TextureView(target.view),
+                resource: wgpu::BindingResource::TextureView(target.region.view()),
             },
         ],
     });
@@ -136,11 +146,13 @@ pub fn effect(size: [u32; 2], mode: u32) -> TextureSource {
     TextureSource::new(desc, move |mut c| {
         compute_image(&mut c.gpu, &c.target, mode)
     })
+    .with_output_layout(PrepareOutputLayout::AnyRegion)
 }
 pub fn fractal(size: [u32; 2]) -> MaskSource {
     let mut desc = TextureDescriptor::new(size, wgpu::TextureFormat::Rgba8Unorm);
     desc.usages = wgpu::TextureUsages::STORAGE_BINDING;
     MaskSource::new(desc, move |mut c| compute_image(&mut c.gpu, &c.target, 2))
+        .with_output_layout(PrepareOutputLayout::AnyRegion)
 }
 
 /// A deforming strip with many GPU-generated triangles. Phase is immutable
@@ -191,7 +203,7 @@ fn put(i:u32,pos:vec2<f32>,uv:vec2<f32>) {let j=i*5u;vertices[j]=pos.x;vertices[
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: c.target.vertices.as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: c.target.vertices.buffer(), offset: c.target.vertices.offset(), size: Some(c.target.vertices.size()) }),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -204,5 +216,5 @@ fn put(i:u32,pos:vec2<f32>,uv:vec2<f32>) {let j=i*5u;vertices[j]=pos.x;vertices[
         pass.set_bind_group(0, &group, &[]);
         pass.dispatch_workgroups(segments.div_ceil(64), 1, 1);
         Ok(())
-    })
+    }).with_output_layout(PrepareOutputLayout::AnyRegion)
 }

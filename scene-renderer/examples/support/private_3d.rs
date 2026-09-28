@@ -6,7 +6,7 @@ use wgpu::util::DeviceExt;
 pub fn cube(size: [u32; 2], angle: f32) -> TextureSource {
     let mut desc = TextureDescriptor::new(size, wgpu::TextureFormat::Rgba8Unorm);
     desc.usages = wgpu::TextureUsages::RENDER_ATTACHMENT;
-    TextureSource::new(desc, move |ctx| {
+    TextureSource::new(desc, move |mut ctx| {
         let corners = [
             [-1., -1., -1.],
             [1., -1., -1.],
@@ -115,7 +115,7 @@ struct Out {@builtin(position) position:vec4<f32>,@location(0) color:vec3<f32>};
             });
         let depth = ctx.gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("private depth"),
-            size: ctx.target.texture.size(),
+            size: ctx.target.region.texture().size(),
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -124,21 +124,11 @@ struct Out {@builtin(position) position:vec4<f32>,@location(0) color:vec3<f32>};
             view_formats: &[],
         });
         let depth_view = depth.create_view(&Default::default());
-        let attachments = [Some(wgpu::RenderPassColorAttachment {
-            view: ctx.target.view,
-            depth_slice: None,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                store: wgpu::StoreOp::Store,
-            },
-        })];
-        let mut pass = ctx
-            .gpu
-            .encoder
-            .begin_render_pass(&wgpu::RenderPassDescriptor {
+        let mut pass = ctx.target.region.begin_render_pass(
+            &mut ctx.gpu,
+            RegionRenderPassDescriptor {
                 label: Some("private 3D render"),
-                color_attachments: &attachments,
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &depth_view,
                     depth_ops: Some(wgpu::Operations {
@@ -148,7 +138,8 @@ struct Out {@builtin(position) position:vec4<f32>,@location(0) color:vec3<f32>};
                     stencil_ops: None,
                 }),
                 ..Default::default()
-            });
+            },
+        )?;
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &group, &[]);
         pass.set_vertex_buffer(0, vertex.slice(..));

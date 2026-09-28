@@ -329,15 +329,25 @@ fn shared_and_dedicated_placements_have_identical_pixels_and_lazy_regeneration()
 
 #[test]
 fn aborted_shared_page_allocations_release_space_without_damaging_live_content() {
-    rollback_proof(false);
+    for layout in [
+        PrepareOutputLayout::WholeResource,
+        PrepareOutputLayout::AnyRegion,
+    ] {
+        rollback_proof(false, layout);
+    }
 }
 
 #[test]
 fn aborted_new_pages_are_reclaimed_before_retrying_the_same_content_ids() {
-    rollback_proof(true);
+    for layout in [
+        PrepareOutputLayout::WholeResource,
+        PrepareOutputLayout::AnyRegion,
+    ] {
+        rollback_proof(true, layout);
+    }
 }
 
-fn rollback_proof(force_new_pages: bool) {
+fn rollback_proof(force_new_pages: bool, layout: PrepareOutputLayout) {
     let _serial = gpu_lock();
     let gpu = gpu();
     let (device, queue) = gpu.context().expect("GPU ready");
@@ -356,15 +366,15 @@ fn rollback_proof(force_new_pages: bool) {
     let mut old = Scene::default();
     let mesh = old
         .resources
-        .insert_mesh(quad(&old_calls))
+        .insert_mesh(quad(&old_calls).with_output_layout(layout))
         .expect("old mesh");
     let texture = old
         .resources
-        .insert_texture(rgba([1, 1], [255, 0, 0, 255], &old_calls))
+        .insert_texture(rgba([1, 1], [255, 0, 0, 255], &old_calls).with_output_layout(layout))
         .expect("old texture");
     let mask = old
         .resources
-        .insert_mask(coverage(255, &old_calls))
+        .insert_mask(coverage(255, &old_calls).with_output_layout(layout))
         .expect("old mask");
     old.pixel_masks.push(PixelMask {
         mesh,
@@ -386,19 +396,24 @@ fn rollback_proof(force_new_pages: bool) {
     let mut next = Scene::default();
     let mesh = next
         .resources
-        .insert_mesh(triangle(if force_new_pages { 32 } else { 1 }, &new_calls))
+        .insert_mesh(
+            triangle(if force_new_pages { 32 } else { 1 }, &new_calls).with_output_layout(layout),
+        )
         .expect("new geometry");
     let texture = next
         .resources
-        .insert_texture(rgba(
-            if force_new_pages { [65, 33] } else { [1, 1] },
-            [0, 255, 0, 255],
-            &new_calls,
-        ))
+        .insert_texture(
+            rgba(
+                if force_new_pages { [65, 33] } else { [1, 1] },
+                [0, 255, 0, 255],
+                &new_calls,
+            )
+            .with_output_layout(layout),
+        )
         .expect("new image");
     let mask = next
         .resources
-        .insert_mask(coverage(128, &new_calls))
+        .insert_mask(coverage(128, &new_calls).with_output_layout(layout))
         .expect("new mask");
     next.pixel_masks.push(PixelMask {
         mesh,
@@ -416,17 +431,20 @@ fn rollback_proof(force_new_pages: bool) {
     let attempt_counter = attempts.clone();
     let fallible = next
         .resources
-        .insert_texture(TextureSource::new(
-            TextureDescriptor::new([1, 1], wgpu::TextureFormat::Rgba8Unorm),
-            move |mut ctx| {
-                upload_texture(&mut ctx.gpu, &ctx.target, &[0, 0, 255, 255])?;
-                if attempt_counter.fetch_add(1, Ordering::SeqCst) == 0 {
-                    Err("discard all preceding atlas writes and allocations".into())
-                } else {
-                    Ok(())
-                }
-            },
-        ))
+        .insert_texture(
+            TextureSource::new(
+                TextureDescriptor::new([1, 1], wgpu::TextureFormat::Rgba8Unorm),
+                move |mut ctx| {
+                    upload_texture(&mut ctx.gpu, &ctx.target, &[0, 0, 255, 255])?;
+                    if attempt_counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err("discard all preceding atlas writes and allocations".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .with_output_layout(layout),
+        )
         .expect("fallible source");
     let final_quad = old.phases[0].objects[0].mesh;
     next.resources

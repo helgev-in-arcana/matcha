@@ -16,29 +16,20 @@ fn float_color(scene: &mut Scene, rgba: [f64; 4]) -> TextureId {
     desc.usages = wgpu::TextureUsages::RENDER_ATTACHMENT;
     scene
         .resources
-        .insert_texture(TextureSource::new(desc, move |context| {
-            let attachments = [Some(wgpu::RenderPassColorAttachment {
-                view: context.target.view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
+        .insert_texture(TextureSource::new(desc, move |mut context| {
+            let _pass = context.target.region.begin_render_pass(
+                &mut context.gpu,
+                RegionRenderPassDescriptor {
+                    label: Some("exact binary-fraction source"),
                     load: wgpu::LoadOp::Clear(wgpu::Color {
                         r: rgba[0],
                         g: rgba[1],
                         b: rgba[2],
                         a: rgba[3],
                     }),
-                    store: wgpu::StoreOp::Store,
-                },
-            })];
-            let _pass = context
-                .gpu
-                .encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("exact binary-fraction source"),
-                    color_attachments: &attachments,
                     ..Default::default()
-                });
+                },
+            )?;
             Ok(())
         }))
         .expect("fresh linear source")

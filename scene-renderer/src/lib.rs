@@ -10,8 +10,12 @@
 //! Source images support R8Unorm, Rgba8Unorm, Rgba8UnormSrgb and Rgba16Float.
 //! Destinations additionally support Bgra8Unorm/Bgra8UnormSrgb, but not R8Unorm.
 //! The working colour image uses Rgba16Float; coverage uses R8Unorm. No optional
-//! device features are required. All targets are full, single-layer/mip/sample
-//! 2D views. Unsupported descriptors fail before source callbacks run.
+//! device features are required. Final destinations are full, single-layer/mip/
+//! sample 2D views. Unsupported descriptors fail before source callbacks run.
+//! AnyRegion providers generate directly into texture rectangles or aligned mesh
+//! slices in shared pages. WholeResource providers use complete output resources
+//! and, in atlas mode, a subsequent placement copy. Pages are separated by actual
+//! usage and mesh binding role so simultaneous writable bindings do not alias.
 //!
 //! The dedicated-resource path is the correctness reference. Both modes use a
 //! soft resident-content budget (default 128 MiB); the current frame stays pinned.
@@ -96,6 +100,11 @@ pub struct RenderStats {
     pub bind_groups: usize,
     pub output_texture_allocations: usize,
     pub output_buffer_allocations: usize,
+    /// Backend placement copies after logical image generation (not provider
+    /// commands or explicit compaction). Direct AnyRegion preparation is zero.
+    pub preparation_texture_copies: usize,
+    /// Backend placement copies for vertex/index outputs, counted separately.
+    pub preparation_buffer_copies: usize,
     /// Retained generation outputs, excluding the current resident content.
     pub scratch_bytes: u64,
     pub scratch_peak_bytes: u64,
@@ -258,6 +267,8 @@ impl SceneRenderer {
         self.stats.cache_hits = self.resources.stats.cache_hits;
         self.stats.output_buffer_allocations = self.resources.stats.output_buffer_allocations;
         self.stats.output_texture_allocations = self.resources.stats.output_texture_allocations;
+        self.stats.preparation_texture_copies = self.resources.stats.preparation_texture_copies;
+        self.stats.preparation_buffer_copies = self.resources.stats.preparation_buffer_copies;
         let scratch = self.resources.scratch_stats();
         self.stats.output_buffer_allocations += scratch.buffer_allocations;
         self.stats.output_texture_allocations += scratch.image_allocations;

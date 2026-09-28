@@ -207,12 +207,10 @@ fn record_operations(
         // Every generator records its reads before any draw in this phase.
         // Therefore queue/encoder order freezes the accumulated image for
         // those reads; no full-viewport snapshot copy is necessary. Source
-        // outputs are isolated and may not alias or mutate this input.
+        // output textures are separate from this input and cannot mutate it.
         let snapshot = RenderSnapshot {
-            color_texture: &s.color.texture,
-            color_view: &s.color.view,
-            size: s.size,
-            format: COLOR,
+            color: TextureRegion::whole(&s.color.view, COLOR)
+                .expect("the accumulation image is a full colour texture"),
         };
         // Prepare all resources before drawing any object of this phase.
         for id in &preparation.meshes {

@@ -13,7 +13,7 @@ pub(crate) mod placement;
 pub(crate) mod relocation;
 mod scratch;
 use cache::{CachePolicy, Candidate, Lru, ResourceKey};
-use placement::{AtlasConfig, BufferLease, Placement, PlacementStats, TextureLease};
+use placement::{AtlasConfig, BufferClass, BufferLease, Placement, PlacementStats, TextureLease};
 use scratch::ScratchPool;
 
 #[cfg(test)]
@@ -26,6 +26,8 @@ pub(crate) struct ResourceStats {
     pub(crate) evicted: usize,
     pub(crate) output_texture_allocations: usize,
     pub(crate) output_buffer_allocations: usize,
+    pub(crate) preparation_texture_copies: usize,
+    pub(crate) preparation_buffer_copies: usize,
 }
 
 /// Reused CPU validation sets, cleared for every submitted Scene. Membership is
@@ -146,10 +148,14 @@ pub(crate) struct Image {
 }
 impl Image {
     pub(crate) fn target(&self) -> TextureTarget<'_> {
+        let origin = self
+            .texture_lease
+            .as_ref()
+            .map_or([0, 0], |lease| lease.origin);
         TextureTarget {
             desc: &self.desc,
-            texture: &self.texture,
-            view: &self.view,
+            region: TextureRegion::new(&self.view, self.desc.format, origin, self.desc.size)
+                .expect("resident and logical images own a validated colour region"),
         }
     }
     pub(crate) fn bytes(&self) -> u64 {
@@ -207,6 +213,12 @@ pub(crate) struct ResourceStore {
     budget: u64,
     accounting: ResidentAccounting,
     pub(crate) validation: ValidationScratch,
+    render_pass_cache: RegionRenderPassCache,
+    // Reservations are owned before a provider can return Err or unwind. They
+    // become normal residents only after preparation succeeds; abort explicitly
+    // returns their leases, including a vertex reservation preceding index failure.
+    pending_images: Vec<Image>,
+    pending_meshes: Vec<Mesh>,
 }
 impl ResourceStore {
     pub(crate) fn plan_relocation(
@@ -281,6 +293,9 @@ impl ResourceStore {
             budget: 128 * 1024 * 1024,
             accounting: ResidentAccounting::default(),
             validation: ValidationScratch::default(),
+            render_pass_cache: RegionRenderPassCache::new(device),
+            pending_images: Vec::new(),
+            pending_meshes: Vec::new(),
         }
     }
     pub(crate) fn begin(&mut self) -> Result<(), SceneError> {
@@ -315,12 +330,28 @@ impl ResourceStore {
         for image in images {
             self.release_image(image);
         }
+        while let Some(image) = self.pending_images.pop() {
+            if let Some(lease) = image.texture_lease {
+                self.placement
+                    .release_texture(lease)
+                    .expect("pending image owns a live reservation");
+            }
+        }
+        while let Some(mesh) = self.pending_meshes.pop() {
+            for lease in [mesh.vertex_lease, mesh.index_lease].into_iter().flatten() {
+                self.placement
+                    .release_buffer(lease)
+                    .expect("pending mesh owns a live reservation");
+            }
+        }
         self.scratch.abort_checkouts();
     }
     pub(crate) fn clear(&mut self) {
         self.meshes.clear();
         self.textures.clear();
         self.masks.clear();
+        self.pending_images.clear();
+        self.pending_meshes.clear();
         self.accounting = ResidentAccounting::default();
         // Clearing all resident owners permits dropping the complete registry.
         // Submitted command buffers still retain their own GPU handles.
@@ -454,6 +485,74 @@ impl ResourceStore {
     }
 }
 impl ResourceStore {
+    fn reserve_image(
+        &mut self,
+        desc: TextureDescriptor,
+        usages: wgpu::TextureUsages,
+    ) -> Result<(), SceneError> {
+        let lease = if usages.is_empty() {
+            self.placement
+                .texture(&self.device, desc.format, desc.size)?
+        } else {
+            self.placement
+                .texture_with_usage(&self.device, desc.format, desc.size, usages)?
+        };
+        self.pending_images.push(Image {
+            desc,
+            texture: lease.texture.clone(),
+            view: lease.view.clone(),
+            uv: lease.uv(),
+            texture_lease: Some(lease),
+        });
+        Ok(())
+    }
+
+    fn reserve_mesh(&mut self, desc: MeshDescriptor, direct: bool) -> Result<(), SceneError> {
+        let vertex_bytes = u64::from(desc.vertex_count) * std::mem::size_of::<Vertex>() as u64;
+        let vertex_lease = if direct {
+            self.placement.buffer_with_usage(
+                &self.device,
+                vertex_bytes,
+                desc.usages | wgpu::BufferUsages::VERTEX,
+                BufferClass::VertexOutput,
+            )?
+        } else {
+            self.placement.buffer(&self.device, vertex_bytes)?
+        };
+        // Publish ownership before the next fallible reservation. If index
+        // allocation fails or unwinds, abort can still return this vertex lease.
+        self.pending_meshes.push(Mesh {
+            desc,
+            vertices: vertex_lease.buffer.clone(),
+            indices: None,
+            vertex_range: vertex_lease.range.clone(),
+            index_range: 0..0,
+            vertex_lease: Some(vertex_lease),
+            index_lease: None,
+        });
+        if desc.index_count != 0 {
+            let index_bytes = u64::from(desc.index_count) * 4;
+            let lease = if direct {
+                self.placement.buffer_with_usage(
+                    &self.device,
+                    index_bytes,
+                    desc.usages | wgpu::BufferUsages::INDEX,
+                    BufferClass::IndexOutput,
+                )?
+            } else {
+                self.placement.buffer(&self.device, index_bytes)?
+            };
+            let mesh = self
+                .pending_meshes
+                .last_mut()
+                .expect("vertex reservation was registered");
+            mesh.indices = Some(lease.buffer.clone());
+            mesh.index_range = lease.range.clone();
+            mesh.index_lease = Some(lease);
+        }
+        Ok(())
+    }
+
     fn pack_image(
         &mut self,
         image: Image,
@@ -466,27 +565,34 @@ impl ResourceStore {
         if self.mode == PlacementMode::Dedicated {
             return Ok(image);
         }
-        let lease = self
-            .placement
-            .texture(&self.device, image.desc.format, image.desc.size)?;
-        let source = image.texture.as_image_copy();
-        let mut destination = lease.texture.as_image_copy();
+        // WholeResource generation keeps resident usage minimal. AnyRegion
+        // reserves its preparation-compatible pages before invoking the source.
+        self.reserve_image(image.desc, wgpu::TextureUsages::empty())?;
+        let resident = self
+            .pending_images
+            .last()
+            .expect("image reservation registered");
+        let region = resident.target().region;
+        let mut destination = resident.texture.as_image_copy();
         destination.origin = wgpu::Origin3d {
-            x: lease.origin[0],
-            y: lease.origin[1],
+            x: region.origin()[0],
+            y: region.origin()[1],
             z: 0,
         };
-        encoder.copy_texture_to_texture(source, destination, extent(image.desc.size));
-        let resident = Image {
-            desc: image.desc,
-            texture: lease.texture.clone(),
-            view: lease.view.clone(),
-            uv: lease.uv(),
-            texture_lease: Some(lease),
-        };
+        encoder.copy_texture_to_texture(
+            image.texture.as_image_copy(),
+            destination,
+            extent(image.desc.size),
+        );
+        self.stats.preparation_texture_copies += 1;
+        let resident = self
+            .pending_images
+            .pop()
+            .expect("image preparation reservation remains owned");
         self.scratch.return_image(image);
         Ok(resident)
     }
+
     fn pack_mesh(
         &mut self,
         mesh: Mesh,
@@ -499,59 +605,40 @@ impl ResourceStore {
         if self.mode == PlacementMode::Dedicated {
             return Ok(mesh);
         }
-        let vertex_lease = self.placement.buffer(
-            &self.device,
-            mesh.vertex_range.end - mesh.vertex_range.start,
-        )?;
-        let index_lease = if mesh.indices.is_some() {
-            match self
-                .placement
-                .buffer(&self.device, mesh.index_range.end - mesh.index_range.start)
-            {
-                Ok(lease) => Some(lease),
-                Err(error) => {
-                    self.placement
-                        .release_buffer(vertex_lease)
-                        .expect("unpublished vertex lease is live");
-                    return Err(error);
-                }
-            }
-        } else {
-            None
-        };
+        self.reserve_mesh(mesh.desc, false)?;
+        let resident = self
+            .pending_meshes
+            .last()
+            .expect("mesh reservation registered");
         encoder.copy_buffer_to_buffer(
             &mesh.vertices,
             mesh.vertex_range.start,
-            &vertex_lease.buffer,
-            vertex_lease.range.start,
-            vertex_lease.range.end - vertex_lease.range.start,
+            &resident.vertices,
+            resident.vertex_range.start,
+            mesh.vertex_range.end - mesh.vertex_range.start,
         );
-        if let (Some(source), Some(lease)) = (&mesh.indices, &index_lease) {
+        self.stats.preparation_buffer_copies += 1;
+        if let (Some(source), Some(destination)) = (&mesh.indices, &resident.indices) {
             encoder.copy_buffer_to_buffer(
                 source,
                 mesh.index_range.start,
-                &lease.buffer,
-                lease.range.start,
-                lease.range.end - lease.range.start,
+                destination,
+                resident.index_range.start,
+                mesh.index_range.end - mesh.index_range.start,
             );
+            self.stats.preparation_buffer_copies += 1;
         }
-        let resident = Mesh {
-            desc: mesh.desc,
-            vertices: vertex_lease.buffer.clone(),
-            indices: index_lease.as_ref().map(|lease| lease.buffer.clone()),
-            vertex_range: vertex_lease.range.clone(),
-            index_range: index_lease
-                .as_ref()
-                .map_or(0..0, |lease| lease.range.clone()),
-            vertex_lease: Some(vertex_lease),
-            index_lease,
-        };
+        let resident = self
+            .pending_meshes
+            .pop()
+            .expect("mesh preparation reservation remains owned");
         self.scratch.return_buffer(mesh.vertices);
         if let Some(indices) = mesh.indices {
             self.scratch.return_buffer(indices);
         }
         Ok(resident)
     }
+
     pub(crate) fn prepare_mesh(
         &mut self,
         scene: &Scene,
@@ -566,48 +653,84 @@ impl ResourceStore {
         }
         let source = scene.resources.mesh(id).expect("scene was validated");
         let desc = *source.descriptor();
-        let vertices = self.take_output_buffer(
-            u64::from(desc.vertex_count) * 20,
-            desc.usages | wgpu::BufferUsages::VERTEX,
-        );
-        let indices = (desc.index_count != 0).then(|| {
-            self.take_output_buffer(
-                u64::from(desc.index_count) * 4,
-                desc.usages | wgpu::BufferUsages::INDEX,
-            )
-        });
-        source
-            .prepare(MeshPrepareContext {
-                gpu: GpuPrepareContext {
-                    device: &self.device,
-                    encoder,
-                    snapshot,
+        let mesh = if self.mode == PlacementMode::Atlas
+            && source.output_layout() == PrepareOutputLayout::AnyRegion
+        {
+            self.reserve_mesh(desc, true)?;
+            let mesh = self
+                .pending_meshes
+                .last()
+                .expect("direct mesh reservation registered");
+            source
+                .prepare(MeshPrepareContext {
+                    gpu: GpuPrepareContext {
+                        device: &self.device,
+                        encoder,
+                        snapshot,
+                        render_pass_cache: &mut self.render_pass_cache,
+                    },
+                    target: MeshTarget {
+                        desc: &desc,
+                        vertices: mesh.vertices.slice(mesh.vertex_range.clone()),
+                        indices: mesh
+                            .indices
+                            .as_ref()
+                            .map(|buffer| buffer.slice(mesh.index_range.clone())),
+                    },
+                })
+                .map_err(|source| SceneError::Prepare {
+                    id: id.get(),
+                    source,
+                })?;
+            self.pending_meshes
+                .pop()
+                .expect("successful direct mesh remains owned")
+        } else {
+            let vertices = self.take_output_buffer(
+                u64::from(desc.vertex_count) * std::mem::size_of::<Vertex>() as u64,
+                desc.usages | wgpu::BufferUsages::VERTEX,
+            );
+            let indices = (desc.index_count != 0).then(|| {
+                self.take_output_buffer(
+                    u64::from(desc.index_count) * 4,
+                    desc.usages | wgpu::BufferUsages::INDEX,
+                )
+            });
+            source
+                .prepare(MeshPrepareContext {
+                    gpu: GpuPrepareContext {
+                        device: &self.device,
+                        encoder,
+                        snapshot,
+                        render_pass_cache: &mut self.render_pass_cache,
+                    },
+                    target: MeshTarget {
+                        desc: &desc,
+                        vertices: vertices.slice(..),
+                        indices: indices.as_ref().map(|buffer| buffer.slice(..)),
+                    },
+                })
+                .map_err(|source| SceneError::Prepare {
+                    id: id.get(),
+                    source,
+                })?;
+            let vertex_range = 0..vertices.size();
+            let index_range = indices.as_ref().map_or(0..0, |buffer| 0..buffer.size());
+            self.pack_mesh(
+                Mesh {
+                    desc,
+                    vertices,
+                    indices,
+                    vertex_range,
+                    index_range,
+                    vertex_lease: None,
+                    index_lease: None,
                 },
-                target: MeshTarget {
-                    desc: &desc,
-                    vertices: &vertices,
-                    indices: indices.as_ref(),
-                },
-            })
-            .map_err(|source| SceneError::Prepare {
-                id: id.get(),
-                source,
-            })?;
-        let bytes = u64::from(desc.vertex_count) * 20 + u64::from(desc.index_count) * 4;
-        let vertex_range = 0..vertices.size();
-        let index_range = indices.as_ref().map_or(0..0, |b| 0..b.size());
-        let mesh = self.pack_mesh(
-            Mesh {
-                desc,
-                vertices,
-                indices,
-                vertex_range,
-                index_range,
-                vertex_lease: None,
-                index_lease: None,
-            },
-            encoder,
-        )?;
+                encoder,
+            )?
+        };
+        let bytes = u64::from(desc.vertex_count) * std::mem::size_of::<Vertex>() as u64
+            + u64::from(desc.index_count) * 4;
         self.accounting.insert(bytes, dedicated_mesh(&mesh));
         self.meshes.insert(
             id,
@@ -621,6 +744,7 @@ impl ResourceStore {
         self.stats.prepared += 1;
         Ok(())
     }
+
     pub(crate) fn prepare_texture(
         &mut self,
         scene: &Scene,
@@ -634,21 +758,50 @@ impl ResourceStore {
             return Ok(());
         }
         let source = scene.resources.texture(id).expect("scene was validated");
-        let image = self.take_output_image(*source.descriptor());
-        source
-            .prepare(TexturePrepareContext {
-                gpu: GpuPrepareContext {
-                    device: &self.device,
-                    encoder,
-                    snapshot,
-                },
-                target: image.target(),
-            })
-            .map_err(|source| SceneError::Prepare {
-                id: id.get(),
-                source,
-            })?;
-        let image = self.pack_image(image, encoder)?;
+        let desc = *source.descriptor();
+        let image = if self.mode == PlacementMode::Atlas
+            && source.output_layout() == PrepareOutputLayout::AnyRegion
+        {
+            self.reserve_image(desc, desc.usages)?;
+            let image = self
+                .pending_images
+                .last()
+                .expect("direct image reservation registered");
+            source
+                .prepare(TexturePrepareContext {
+                    gpu: GpuPrepareContext {
+                        device: &self.device,
+                        encoder,
+                        snapshot,
+                        render_pass_cache: &mut self.render_pass_cache,
+                    },
+                    target: image.target(),
+                })
+                .map_err(|source| SceneError::Prepare {
+                    id: id.get(),
+                    source,
+                })?;
+            self.pending_images
+                .pop()
+                .expect("successful direct image remains owned")
+        } else {
+            let image = self.take_output_image(desc);
+            source
+                .prepare(TexturePrepareContext {
+                    gpu: GpuPrepareContext {
+                        device: &self.device,
+                        encoder,
+                        snapshot,
+                        render_pass_cache: &mut self.render_pass_cache,
+                    },
+                    target: image.target(),
+                })
+                .map_err(|source| SceneError::Prepare {
+                    id: id.get(),
+                    source,
+                })?;
+            self.pack_image(image, encoder)?
+        };
         self.accounting
             .insert(image.bytes(), dedicated_image(&image));
         self.textures.insert(
@@ -663,6 +816,7 @@ impl ResourceStore {
         self.stats.prepared += 1;
         Ok(())
     }
+
     pub(crate) fn prepare_mask(
         &mut self,
         scene: &Scene,
@@ -676,21 +830,50 @@ impl ResourceStore {
             return Ok(());
         }
         let source = scene.resources.mask(id).expect("scene was validated");
-        let image = self.take_output_image(*source.descriptor());
-        source
-            .prepare(MaskPrepareContext {
-                gpu: GpuPrepareContext {
-                    device: &self.device,
-                    encoder,
-                    snapshot,
-                },
-                target: image.target(),
-            })
-            .map_err(|source| SceneError::Prepare {
-                id: id.get(),
-                source,
-            })?;
-        let image = self.pack_image(image, encoder)?;
+        let desc = *source.descriptor();
+        let image = if self.mode == PlacementMode::Atlas
+            && source.output_layout() == PrepareOutputLayout::AnyRegion
+        {
+            self.reserve_image(desc, desc.usages)?;
+            let image = self
+                .pending_images
+                .last()
+                .expect("direct mask reservation registered");
+            source
+                .prepare(MaskPrepareContext {
+                    gpu: GpuPrepareContext {
+                        device: &self.device,
+                        encoder,
+                        snapshot,
+                        render_pass_cache: &mut self.render_pass_cache,
+                    },
+                    target: image.target(),
+                })
+                .map_err(|source| SceneError::Prepare {
+                    id: id.get(),
+                    source,
+                })?;
+            self.pending_images
+                .pop()
+                .expect("successful direct mask remains owned")
+        } else {
+            let image = self.take_output_image(desc);
+            source
+                .prepare(MaskPrepareContext {
+                    gpu: GpuPrepareContext {
+                        device: &self.device,
+                        encoder,
+                        snapshot,
+                        render_pass_cache: &mut self.render_pass_cache,
+                    },
+                    target: image.target(),
+                })
+                .map_err(|source| SceneError::Prepare {
+                    id: id.get(),
+                    source,
+                })?;
+            self.pack_image(image, encoder)?
+        };
         self.accounting
             .insert(image.bytes(), dedicated_image(&image));
         self.masks.insert(
@@ -705,6 +888,7 @@ impl ResourceStore {
         self.stats.prepared += 1;
         Ok(())
     }
+
     fn take_output_image(&mut self, desc: TextureDescriptor) -> Image {
         if self.mode == PlacementMode::Atlas {
             return self.scratch.take_image(&self.device, desc);

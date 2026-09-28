@@ -264,11 +264,13 @@ fn real_gpu_scene_contract() {
             TextureDescriptor::new([64, 64], wgpu::TextureFormat::Rgba16Float),
             move |c| {
                 count.fetch_add(1, Ordering::SeqCst);
-                c.gpu.encoder.copy_texture_to_texture(
-                    c.gpu.snapshot.color_texture.as_image_copy(),
-                    c.target.texture.as_image_copy(),
-                    c.target.texture.size(),
-                );
+                c.gpu.snapshot.color.copy_to(
+                    c.gpu.encoder,
+                    &c.target.region,
+                    [0, 0],
+                    [0, 0],
+                    c.target.desc.size,
+                )?;
                 Ok(())
             },
         ))
@@ -553,23 +555,14 @@ fn real_gpu_scene_contract() {
     desc.usages = wgpu::TextureUsages::RENDER_ATTACHMENT;
     let generated = initial_scene
         .resources
-        .insert_texture(TextureSource::new(desc, |c| {
-            let attachments = [Some(wgpu::RenderPassColorAttachment {
-                view: c.target.view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
+        .insert_texture(TextureSource::new(desc, |mut c| {
+            let _pass = c.target.region.begin_render_pass(
+                &mut c.gpu,
+                RegionRenderPassDescriptor {
                     load: wgpu::LoadOp::Clear(wgpu::Color::GREEN),
-                    store: wgpu::StoreOp::Store,
-                },
-            })];
-            let _pass = c
-                .gpu
-                .encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    color_attachments: &attachments,
                     ..Default::default()
-                });
+                },
+            )?;
             Ok(())
         }))
         .expect("render source");
@@ -701,11 +694,13 @@ fn atlas_pages_relocation_reuse_and_regeneration_preserve_content_ids() {
             TextureDescriptor::new([64, 64], wgpu::TextureFormat::Rgba16Float),
             move |c| {
                 calls.fetch_add(1, Ordering::SeqCst);
-                c.gpu.encoder.copy_texture_to_texture(
-                    c.gpu.snapshot.color_texture.as_image_copy(),
-                    c.target.texture.as_image_copy(),
-                    c.target.texture.size(),
-                );
+                c.gpu.snapshot.color.copy_to(
+                    c.gpu.encoder,
+                    &c.target.region,
+                    [0, 0],
+                    [0, 0],
+                    c.target.desc.size,
+                )?;
                 Ok(())
             },
         ))
@@ -816,11 +811,13 @@ fn diagnostic_snapshot_content_identity_must_be_updated_by_the_caller() {
         TextureSource::new(
             TextureDescriptor::new([64, 64], wgpu::TextureFormat::Rgba16Float),
             |c| {
-                c.gpu.encoder.copy_texture_to_texture(
-                    c.gpu.snapshot.color_texture.as_image_copy(),
-                    c.target.texture.as_image_copy(),
-                    c.target.texture.size(),
-                );
+                c.gpu.snapshot.color.copy_to(
+                    c.gpu.encoder,
+                    &c.target.region,
+                    [0, 0],
+                    [0, 0],
+                    c.target.desc.size,
+                )?;
                 Ok(())
             },
         )
@@ -938,9 +935,9 @@ fn diagnostic_gpu_validation_is_distinct_from_prepare_result() {
                 // Invalid format conversion via Copy (RGBA16Float -> RGBA8Unorm).
                 // A valid conversion must use Render/Compute, not this copy command.
                 c.gpu.encoder.copy_texture_to_texture(
-                    c.gpu.snapshot.color_texture.as_image_copy(),
-                    c.target.texture.as_image_copy(),
-                    c.target.texture.size(),
+                    c.gpu.snapshot.color.texture().as_image_copy(),
+                    c.target.region.texture().as_image_copy(),
+                    c.target.region.texture().size(),
                 );
                 Ok(())
             },
@@ -1047,7 +1044,7 @@ fn deformed_mesh_proof(relocate: bool) {
         .resources
         .insert_mesh(MeshSource::new(desc, |mut c| {
             let indices = c.target.indices.expect("indexed source");
-            assert_ne!(c.target.vertices, indices);
+            assert_ne!(c.target.vertices.buffer(), indices.buffer());
             let vertices = [
                 Vertex {
                     position: [0., 0., 0.],

@@ -35,10 +35,18 @@ impl Fixture {
         let mesh = scene
             .resources
             .insert_mesh(MeshSource::new(MeshDescriptor::triangles(6, 3), |ctx| {
-                ctx.gpu.encoder.clear_buffer(ctx.target.vertices, 0, None);
-                ctx.gpu
-                    .encoder
-                    .clear_buffer(ctx.target.indices.expect("indexed fixture"), 0, None);
+                let vertices = ctx.target.vertices;
+                ctx.gpu.encoder.clear_buffer(
+                    vertices.buffer(),
+                    vertices.offset(),
+                    Some(vertices.size().get()),
+                );
+                let indices = ctx.target.indices.expect("indexed fixture");
+                ctx.gpu.encoder.clear_buffer(
+                    indices.buffer(),
+                    indices.offset(),
+                    Some(indices.size().get()),
+                );
                 Ok(())
             }))
             .expect("fresh mesh");
@@ -82,10 +90,7 @@ impl Fixture {
             TextureDescriptor::new([1, 1], wgpu::TextureFormat::Rgba8Unorm),
         );
         let snapshot = RenderSnapshot {
-            color_texture: &image.texture,
-            color_view: &image.view,
-            size: [1, 1],
-            format: image.desc.format,
+            color: TextureRegion::whole(&image.view, image.desc.format).expect("whole snapshot"),
         };
         let mut encoder = device.create_command_encoder(&Default::default());
         store
@@ -220,4 +225,81 @@ fn incremental_totals_survive_insert_abort_eviction_clear_and_relocation() {
         assert_eq!(store.cache_bytes(), 0);
         assert_accounting(&store);
     }
+}
+
+#[test]
+fn direct_callback_errors_and_unwinds_return_unpublished_reservations() {
+    let (device, _queue) = context();
+    let mut store = ResourceStore::new(&device);
+    store.begin().expect("begin failed texture frame");
+    let snapshot_image = make_image(
+        &device,
+        TextureDescriptor::new([1, 1], wgpu::TextureFormat::Rgba8Unorm),
+    );
+    let snapshot = RenderSnapshot {
+        color: snapshot_image.target().region,
+    };
+    let mut scene = Scene::default();
+    let image = scene
+        .resources
+        .insert_texture(
+            TextureSource::new(
+                TextureDescriptor::new([4, 4], wgpu::TextureFormat::Rgba8Unorm),
+                |_ctx| Err("intentional direct preparation error".into()),
+            )
+            .with_output_layout(PrepareOutputLayout::AnyRegion),
+        )
+        .expect("fresh texture");
+    let mut encoder = device.create_command_encoder(&Default::default());
+    assert!(
+        store
+            .prepare_texture(&scene, image, &mut encoder, snapshot)
+            .is_err()
+    );
+    assert_eq!(store.pending_images.len(), 1);
+    assert_eq!(store.cache_bytes(), 0);
+    assert!(store.placement_stats().live_texture_bytes > 0);
+    drop(encoder);
+    store.abort();
+    assert!(store.pending_images.is_empty());
+    assert_eq!(store.placement_stats(), PlacementStats::default());
+
+    store.begin().expect("begin unwinding mesh frame");
+    let mesh = scene
+        .resources
+        .insert_mesh(
+            MeshSource::new(MeshDescriptor::triangles(6, 3), |_ctx| {
+                panic!("intentional direct mesh unwind")
+            })
+            .with_output_layout(PrepareOutputLayout::AnyRegion),
+        )
+        .expect("fresh mesh");
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.prepare_mesh(&scene, mesh, &mut encoder, snapshot)
+    }));
+    assert!(result.is_err());
+    assert_eq!(store.pending_meshes.len(), 1);
+    assert_eq!(store.cache_bytes(), 0);
+    assert_eq!(store.placement_stats().live_mesh_bytes, 132);
+    drop(encoder);
+    store.abort();
+    assert!(store.pending_meshes.is_empty());
+    assert_eq!(store.placement_stats(), PlacementStats::default());
+}
+
+#[test]
+fn failed_index_reservation_keeps_vertex_owned_until_abort() {
+    let (device, _queue) = context();
+    let mut store = ResourceStore::new(&device);
+    store.begin().expect("begin partial reservation");
+    // This directly exercises the allocation boundary: ordinary Scene validation
+    // rejects this index count before reaching it. No oversized GPU buffer is made.
+    let descriptor = MeshDescriptor::triangles(3, u32::MAX);
+    assert!(store.reserve_mesh(descriptor, true).is_err());
+    assert_eq!(store.pending_meshes.len(), 1);
+    assert_eq!(store.placement_stats().live_mesh_bytes, 60);
+    assert_eq!(store.cache_bytes(), 0);
+    store.abort();
+    assert_eq!(store.placement_stats(), PlacementStats::default());
 }

@@ -202,11 +202,13 @@ fn relocation_limit_is_atomic_and_exact_budget_moves_snapshot_dependent_content(
                 TextureDescriptor::new([64, 64], wgpu::TextureFormat::Rgba16Float),
                 move |ctx| {
                     counter.fetch_add(1, Ordering::SeqCst);
-                    ctx.gpu.encoder.copy_texture_to_texture(
-                        ctx.gpu.snapshot.color_texture.as_image_copy(),
-                        ctx.target.texture.as_image_copy(),
-                        ctx.target.texture.size(),
-                    );
+                    ctx.gpu.snapshot.color.copy_to(
+                        ctx.gpu.encoder,
+                        &ctx.target.region,
+                        [0, 0],
+                        [0, 0],
+                        ctx.target.desc.size,
+                    )?;
                     Ok(())
                 },
             ))

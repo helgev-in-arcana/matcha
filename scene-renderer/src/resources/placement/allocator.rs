@@ -400,7 +400,7 @@ mod tests {
         let mut live: Vec<RangeAllocation> = Vec::new();
         let mut seed = 0x78e5_01f3_429b_d60a;
         for _ in 0..4_000 {
-            if !live.is_empty() && next(&mut seed) % 3 == 0 {
+            if !live.is_empty() && next(&mut seed).is_multiple_of(3) {
                 let index = (next(&mut seed) as usize) % live.len();
                 let allocation = live.swap_remove(index);
                 allocator.free(allocation.token).expect("live token");
@@ -507,7 +507,7 @@ mod tests {
         let mut live: Vec<RectangleAllocation> = Vec::new();
         let mut seed = 0x815e_769d_f010_238c;
         for _ in 0..3_000 {
-            if !live.is_empty() && next(&mut seed) % 3 == 0 {
+            if !live.is_empty() && next(&mut seed).is_multiple_of(3) {
                 let index = (next(&mut seed) as usize) % live.len();
                 let allocation = live.swap_remove(index);
                 allocator.free(allocation.token).expect("live rectangle");

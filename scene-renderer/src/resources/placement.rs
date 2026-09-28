@@ -79,6 +79,7 @@ impl TextureLease {
 pub(crate) struct BufferLease {
     pub(crate) buffer: wgpu::Buffer,
     pub(crate) range: Range<u64>,
+    pub(crate) class: BufferClass,
     page: usize,
     token: RangeToken,
 }
@@ -87,6 +88,7 @@ struct TexturePage {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     format: wgpu::TextureFormat,
+    usages: wgpu::TextureUsages,
     size: [u32; 2],
     bytes_per_texel: u64,
     capacity_bytes: u64,
@@ -109,6 +111,7 @@ impl TexturePage {
 
 struct BufferPage {
     buffer: wgpu::Buffer,
+    class: BufferClass,
     allocator: RangeAllocator,
 }
 
@@ -117,10 +120,36 @@ impl BufferPage {
         BufferLease {
             buffer: self.buffer.clone(),
             range: allocation.range,
+            class: self.class,
             page,
             token: allocation.token,
         }
     }
+}
+
+/// Independently writable vertex/index outputs cannot be forced to alias one
+/// underlying buffer. Some callbacks use different binding usages in one pass,
+/// and wgpu tracks those usages at buffer granularity, not allocator intervals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BufferClass {
+    Resident,
+    VertexOutput,
+    IndexOutput,
+}
+
+fn buffer_alignment(device: &wgpu::Device, usages: wgpu::BufferUsages) -> u64 {
+    let limits = device.limits();
+    let mut alignment = wgpu::COPY_BUFFER_ALIGNMENT;
+    if usages.contains(wgpu::BufferUsages::STORAGE) {
+        alignment = alignment.max(u64::from(limits.min_storage_buffer_offset_alignment));
+    }
+    if usages.contains(wgpu::BufferUsages::UNIFORM) {
+        alignment = alignment.max(u64::from(limits.min_uniform_buffer_offset_alignment));
+    }
+    if usages.contains(wgpu::BufferUsages::QUERY_RESOLVE) {
+        alignment = alignment.max(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT);
+    }
+    alignment
 }
 
 pub(crate) struct Placement {
@@ -200,7 +229,21 @@ impl Placement {
         format: wgpu::TextureFormat,
         size: [u32; 2],
     ) -> Result<TextureLease, SceneError> {
+        self.texture_with_usage(device, format, size, wgpu::TextureUsages::empty())
+    }
+
+    pub(crate) fn texture_with_usage(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        size: [u32; 2],
+        usages: wgpu::TextureUsages,
+    ) -> Result<TextureLease, SceneError> {
         validate_config(device, self.config)?;
+        let usages = usages
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC;
         if size.iter().any(|&dimension| {
             dimension == 0
                 || dimension > device.limits().max_texture_dimension_2d
@@ -224,7 +267,7 @@ impl Placement {
         );
         for (index, page) in self.textures.iter_mut().enumerate() {
             let Some(page) = page else { continue };
-            if page.format != format {
+            if page.format != format || page.usages != usages {
                 continue;
             }
             match page.allocator.allocate(size) {
@@ -257,9 +300,7 @@ impl Placement {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: usages,
             view_formats: &[],
         });
         let view = texture.create_view(&Default::default());
@@ -267,6 +308,7 @@ impl Placement {
             texture,
             view,
             format,
+            usages,
             size: page_size,
             bytes_per_texel,
             capacity_bytes,
@@ -284,14 +326,34 @@ impl Placement {
         device: &wgpu::Device,
         size: u64,
     ) -> Result<BufferLease, SceneError> {
+        self.buffer_with_usage(
+            device,
+            size,
+            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::INDEX,
+            BufferClass::Resident,
+        )
+    }
+
+    pub(crate) fn buffer_with_usage(
+        &mut self,
+        device: &wgpu::Device,
+        size: u64,
+        usages: wgpu::BufferUsages,
+        class: BufferClass,
+    ) -> Result<BufferLease, SceneError> {
         validate_config(device, self.config)?;
+        let usages = usages | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
+        let alignment = buffer_alignment(device, usages);
         let size = aligned_buffer_size(size)?;
         if size > device.limits().max_buffer_size {
             return Err(invalid("mesh allocation exceeds the device buffer limit"));
         }
         for (index, page) in self.buffers.iter_mut().enumerate() {
             let Some(page) = page else { continue };
-            match page.allocator.allocate(size, 4) {
+            if page.class != class || page.buffer.usage() != usages {
+                continue;
+            }
+            match page.allocator.allocate(size, alignment) {
                 Ok(allocation) => return Ok(page.lease(index, allocation)),
                 Err(AllocationError::OutOfSpace) => {}
                 Err(error) => return Err(allocation_error(error)),
@@ -299,17 +361,23 @@ impl Placement {
         }
         let capacity = aligned_buffer_size(self.config.mesh_page_bytes)?.max(size);
         let mut allocator = RangeAllocator::new(capacity).map_err(allocation_error)?;
-        let allocation = allocator.allocate(size, 4).map_err(allocation_error)?;
+        let allocation = allocator
+            .allocate(size, alignment)
+            .map_err(allocation_error)?;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("scene resident mesh page"),
             size: capacity,
-            usage: wgpu::BufferUsages::VERTEX
-                | wgpu::BufferUsages::INDEX
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
+            usage: usages,
             mapped_at_creation: false,
         });
-        let index = insert_page(&mut self.buffers, BufferPage { buffer, allocator });
+        let index = insert_page(
+            &mut self.buffers,
+            BufferPage {
+                buffer,
+                class,
+                allocator,
+            },
+        );
         Ok(self.buffers[index]
             .as_ref()
             .expect("the newly inserted buffer page occupies this index")
@@ -520,6 +588,7 @@ mod tests {
         let stale = BufferLease {
             buffer: old.buffer.clone(),
             range: old.range.clone(),
+            class: old.class,
             page: old.page,
             token: old.token,
         };
@@ -582,5 +651,68 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn direct_texture_pages_preserve_usage_classes_and_nonzero_origins() {
+        let device = device();
+        let mut placement = Placement::new(config());
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        let first = placement
+            .texture_with_usage(&device, wgpu::TextureFormat::Rgba8Unorm, [4, 4], usage)
+            .expect("first output");
+        let second = placement
+            .texture_with_usage(&device, wgpu::TextureFormat::Rgba8Unorm, [4, 4], usage)
+            .expect("second output");
+        let copy_only = placement
+            .texture(&device, wgpu::TextureFormat::Rgba8Unorm, [4, 4])
+            .expect("minimal resident page");
+        assert_eq!(first.texture, second.texture);
+        assert_ne!(second.origin, [0, 0]);
+        assert_ne!(first.texture, copy_only.texture);
+        assert!(first.texture.usage().contains(usage));
+        assert!(!copy_only.texture.usage().contains(usage));
+        placement.release_texture(first).expect("first live lease");
+        placement
+            .release_texture(second)
+            .expect("second live lease");
+        placement.release_texture(copy_only).expect("copy lease");
+        assert_eq!(placement.stats(), PlacementStats::default());
+    }
+
+    #[test]
+    fn direct_buffer_offsets_are_binding_aligned_and_output_roles_do_not_alias() {
+        let device = device();
+        let mut placement = Placement::new(AtlasConfig {
+            mesh_page_bytes: 4096,
+            ..config()
+        });
+        let usage = wgpu::BufferUsages::VERTEX
+            | wgpu::BufferUsages::INDEX
+            | wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::UNIFORM;
+        let first = placement
+            .buffer_with_usage(&device, 60, usage, BufferClass::VertexOutput)
+            .expect("first output");
+        let second = placement
+            .buffer_with_usage(&device, 60, usage, BufferClass::VertexOutput)
+            .expect("second output");
+        let index = placement
+            .buffer_with_usage(&device, 60, usage, BufferClass::IndexOutput)
+            .expect("independent output role");
+        let alignment = buffer_alignment(&device, usage);
+        assert_eq!(first.buffer, second.buffer);
+        assert!(second.range.start >= first.range.end);
+        assert_eq!(second.range.start % alignment, 0);
+        assert_ne!(first.buffer, index.buffer);
+        assert!(first.buffer.usage().contains(usage));
+        assert_eq!(
+            buffer_alignment(&device, wgpu::BufferUsages::QUERY_RESOLVE),
+            wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT
+        );
+        placement.release_buffer(first).expect("first live lease");
+        placement.release_buffer(second).expect("second live lease");
+        placement.release_buffer(index).expect("index live lease");
+        assert_eq!(placement.stats(), PlacementStats::default());
     }
 }

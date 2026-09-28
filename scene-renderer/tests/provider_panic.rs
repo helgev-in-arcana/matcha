@@ -103,149 +103,167 @@ fn provider_unwind_rolls_back_all_modes_and_resource_kinds_then_resumes_original
     let (device, queue) = gpu.context().expect("device ready");
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     for mode in [PlacementMode::Dedicated, PlacementMode::Atlas] {
-        for kind in ["mesh", "texture", "mask"] {
-            let mut renderer = SceneRenderer::new(&device, &queue);
-            renderer.set_placement_mode(mode);
-            let output = target(&device);
-            let mesh = sources::unit_quad();
-            let green_calls = Arc::new(AtomicUsize::new(0));
-            let count = green_calls.clone();
-            let green = TextureSource::new(
-                TextureDescriptor::new([1, 1], wgpu::TextureFormat::Rgba8Unorm),
-                move |mut context| {
-                    count.fetch_add(1, Ordering::SeqCst);
-                    upload_texture(&mut context.gpu, &context.target, &[0, 255, 0, 255])
-                },
-            );
-            let mut old = Scene::default();
-            old.resources.share_mesh(&mesh).expect("mesh definition");
-            old.resources.share_texture(&green).expect("old definition");
-            old.phases.push(Phase {
-                objects: vec![quad(mesh.id(), green.id())],
-            });
-            render(&mut renderer, &old, &output);
-            let before = pixels(&device, &queue, &output);
-            assert!(before.chunks_exact(4).all(|p| p == [0, 255, 0, 255]));
-            let old_capacity = renderer.stats().placement;
+        for layout in [
+            PrepareOutputLayout::WholeResource,
+            PrepareOutputLayout::AnyRegion,
+        ] {
+            for kind in ["mesh", "texture", "mask"] {
+                let mut renderer = SceneRenderer::new(&device, &queue);
+                renderer.set_placement_mode(mode);
+                let output = target(&device);
+                let mesh = sources::unit_quad().with_output_layout(layout);
+                let green_calls = Arc::new(AtomicUsize::new(0));
+                let count = green_calls.clone();
+                let green = TextureSource::new(
+                    TextureDescriptor::new([1, 1], wgpu::TextureFormat::Rgba8Unorm),
+                    move |mut context| {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        upload_texture(&mut context.gpu, &context.target, &[0, 255, 0, 255])
+                    },
+                )
+                .with_output_layout(layout);
+                let mut old = Scene::default();
+                old.resources.share_mesh(&mesh).expect("mesh definition");
+                old.resources.share_texture(&green).expect("old definition");
+                old.phases.push(Phase {
+                    objects: vec![quad(mesh.id(), green.id())],
+                });
+                render(&mut renderer, &old, &output);
+                let before = pixels(&device, &queue, &output);
+                assert!(before.chunks_exact(4).all(|p| p == [0, 255, 0, 255]));
+                let old_capacity = renderer.stats().placement;
 
-            let red_calls = Arc::new(AtomicUsize::new(0));
-            let count = red_calls.clone();
-            let red = TextureSource::new(
-                TextureDescriptor::new([1, 1], wgpu::TextureFormat::Rgba8Unorm),
-                move |mut context| {
-                    count.fetch_add(1, Ordering::SeqCst);
-                    upload_texture(&mut context.gpu, &context.target, &[255, 0, 0, 255])
-                },
-            );
-            let mut scene = Scene::default();
-            scene.resources.share_mesh(&mesh).expect("mesh definition");
-            scene.resources.share_texture(&red).expect("new definition");
-            scene.phases.push(Phase {
-                objects: vec![quad(mesh.id(), red.id())],
-            });
-            let fail = Arc::new(AtomicBool::new(true));
-            let trigger = fail.clone();
-            let mut object = quad(mesh.id(), red.id());
-            match kind {
-                "mesh" => {
-                    let source = sources::unit_quad();
-                    object.mesh = scene
-                        .resources
-                        .insert_mesh(MeshSource::new(*source.descriptor(), move |context| {
-                            if trigger.swap(false, Ordering::SeqCst) {
-                                panic_any(ProviderPanic(kind));
-                            }
-                            source.prepare(context)
-                        }))
-                        .expect("panicking mesh");
+                let red_calls = Arc::new(AtomicUsize::new(0));
+                let count = red_calls.clone();
+                let red = TextureSource::new(
+                    TextureDescriptor::new([1, 1], wgpu::TextureFormat::Rgba8Unorm),
+                    move |mut context| {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        upload_texture(&mut context.gpu, &context.target, &[255, 0, 0, 255])
+                    },
+                )
+                .with_output_layout(layout);
+                let mut scene = Scene::default();
+                scene.resources.share_mesh(&mesh).expect("mesh definition");
+                scene.resources.share_texture(&red).expect("new definition");
+                scene.phases.push(Phase {
+                    objects: vec![quad(mesh.id(), red.id())],
+                });
+                let fail = Arc::new(AtomicBool::new(true));
+                let trigger = fail.clone();
+                let mut object = quad(mesh.id(), red.id());
+                match kind {
+                    "mesh" => {
+                        let source = sources::unit_quad();
+                        object.mesh = scene
+                            .resources
+                            .insert_mesh(
+                                MeshSource::new(*source.descriptor(), move |context| {
+                                    if trigger.swap(false, Ordering::SeqCst) {
+                                        panic_any(ProviderPanic(kind));
+                                    }
+                                    source.prepare(context)
+                                })
+                                .with_output_layout(layout),
+                            )
+                            .expect("panicking mesh");
+                    }
+                    "texture" => {
+                        object.texture = scene
+                            .resources
+                            .insert_texture(
+                                TextureSource::new(*red.descriptor(), move |mut context| {
+                                    if trigger.swap(false, Ordering::SeqCst) {
+                                        panic_any(ProviderPanic(kind));
+                                    }
+                                    upload_texture(
+                                        &mut context.gpu,
+                                        &context.target,
+                                        &[255, 0, 0, 255],
+                                    )
+                                })
+                                .with_output_layout(layout),
+                            )
+                            .expect("panicking texture");
+                    }
+                    _ => {
+                        let mask = scene
+                            .resources
+                            .insert_mask(
+                                MaskSource::new(
+                                    TextureDescriptor::new([1, 1], wgpu::TextureFormat::R8Unorm),
+                                    move |mut context| {
+                                        if trigger.swap(false, Ordering::SeqCst) {
+                                            panic_any(ProviderPanic(kind));
+                                        }
+                                        upload_texture(&mut context.gpu, &context.target, &[255])
+                                    },
+                                )
+                                .with_output_layout(layout),
+                            )
+                            .expect("panicking mask");
+                        scene.pixel_masks.push(PixelMask {
+                            mesh: mesh.id(),
+                            texture: mask,
+                            transform: object.transform,
+                            parent: None,
+                        });
+                        object.mask = Some(PixelMaskIndex(0));
+                    }
                 }
-                "texture" => {
-                    object.texture = scene
-                        .resources
-                        .insert_texture(TextureSource::new(
-                            *red.descriptor(),
-                            move |mut context| {
-                                if trigger.swap(false, Ordering::SeqCst) {
-                                    panic_any(ProviderPanic(kind));
-                                }
-                                upload_texture(&mut context.gpu, &context.target, &[255, 0, 0, 255])
-                            },
-                        ))
-                        .expect("panicking texture");
-                }
-                _ => {
-                    let mask = scene
-                        .resources
-                        .insert_mask(MaskSource::new(
-                            TextureDescriptor::new([1, 1], wgpu::TextureFormat::R8Unorm),
-                            move |mut context| {
-                                if trigger.swap(false, Ordering::SeqCst) {
-                                    panic_any(ProviderPanic(kind));
-                                }
-                                upload_texture(&mut context.gpu, &context.target, &[255])
-                            },
-                        ))
-                        .expect("panicking mask");
-                    scene.pixel_masks.push(PixelMask {
-                        mesh: mesh.id(),
-                        texture: mask,
-                        transform: object.transform,
-                        parent: None,
-                    });
-                    object.mask = Some(PixelMaskIndex(0));
-                }
+                scene.phases.push(Phase {
+                    objects: vec![object],
+                });
+                let panic =
+                    catch_unwind(AssertUnwindSafe(|| render(&mut renderer, &scene, &output)))
+                        .expect_err("provider panic propagates");
+                assert_eq!(
+                    panic
+                        .downcast_ref::<ProviderPanic>()
+                        .expect("original typed payload")
+                        .0,
+                    kind
+                );
+                assert_eq!(
+                    red_calls.load(Ordering::SeqCst),
+                    1,
+                    "phase-zero callback ran but was never submitted"
+                );
+                assert_eq!(
+                    renderer.stats().placement,
+                    old_capacity,
+                    "all provisional placement was released"
+                );
+                assert_eq!(
+                    pixels(&device, &queue, &output),
+                    before,
+                    "unsubmitted work never changed the destination"
+                );
+                render(&mut renderer, &old, &output);
+                assert_eq!(
+                    green_calls.load(Ordering::SeqCst),
+                    1,
+                    "old valid residency survived"
+                );
+                render(&mut renderer, &scene, &output);
+                assert_eq!(
+                    red_calls.load(Ordering::SeqCst),
+                    2,
+                    "unsubmitted content is regenerated"
+                );
+                assert!(
+                    pixels(&device, &queue, &output)
+                        .chunks_exact(4)
+                        .all(|p| p == [255, 0, 0, 255])
+                );
+                render(&mut renderer, &scene, &output);
+                assert_eq!(renderer.stats().prepared, 0, "recovered frame becomes warm");
+                assert_eq!(
+                    renderer.stats().bind_groups,
+                    0,
+                    "recovered workspace and bindings remain reusable"
+                );
             }
-            scene.phases.push(Phase {
-                objects: vec![object],
-            });
-            let panic = catch_unwind(AssertUnwindSafe(|| render(&mut renderer, &scene, &output)))
-                .expect_err("provider panic propagates");
-            assert_eq!(
-                panic
-                    .downcast_ref::<ProviderPanic>()
-                    .expect("original typed payload")
-                    .0,
-                kind
-            );
-            assert_eq!(
-                red_calls.load(Ordering::SeqCst),
-                1,
-                "phase-zero callback ran but was never submitted"
-            );
-            assert_eq!(
-                renderer.stats().placement,
-                old_capacity,
-                "all provisional placement was released"
-            );
-            assert_eq!(
-                pixels(&device, &queue, &output),
-                before,
-                "unsubmitted work never changed the destination"
-            );
-            render(&mut renderer, &old, &output);
-            assert_eq!(
-                green_calls.load(Ordering::SeqCst),
-                1,
-                "old valid residency survived"
-            );
-            render(&mut renderer, &scene, &output);
-            assert_eq!(
-                red_calls.load(Ordering::SeqCst),
-                2,
-                "unsubmitted content is regenerated"
-            );
-            assert!(
-                pixels(&device, &queue, &output)
-                    .chunks_exact(4)
-                    .all(|p| p == [255, 0, 0, 255])
-            );
-            render(&mut renderer, &scene, &output);
-            assert_eq!(renderer.stats().prepared, 0, "recovered frame becomes warm");
-            assert_eq!(
-                renderer.stats().bind_groups,
-                0,
-                "recovered workspace and bindings remain reusable"
-            );
         }
     }
     assert!(
