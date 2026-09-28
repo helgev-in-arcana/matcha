@@ -11,7 +11,7 @@ fn sdf(point:vec2<f32>,half_size:vec2<f32>,corners:vec4<f32>)->f32 {
     let q=abs(point)-(half_size-vec2<f32>(r));return length(max(q,vec2<f32>(0.)))+min(max(q.x,q.y),0.)-r;
 }
 @fragment fn shape(@builtin(position) pixel:vec4<f32>)->@location(0) vec4<f32> {
-    let point=pixel.xy-p.size.xy*0.5;
+    let point=pixel.xy-vec2<f32>(p.direction.zw)-p.size.xy*0.5;
     let half_size=max(p.size.xy*0.5-vec2<f32>(p.size.z),vec2<f32>(0.));
     var c=clamp(0.5-sdf(point,half_size,p.radius),0.,1.);
     if any(p.border>vec4<f32>(0.)) {
@@ -24,7 +24,7 @@ fn sdf(point:vec2<f32>,half_size:vec2<f32>,corners:vec4<f32>)->f32 {
     return vec4<f32>(round(c*255.)/255.,0.,0.,1.);
 }
 @fragment fn blur(@builtin(position) pixel:vec4<f32>)->@location(0) vec4<f32> {
-    let xy=vec2<i32>(pixel.xy);let maximum=vec2<i32>(textureDimensions(input_image))-vec2<i32>(1);
+    let xy=vec2<i32>(pixel.xy)-p.direction.zw;let maximum=vec2<i32>(textureDimensions(input_image))-vec2<i32>(1);
     let radius=i32(p.size.w);var sum=0u;
     for(var i=-radius;i<=radius;i++) {
         let at=clamp(xy+p.direction.xy*i,vec2<i32>(0),maximum);

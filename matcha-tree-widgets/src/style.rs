@@ -9,7 +9,7 @@ use matcha_tree::ui_tree::{
     context::UiContext,
     metrics::{Constraints, QRect},
 };
-use render_interface::{PrepareResult, TexturePrepareContext};
+use render_interface::{PrepareOutputLayout, PrepareResult, TexturePrepareContext};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -18,8 +18,11 @@ use std::sync::{
 pub struct PreparedStyle {
     ids: Arc<[u64]>,
     paint: Arc<dyn for<'a> Fn(TexturePrepareContext<'a>) -> PrepareResult + Send + Sync>,
+    output_layout: PrepareOutputLayout,
 }
 impl PreparedStyle {
+    /// Custom painters initially require a whole logical texture. Opt into
+    /// `AnyRegion` only after using region-relative upload/render operations.
     pub fn new(
         paint: impl for<'a> Fn(TexturePrepareContext<'a>) -> PrepareResult + Send + Sync + 'static,
     ) -> Self {
@@ -29,7 +32,17 @@ impl PreparedStyle {
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
                 .expect("style identity exhausted")]),
             paint: Arc::new(paint),
+            output_layout: PrepareOutputLayout::WholeResource,
         }
+    }
+    /// Opt into an output region whose origin may be nonzero. A painter making
+    /// this promise must confine all reads and writes using the region contract.
+    pub fn with_output_layout(mut self, layout: PrepareOutputLayout) -> Self {
+        self.output_layout = layout;
+        self
+    }
+    pub fn output_layout(&self) -> PrepareOutputLayout {
+        self.output_layout
     }
     pub(crate) fn ids(&self) -> &[u64] {
         &self.ids
@@ -83,10 +96,22 @@ impl Style for Vec<Arc<dyn Style>> {
             .flat_map(|p| p.ids().iter().copied())
             .collect::<Vec<_>>()
             .into();
+        let output_layout = combined_output_layout(&painters);
         Some(PreparedStyle {
             ids,
+            output_layout,
             paint: Arc::new(move |context| record_all(&painters, context)),
         })
+    }
+}
+pub(crate) fn combined_output_layout(painters: &[PreparedStyle]) -> PrepareOutputLayout {
+    if painters
+        .iter()
+        .all(|paint| paint.output_layout() == PrepareOutputLayout::AnyRegion)
+    {
+        PrepareOutputLayout::AnyRegion
+    } else {
+        PrepareOutputLayout::WholeResource
     }
 }
 pub(crate) fn record_all(
@@ -99,13 +124,40 @@ pub(crate) fn record_all(
                 device: context.gpu.device,
                 encoder: &mut *context.gpu.encoder,
                 snapshot: context.gpu.snapshot,
+                render_pass_cache: &mut *context.gpu.render_pass_cache,
             },
             target: render_interface::TextureTarget {
                 desc: context.target.desc,
-                texture: context.target.texture,
-                view: context.target.view,
+                region: context.target.region,
             },
         })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod output_layout_tests {
+    use super::*;
+
+    #[test]
+    fn custom_painters_require_whole_output_until_they_opt_in() {
+        let custom = PreparedStyle::new(|_| Ok(()));
+        assert_eq!(custom.output_layout(), PrepareOutputLayout::WholeResource);
+        let aware = custom.with_output_layout(PrepareOutputLayout::AnyRegion);
+        assert_eq!(aware.output_layout(), PrepareOutputLayout::AnyRegion);
+    }
+
+    #[test]
+    fn composite_capability_requires_every_painter_to_support_regions() {
+        let aware =
+            PreparedStyle::new(|_| Ok(())).with_output_layout(PrepareOutputLayout::AnyRegion);
+        assert_eq!(
+            combined_output_layout(&[aware.clone(), aware.clone()]),
+            PrepareOutputLayout::AnyRegion
+        );
+        assert_eq!(
+            combined_output_layout(&[aware, PreparedStyle::new(|_| Ok(()))]),
+            PrepareOutputLayout::WholeResource
+        );
+    }
 }

@@ -95,25 +95,17 @@ impl GuiRenderer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let mut desc = MaskDescriptor::new([1, 1], wgpu::TextureFormat::R8Unorm);
         desc.usages = wgpu::TextureUsages::RENDER_ATTACHMENT;
-        let clip = MaskSource::new(desc, |c| {
-            let attachments = [Some(wgpu::RenderPassColorAttachment {
-                view: c.target.view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
+        let clip = MaskSource::new(desc, |mut c| {
+            let _pass = c.target.region.begin_render_pass(
+                &mut c.gpu,
+                render_interface::RegionRenderPassDescriptor {
                     load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                    store: wgpu::StoreOp::Store,
-                },
-            })];
-            let _pass = c
-                .gpu
-                .encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    color_attachments: &attachments,
                     ..Default::default()
-                });
+                },
+            )?;
             Ok(())
-        });
+        })
+        .with_output_layout(render_interface::PrepareOutputLayout::AnyRegion);
         Self {
             frame: crate::scene::Frame::default(),
             backend: SceneRenderer::new(device, queue),

@@ -47,7 +47,8 @@ impl Style for SolidBox {
             let vertices = crate::paint::rectangle([0., 0.], boundary, rgba, offset);
             *cache = Some((
                 key,
-                PreparedStyle::new(move |mut c| crate::paint::draw(&mut c, &vertices, None)),
+                PreparedStyle::new(move |mut c| crate::paint::draw(&mut c, &vertices, None))
+                    .with_output_layout(render_interface::PrepareOutputLayout::AnyRegion),
             ));
         }
         cache.as_ref().map(|(_, p)| p.clone())

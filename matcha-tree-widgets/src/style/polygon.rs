@@ -185,7 +185,8 @@ impl Polygon {
             return None;
         }
         let painter =
-            PreparedStyle::new(move |mut context| paint::draw(&mut context, &vertices, None));
+            PreparedStyle::new(move |mut context| paint::draw(&mut context, &vertices, None))
+                .with_output_layout(render_interface::PrepareOutputLayout::AnyRegion);
         if self.cache_the_mesh {
             *self.prepared.lock() = Some(PreparedCache {
                 key: resolved.key,

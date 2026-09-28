@@ -1,9 +1,10 @@
 //! Private widget painting into logical outputs. CPU/UI-dependent values are
 //! resolved before these owned commands are captured by a resource generator.
-//! No atlas coordinates, final-frame phases or queue submissions live here.
+//! Region helpers confine writes to the assigned logical output; final-frame
+//! phases and queue submission remain outside widget painters.
 use render_interface::{
-    GpuPrepareContext, PrepareResult, TextureDescriptor, TexturePrepareContext, TextureTarget,
-    upload_texture,
+    GpuPrepareContext, PrepareResult, RegionRenderPassDescriptor, TextureDescriptor,
+    TexturePrepareContext, TextureRegion, TextureTarget, upload_texture,
 };
 use std::{cell::RefCell, sync::Arc};
 use wgpu::util::DeviceExt;
@@ -84,30 +85,22 @@ pub(crate) fn rectangle(
         .collect()
 }
 
-pub(crate) fn clear(context: &mut TexturePrepareContext<'_>, rgba: [f32; 4]) {
+pub(crate) fn clear(context: &mut TexturePrepareContext<'_>, rgba: [f32; 4]) -> PrepareResult {
     let [r, g, b, a] = rgba;
-    let attachments = [Some(wgpu::RenderPassColorAttachment {
-        view: context.target.view,
-        depth_slice: None,
-        resolve_target: None,
-        ops: wgpu::Operations {
+    let _pass = context.target.region.begin_render_pass(
+        &mut context.gpu,
+        RegionRenderPassDescriptor {
+            label: Some("widget logical clear"),
             load: wgpu::LoadOp::Clear(wgpu::Color {
                 r: (r * a) as f64,
                 g: (g * a) as f64,
                 b: (b * a) as f64,
                 a: a as f64,
             }),
-            store: wgpu::StoreOp::Store,
-        },
-    })];
-    let _pass = context
-        .gpu
-        .encoder
-        .begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("widget logical clear"),
-            color_attachments: &attachments,
             ..Default::default()
-        });
+        },
+    )?;
+    Ok(())
 }
 
 struct Pipelines {
@@ -222,13 +215,13 @@ pub(crate) fn draw(
             device: context.gpu.device,
             encoder: context.gpu.encoder,
             snapshot: context.gpu.snapshot,
+            render_pass_cache: &mut *context.gpu.render_pass_cache,
         };
         upload_texture(
             &mut gpu,
             &TextureTarget {
                 desc: &desc,
-                texture: &texture,
-                view: &view,
+                region: TextureRegion::whole(&view, desc.format)?,
             },
             &data.pixels,
         )?;
@@ -236,13 +229,13 @@ pub(crate) fn draw(
     } else {
         None
     };
-    PIPELINES.with_borrow_mut(|cache| {
+    PIPELINES.with_borrow_mut(|cache| -> PrepareResult {
         if cache.as_ref().is_none_or(|p| {
-            p.device != *context.gpu.device || p.format != context.target.desc.format
+            p.device != *context.gpu.device || p.format != context.target.region.view_format()
         }) {
             *cache = Some(Pipelines::new(
                 context.gpu.device,
-                context.target.desc.format,
+                context.target.region.view_format(),
             ));
         }
         let pipelines = cache.as_ref().expect("pipeline cache initialized");
@@ -265,23 +258,14 @@ pub(crate) fn draw(
                     ],
                 })
         });
-        let attachments = [Some(wgpu::RenderPassColorAttachment {
-            view: context.target.view,
-            depth_slice: None,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
-        })];
-        let mut pass = context
-            .gpu
-            .encoder
-            .begin_render_pass(&wgpu::RenderPassDescriptor {
+        let mut pass = context.target.region.begin_render_pass(
+            &mut context.gpu,
+            RegionRenderPassDescriptor {
                 label: Some("widget logical paint"),
-                color_attachments: &attachments,
+                load: wgpu::LoadOp::Load,
                 ..Default::default()
-            });
+            },
+        )?;
         pass.set_pipeline(if group.is_some() {
             &pipelines.image
         } else {
@@ -292,6 +276,6 @@ pub(crate) fn draw(
         }
         pass.set_vertex_buffer(0, buffer.slice(..));
         pass.draw(0..vertices.len() as u32, 0..1);
-    });
-    Ok(())
+        Ok(())
+    })
 }

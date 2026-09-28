@@ -599,7 +599,8 @@ fn rasterize_bitmap(
             wgpu::TextureFormat::R8Unorm,
         ),
         move |mut c| upload_texture(&mut c.gpu, &c.target, &image.data),
-    );
+    )
+    .with_output_layout(render_interface::PrepareOutputLayout::AnyRegion);
 
     Some((
         region,

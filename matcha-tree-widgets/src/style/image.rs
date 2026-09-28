@@ -279,7 +279,8 @@ impl Image {
                 key,
                 PreparedStyle::new(move |mut context| {
                     paint::draw(&mut context, &vertices, Some(&image))
-                }),
+                })
+                .with_output_layout(render_interface::PrepareOutputLayout::AnyRegion),
             ));
         }
         cache

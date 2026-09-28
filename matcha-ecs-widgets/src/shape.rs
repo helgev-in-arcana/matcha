@@ -146,7 +146,8 @@ impl ShapeCtx {
                 .as_ref()
                 .expect("programs initialized for this device")
                 .prepare(c, key)
-        });
+        })
+        .with_output_layout(render_interface::PrepareOutputLayout::AnyRegion);
 
         self.0.coverage.lock().insert(key, region.clone());
         Some(region)

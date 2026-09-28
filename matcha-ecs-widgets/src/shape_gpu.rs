@@ -94,7 +94,11 @@ impl ShapeGpu {
             dummy: image(device, [1, 1]).create_view(&Default::default()),
         }
     }
-    pub(crate) fn prepare(&self, ctx: MaskPrepareContext<'_>, key: CoverageKey) -> PrepareResult {
+    pub(crate) fn prepare(
+        &self,
+        mut ctx: MaskPrepareContext<'_>,
+        key: CoverageKey,
+    ) -> PrepareResult {
         let radius = (key.blur_16th as f32 / 16. * 1.12).round();
         let p = Params {
             size: [
@@ -108,52 +112,54 @@ impl ShapeGpu {
             direction: [0; 4],
         };
         if radius == 0. {
-            self.draw(
-                ctx.gpu.encoder,
-                ctx.target.view,
-                &self.dummy,
-                &self.shape,
-                p,
-            );
+            self.draw(&mut ctx.gpu, ctx.target.region, &self.dummy, &self.shape, p)?;
             return Ok(());
         }
         let a = image(ctx.gpu.device, [key.w, key.h]);
         let b = image(ctx.gpu.device, [key.w, key.h]);
         let av = a.create_view(&Default::default());
         let bv = b.create_view(&Default::default());
-        self.draw(ctx.gpu.encoder, &av, &self.dummy, &self.shape, p);
+        let ar = TextureRegion::whole(&av, wgpu::TextureFormat::R8Unorm)?;
+        let br = TextureRegion::whole(&bv, wgpu::TextureFormat::R8Unorm)?;
+        self.draw(&mut ctx.gpu, ar, &self.dummy, &self.shape, p)?;
         for i in 0..3 {
             self.draw(
-                ctx.gpu.encoder,
-                &bv,
+                &mut ctx.gpu,
+                br,
                 &av,
                 &self.blur,
                 Params {
                     direction: [1, 0, 0, 0],
                     ..p
                 },
-            );
+            )?;
             self.draw(
-                ctx.gpu.encoder,
-                if i == 2 { ctx.target.view } else { &av },
+                &mut ctx.gpu,
+                if i == 2 { ctx.target.region } else { ar },
                 &bv,
                 &self.blur,
                 Params {
                     direction: [0, 1, 0, 0],
                     ..p
                 },
-            );
+            )?;
         }
         Ok(())
     }
     fn draw(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
-        target: &wgpu::TextureView,
+        gpu: &mut GpuPrepareContext<'_>,
+        target: TextureRegion<'_>,
         input: &wgpu::TextureView,
         pipeline: &wgpu::RenderPipeline,
-        p: Params,
-    ) {
+        mut p: Params,
+    ) -> PrepareResult {
+        // Fragment builtin(position) is attachment-relative even when viewport
+        // and scissor select one atlas region. Shapes and private blur inputs
+        // use logical output pixels, so convert back before evaluating either.
+        let [x, y] = target.origin();
+        p.direction[2] = x as i32;
+        p.direction[3] = y as i32;
         let uniform = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -175,23 +181,18 @@ impl ShapeGpu {
                 },
             ],
         });
-        let attachments = [Some(wgpu::RenderPassColorAttachment {
-            view: target,
-            depth_slice: None,
-            resolve_target: None,
-            ops: wgpu::Operations {
+        let mut pass = target.begin_render_pass(
+            gpu,
+            RegionRenderPassDescriptor {
+                label: Some("widget resource generation"),
                 load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                store: wgpu::StoreOp::Store,
+                ..Default::default()
             },
-        })];
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("widget resource generation"),
-            color_attachments: &attachments,
-            ..Default::default()
-        });
+        )?;
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &group, &[]);
         pass.draw(0..3, 0..1);
+        Ok(())
     }
 }
 fn image(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {

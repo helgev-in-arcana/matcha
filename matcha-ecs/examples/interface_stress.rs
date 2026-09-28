@@ -89,25 +89,17 @@ fn rect(w: f32, h: f32) -> Matrix4<f32> {
 fn white() -> TextureSource {
     let mut desc = TextureDescriptor::new([1, 1], wgpu::TextureFormat::Rgba8Unorm);
     desc.usages = wgpu::TextureUsages::RENDER_ATTACHMENT;
-    TextureSource::new(desc, |c| {
-        let attachments = [Some(wgpu::RenderPassColorAttachment {
-            view: c.target.view,
-            depth_slice: None,
-            resolve_target: None,
-            ops: wgpu::Operations {
+    TextureSource::new(desc, |mut c| {
+        let _pass = c.target.region.begin_render_pass(
+            &mut c.gpu,
+            RegionRenderPassDescriptor {
                 load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                store: wgpu::StoreOp::Store,
-            },
-        })];
-        let _pass = c
-            .gpu
-            .encoder
-            .begin_render_pass(&wgpu::RenderPassDescriptor {
-                color_attachments: &attachments,
                 ..Default::default()
-            });
+            },
+        )?;
         Ok(())
     })
+    .with_output_layout(PrepareOutputLayout::AnyRegion)
 }
 
 #[repr(C)]
@@ -116,6 +108,12 @@ struct EffectParams {
     transform: Matrix4<f32>,
     viewport_size: [f32; 4],
     mode: [u32; 4],
+}
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct EffectRegions {
+    input: [u32; 4],
+    output: [u32; 4],
 }
 struct Program {
     device: wgpu::Device,
@@ -158,21 +156,39 @@ fn effect(
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
+    let [ix, iy] = gpu.snapshot.color.origin();
+    let [iw, ih] = gpu.snapshot.color.size();
+    let [ox, oy] = target.region.origin();
+    let [ow, oh] = target.region.size();
+    let regions = gpu
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("physical image regions"),
+            contents: bytemuck::bytes_of(&EffectRegions {
+                input: [ix, iy, iw, ih],
+                output: [ox, oy, ow, oh],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
     let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &program.pipeline.get_bind_group_layout(0),
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(gpu.snapshot.color_view),
+                resource: wgpu::BindingResource::TextureView(gpu.snapshot.color.view()),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::TextureView(target.view),
+                resource: wgpu::BindingResource::TextureView(target.region.view()),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: regions.as_entire_binding(),
             },
         ],
     });
@@ -220,7 +236,8 @@ fn verify_framework_order(device: &wgpu::Device, queue: &wgpu::Queue, directory:
             let programs = programs.clone();
             let texture = TextureSource::new(descriptor([width as u32, 16]), move |c| {
                 effect(&programs, params, c.gpu, c.target)
-            });
+            })
+            .with_output_layout(PrepareOutputLayout::AnyRegion);
             let mesh = draw.mesh(&unit_quad());
             let texture = draw.texture(&texture);
             draw.backdrop(Object::new(mesh, texture, rect(width, 16.)));
@@ -382,7 +399,8 @@ impl Widget for ShaderWidget {
                 let source = TextureSource::new(descriptor(ctx.size.map(|v| v as u32)), move |c| {
                     generated.fetch_add(1, Ordering::SeqCst);
                     effect(&programs, params, c.gpu, c.target)
-                });
+                })
+                .with_output_layout(PrepareOutputLayout::AnyRegion);
                 let texture = draw.texture(&source);
                 draw.backdrop(Object::new(mesh, texture, rect(ctx.size[0], ctx.size[1])));
             }),
@@ -491,7 +509,8 @@ fn main() {
             c.gpu,
             c.target,
         )
-    });
+    })
+    .with_output_layout(PrepareOutputLayout::AnyRegion);
     let effect_calls = Arc::new(AtomicUsize::new(0));
     let mut world = World::new();
     let root = world.spawn(ViewChildren::default()).id();

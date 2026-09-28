@@ -277,7 +277,8 @@ fn image_render_item(image_ctx: ImageCtx, source: ImageSource, fit: ObjectFit) -
         let region = TextureSource::new(
             TextureDescriptor::new([w, h], wgpu::TextureFormat::Rgba8UnormSrgb),
             move |mut c| upload_texture(&mut c.gpu, &c.target, &bytes),
-        );
+        )
+        .with_output_layout(render_interface::PrepareOutputLayout::AnyRegion);
 
         let entry = (region, [w as f32, h as f32]);
         let owner = match &source {

@@ -7,7 +7,7 @@ use matcha_tree::{
     },
 };
 use parking_lot::Mutex;
-/// Clears only the widget's private decoration output, never the final Scene.
+/// Clears only the widget's assigned decoration region, never the final Scene.
 pub struct ViewportClear {
     pub color: Color,
     cache: Mutex<Option<([u32; 4], PreparedStyle)>>,
@@ -32,10 +32,8 @@ impl Style for ViewportClear {
         if cache.as_ref().is_none_or(|(old, _)| *old != key) {
             *cache = Some((
                 key,
-                PreparedStyle::new(move |mut c| {
-                    crate::paint::clear(&mut c, color);
-                    Ok(())
-                }),
+                PreparedStyle::new(move |mut c| crate::paint::clear(&mut c, color))
+                    .with_output_layout(render_interface::PrepareOutputLayout::AnyRegion),
             ));
         }
         cache.as_ref().map(|(_, p)| p.clone())

@@ -334,6 +334,30 @@ fn stock_sources_reuse_change_prune_and_relocate_through_the_real_tree() {
     );
     let mut pod = h.context([128.; 2], |ctx| view.build(ctx));
     h.emit(&mut pod, &mut frame, [128.; 2]);
+    for id in frame.scene.resources.texture_ids() {
+        assert_eq!(
+            frame
+                .scene
+                .resources
+                .texture(id)
+                .expect("stock texture definition")
+                .output_layout(),
+            render_interface::PrepareOutputLayout::AnyRegion,
+            "stock style composition can render directly into an assigned region"
+        );
+    }
+    for id in frame.scene.resources.mesh_ids() {
+        assert_eq!(
+            frame
+                .scene
+                .resources
+                .mesh(id)
+                .expect("stock mesh definition")
+                .output_layout(),
+            render_interface::PrepareOutputLayout::AnyRegion,
+            "quad upload respects its assigned buffer slice"
+        );
+    }
     let original = h.render(&mut renderer, &frame);
     close(pixel(&original, 16, 16), [255, 0, 0, 255]);
     close(pixel(&original, 80, 16), [0; 4]);

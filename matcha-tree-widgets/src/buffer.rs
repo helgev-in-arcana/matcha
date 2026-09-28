@@ -1,6 +1,6 @@
 //! Provider-owned logical decoration output. No Scene, RenderNode, GPU atlas
-//! allocation or Queue is cached here. Clears and overwrites are isolated to this
-//! widget image; they cannot erase widgets painted behind it in the final frame.
+//! allocation or Queue is cached here. Clears and overwrites stay within the
+//! assigned output region and cannot erase neighboring widget images.
 //!
 //! Natural buffers follow the union of their styles' required regions. Clipped
 //! widget decorations intersect that union with the widget's allocation explicitly.
@@ -15,15 +15,15 @@ use matcha_tree::ui_tree::{
 };
 use render_interface::Draw;
 use render_interface::{
-    Matrix4, MeshDescriptor, MeshSource, Object, TextureDescriptor, TextureSource, Vertex,
-    upload_buffer,
+    Matrix4, MeshDescriptor, MeshSource, Object, PrepareOutputLayout, TextureDescriptor,
+    TextureSource, Vertex, upload_buffer,
 };
 use std::sync::Arc;
 
 pub struct Buffer {
     style: Vec<Arc<dyn Style>>,
     clip_to_bounds: bool,
-    cache: Option<(Vec<u64>, [u32; 2], BufferData)>,
+    cache: Option<(Vec<u64>, [u32; 2], PrepareOutputLayout, BufferData)>,
     mesh: Option<([u32; 2], MeshSource)>,
 }
 pub struct BufferData {
@@ -88,6 +88,7 @@ impl Buffer {
             .iter()
             .flat_map(|paint| paint.ids().iter().copied())
             .collect();
+        let output_layout = crate::style::combined_output_layout(&painters);
         let uv_max = [
             logical_size[0] / size[0] as f32,
             logical_size[1] / size[1] as f32,
@@ -97,30 +98,34 @@ impl Buffer {
         if self
             .cache
             .as_ref()
-            .is_none_or(|(old, old_size, _)| *old != ids || *old_size != size)
+            .is_none_or(|(old, old_size, old_layout, _)| {
+                *old != ids || *old_size != size || *old_layout != output_layout
+            })
         {
             let mut desc = TextureDescriptor::new(size, wgpu::TextureFormat::Rgba16Float);
             desc.usages = wgpu::TextureUsages::RENDER_ATTACHMENT;
             let texture = TextureSource::new(desc, move |mut context| {
-                crate::paint::clear(&mut context, [0.; 4]);
+                crate::paint::clear(&mut context, [0.; 4])?;
                 crate::style::record_all(&painters, context)
-            });
+            })
+            .with_output_layout(output_layout);
             self.cache = Some((
                 ids,
                 size,
+                output_layout,
                 BufferData {
                     texture,
                     texture_position: region,
                     mesh: mesh.clone(),
                 },
             ));
-        } else if let Some((_, _, data)) = &mut self.cache {
+        } else if let Some((_, _, _, data)) = &mut self.cache {
             data.texture_position = region;
             if data.mesh.id() != mesh.id() {
                 data.mesh = mesh.clone();
             }
         }
-        self.cache.as_ref().map(|(_, _, data)| data)
+        self.cache.as_ref().map(|(_, _, _, data)| data)
     }
     fn ensure_mesh(&mut self, uv_max: [f32; 2]) {
         let key = uv_max.map(f32::to_bits);
@@ -145,7 +150,8 @@ impl Buffer {
                     context.target.vertices,
                     bytemuck::cast_slice(&vertices),
                 )
-            }),
+            })
+            .with_output_layout(PrepareOutputLayout::AnyRegion),
         ));
     }
     pub fn paint(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>) {

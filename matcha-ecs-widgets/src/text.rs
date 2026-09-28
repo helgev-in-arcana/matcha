@@ -128,7 +128,8 @@ impl FontCtx {
                     font.rasterize_indexed(glyph_id.glyph_index(), glyph_id.font_size());
                 upload_texture(&mut c.gpu, &c.target, &bytes)
             },
-        );
+        )
+        .with_output_layout(render_interface::PrepareOutputLayout::AnyRegion);
 
         let entry = (region, [metrics.width as f32, metrics.height as f32]);
         self.0.stencil_cache.lock().insert(glyph_id, entry.clone());
