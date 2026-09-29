@@ -8,10 +8,13 @@
 //! the interface's immutable-content and first-reference rules: reusing an ID does
 //! not request regeneration or move its preparation to a later phase.
 //!
-//! Producers share immutable source definitions and register them through Draw.
-//! Registration also acts as a retention hint, even without a drawing reference.
-//! `finish` removes definitions neither registered nor referenced this frame. It
-//! does so on failure too; the first assembly error remains until the next `begin`.
+//! Producers own reusable source definitions and explicitly register them each
+//! frame through Draw or the Scene's ResourcePool. Registration without an Object
+//! also conveys a retention hint to the renderer. The builder makes no retention
+//! decisions: `begin` clears the prior frame's registrations and `finish` keeps
+//! every new registration, including undrawn sources. IDs stay stable across
+//! registration, so the renderer can reuse their existing GPU content.
+//! The first assembly error remains until the next `begin`.
 //! A failed frame must not be rendered. Assembly never executes a source callback
 //! or allocates GPU resources; renderer validation and GPU errors remain separate.
 //!
@@ -36,7 +39,7 @@
 //! }
 //! ```
 use crate::interface::*;
-use std::{collections::HashSet, sync::LazyLock};
+use std::sync::LazyLock;
 
 /// Shared immutable mesh definition for a `[0, 1]` quad with matching UVs.
 /// Cloning this definition preserves its ID and shares its generator allocation.
@@ -88,21 +91,19 @@ static QUAD: LazyLock<MeshSource> = LazyLock::new(|| {
 /// then finish before handing scene to a renderer.
 ///
 /// Public Scene access lets the framework install inherited masks. It must
-/// register or reference their resource definitions during the frame. Draw checks
+/// register their resource definitions during each frame. Draw checks
 /// referenced mask chains; the renderer validates the remaining Scene contract.
 #[derive(Default)]
 pub struct Frame {
     pub scene: Scene,
-    meshes: HashSet<MeshId>,
-    textures: HashSet<TextureId>,
-    masks: HashSet<MaskId>,
     phase: usize,
     error: Option<String>,
 }
 
 impl Frame {
-    /// Begin a fresh frame, clearing draw records and the previous error while
-    /// retaining definitions until `finish` decides which ones remain in use.
+    /// Begin a fresh submission, clearing draw records, source registrations and
+    /// the previous error. Producers retain reusable Sources and register them
+    /// again as needed; the renderer's GPU cache is unaffected.
     pub fn begin(&mut self) {
         for p in &mut self.scene.phases {
             p.objects.clear();
@@ -111,9 +112,7 @@ impl Frame {
             self.scene.phases.push(Phase::default());
         }
         self.scene.pixel_masks.clear();
-        self.meshes.clear();
-        self.textures.clear();
-        self.masks.clear();
+        self.scene.resources.clear();
         self.phase = 0;
         self.error = None;
     }
@@ -135,20 +134,12 @@ impl Frame {
         }
     }
 
-    /// Prune definitions absent from this frame and report its first assembly
-    /// error. Calling this again returns the same result until `begin` resets the
-    /// frame (or later writing introduces an error into a previously valid one).
+    /// Finish the active phase list and report the first assembly error, keeping
+    /// every explicitly registered source. Calling this again returns the same
+    /// result until `begin` resets the frame (or later writing introduces an error
+    /// into a previously valid one).
     /// An error does not roll back emitted Objects; do not render that frame.
     pub fn finish(&mut self) -> Result<(), String> {
-        self.scene
-            .resources
-            .retain_meshes(|id| self.meshes.contains(&id));
-        self.scene
-            .resources
-            .retain_textures(|id| self.textures.contains(&id));
-        self.scene
-            .resources
-            .retain_masks(|id| self.masks.contains(&id));
         self.scene.phases.truncate(self.phase + 1);
         self.error.clone().map_or(Ok(()), Err)
     }
@@ -170,33 +161,33 @@ pub struct Draw<'a> {
 }
 
 impl Draw<'_> {
-    /// Resolved local-to-viewport placement, including nested translated scopes.
+    /// Resolved local-to-viewport placement, including nested transformed scopes.
     /// Backdrop generators capture this when mapping local pixels to the snapshot.
     pub fn transform(&self) -> Matrix4<f32> {
         self.transform
     }
 
-    /// Register or retain a mesh definition without executing its generator.
+    /// Register a mesh definition without drawing or executing its generator.
+    /// Call even without an Object to convey a retention hint for this frame.
     pub fn mesh(&mut self, source: &MeshSource) -> MeshId {
-        self.frame.meshes.insert(source.id());
         if let Err(e) = self.frame.scene.resources.share_mesh(source) {
             self.frame.fail(e);
         }
         source.id()
     }
 
-    /// Register or retain a colour definition without executing its generator.
+    /// Register a colour definition without drawing or executing its generator.
+    /// Call even without an Object to convey a retention hint for this frame.
     pub fn texture(&mut self, source: &TextureSource) -> TextureId {
-        self.frame.textures.insert(source.id());
         if let Err(e) = self.frame.scene.resources.share_texture(source) {
             self.frame.fail(e);
         }
         source.id()
     }
 
-    /// Register or retain a coverage definition without executing its generator.
+    /// Register a coverage definition without drawing or executing its generator.
+    /// Call even without an Object to convey a retention hint for this frame.
     pub fn mask_source(&mut self, source: &MaskSource) -> MaskId {
-        self.frame.masks.insert(source.id());
         if let Err(e) = self.frame.scene.resources.share_mask(source) {
             self.frame.fail(e);
         }
@@ -226,8 +217,6 @@ impl Draw<'_> {
                 self.frame.fail("invalid draw mask definition/parent");
                 return;
             }
-            self.frame.meshes.insert(node.mesh);
-            self.frame.masks.insert(node.texture);
             mask = node.parent;
         }
         if !includes_inherited_mask {
@@ -241,8 +230,6 @@ impl Draw<'_> {
             self.frame.fail("missing draw resource");
             return;
         }
-        self.frame.meshes.insert(object.mesh);
-        self.frame.textures.insert(object.texture);
         object.transform = self.transform * object.transform;
         object.mask = resolved_mask;
         object.opacity *= self.opacity;
@@ -266,15 +253,29 @@ impl Draw<'_> {
         self.object(object);
     }
 
-    /// Compose local placement without storing a child drawing tree.
-    pub fn translated(&mut self, transform: Matrix4<f32>, paint: impl FnOnce(&mut Draw<'_>)) {
-        let mut child = Draw {
-            frame: self.frame,
+    /// Reborrow a child writer with composed local placement. Its lifetime is
+    /// bounded by this borrow, so the parent becomes usable again after the
+    /// child's last use. Parent scope values are never modified; no restoration
+    /// or child Scene is needed. Objects and phase boundaries share this Frame.
+    ///
+    /// ```
+    /// use render_interface::{Frame, Matrix4};
+    /// let mut frame = Frame::default();
+    /// frame.begin();
+    /// let mut root = frame.draw(Matrix4::identity(), None, 1.0);
+    /// let mut child = root.transformed(Matrix4::identity());
+    /// let grandchild = child.transformed(Matrix4::identity());
+    /// assert_eq!(grandchild.transform(), Matrix4::identity());
+    /// assert_eq!(root.transform(), Matrix4::identity());
+    /// frame.finish().expect("assembled frame");
+    /// ```
+    pub fn transformed<'b>(&'b mut self, transform: Matrix4<f32>) -> Draw<'b> {
+        Draw {
+            frame: &mut *self.frame,
             transform: self.transform * transform,
             mask: self.mask,
             opacity: self.opacity,
-        };
-        paint(&mut child);
+        }
     }
 
     /// Scope an arbitrary mesh/coverage mask. Only coverage inherits; geometry
@@ -405,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_retains_definitions_without_preparing_and_finish_prunes_absent_kinds() {
+    fn explicit_registration_keeps_undrawn_sources_without_preparation() {
         let (mesh, texture, mask) = (mesh(), texture(), coverage());
         let mut frame = Frame::default();
         frame.begin();
@@ -424,7 +425,19 @@ mod tests {
         assert!(frame.scene.phases[0].objects.is_empty());
 
         frame.begin();
-        assert_eq!(frame.scene.resources.len(), 3, "pruning waits for finish");
+        assert!(
+            frame.scene.resources.is_empty(),
+            "begin clears the previous submission"
+        );
+        frame.draw(Matrix4::identity(), None, 1.).texture(&texture);
+        frame
+            .finish()
+            .expect("caller requests only the colour this frame");
+        assert_eq!(frame.scene.resources.len(), 1);
+        assert!(frame.scene.resources.texture(texture.id()).is_some());
+        assert!(frame.scene.phases[0].objects.is_empty());
+
+        frame.begin();
         frame.finish().expect("empty next frame");
         assert!(frame.scene.resources.is_empty());
         assert!(frame.scene.pixel_masks.is_empty());
@@ -435,9 +448,9 @@ mod tests {
     }
 
     #[test]
-    fn references_keep_all_mask_ancestors_even_without_repeat_registration() {
+    fn finish_preserves_explicit_pool_entries_and_mask_ancestors() {
         let (object_mesh, ancestor_mesh) = (mesh(), mesh());
-        let (color, stale_color) = (texture(), texture());
+        let (color, undrawn_color) = (texture(), texture());
         let (outer, inner) = (coverage(), coverage());
         let mut frame = Frame::default();
         frame.begin();
@@ -446,13 +459,16 @@ mod tests {
             draw.mesh(&object_mesh);
             draw.mesh(&ancestor_mesh);
             draw.texture(&color);
-            draw.texture(&stale_color);
             draw.mask_source(&outer);
             draw.mask_source(&inner);
         }
-        frame.finish().expect("definitions retained for next frame");
-
-        frame.begin();
+        // Framework-owned registries can contribute definitions directly. No
+        // parallel builder bookkeeping is needed, even for an undrawn source.
+        frame
+            .scene
+            .resources
+            .share_texture(&undrawn_color)
+            .expect("explicit retention");
         let root = append_mask(&mut frame, &ancestor_mesh, &outer, None);
         let leaf = append_mask(&mut frame, &object_mesh, &inner, Some(root));
         frame
@@ -464,17 +480,30 @@ mod tests {
             ));
         frame
             .finish()
-            .expect("previous definitions are still available");
-        assert_eq!(frame.scene.resources.len(), 5);
+            .expect("all explicit registrations remain available");
+        assert_eq!(frame.scene.resources.len(), 6);
         assert!(frame.scene.resources.mesh(ancestor_mesh.id()).is_some());
         assert!(frame.scene.resources.mask(outer.id()).is_some());
         assert!(frame.scene.resources.mask(inner.id()).is_some());
-        assert!(frame.scene.resources.texture(stale_color.id()).is_none());
+        assert!(frame.scene.resources.texture(undrawn_color.id()).is_some());
         assert_eq!(frame.scene.phases[0].objects[0].mask, Some(leaf));
+
+        frame.begin();
+        frame
+            .draw(Matrix4::identity(), None, 1.)
+            .object(Object::new(
+                object_mesh.id(),
+                color.id(),
+                Matrix4::identity(),
+            ));
+        assert!(
+            frame.finish().is_err(),
+            "last frame's IDs do not supply this frame's definitions"
+        );
     }
 
     #[test]
-    fn assembly_error_is_sticky_until_begin_and_failed_finish_still_prunes() {
+    fn assembly_error_is_sticky_until_begin_without_pruning_registrations() {
         let (mesh, color, stale) = (mesh(), texture(), texture());
         let mut frame = Frame::default();
         frame.begin();
@@ -482,14 +511,17 @@ mod tests {
         frame.finish().expect("initial frame");
 
         frame.begin();
+        frame.draw(Matrix4::identity(), None, 1.).texture(&color);
         frame
             .draw(Matrix4::identity(), None, 1.)
             .object(Object::new(mesh.id(), color.id(), Matrix4::identity()));
         let first = frame.finish().expect_err("unregistered resources");
+        assert_eq!(frame.scene.resources.len(), 1);
         assert!(
-            frame.scene.resources.is_empty(),
-            "error does not retain stale entries"
+            frame.scene.resources.texture(color.id()).is_some(),
+            "finish does not prune explicit registrations on error"
         );
+        assert!(frame.scene.resources.texture(stale.id()).is_none());
         assert!(frame.scene.phases[0].objects.is_empty());
 
         // A later, different failure must not overwrite or consume the first one.
@@ -580,8 +612,9 @@ mod tests {
         frame.begin();
         {
             let mut draw = frame.draw(Matrix4::identity(), None, 1.);
-            // Already retained resource IDs remain ordinary immutable references.
-            draw.backdrop(Object::new(mesh.id(), colors[1].id(), Matrix4::identity()));
+            // Register the same immutable definition for the next submission.
+            let effect = object(&mut draw, &mesh, &colors[1]);
+            draw.backdrop(effect);
         }
         frame.finish().expect("only first backdrop remains");
         assert_eq!(frame.scene.phases.len(), 1, "discard inactive old phases");
@@ -618,6 +651,46 @@ mod tests {
     }
 
     #[test]
+    fn nested_reborrows_keep_parent_scope_and_share_backdrop_order() {
+        let mesh = mesh();
+        let colors = [texture(), texture(), texture()];
+        let world = translate(20., 30.);
+        let child_transform = translate(3., 4.);
+        let grandchild_transform = scale(2., 3.);
+        let mut frame = Frame::default();
+        frame.begin();
+        let mut root = frame.draw(world, None, 0.5);
+        let background = object(&mut root, &mesh, &colors[0]);
+        root.object(background);
+        let mut child = root.transformed(child_transform);
+        let mut grandchild = child.transformed(grandchild_transform);
+        let effect = object(&mut grandchild, &mesh, &colors[1]);
+        grandchild.backdrop(effect);
+        let foreground = object(&mut child, &mesh, &colors[2]);
+        child.object(foreground);
+        let sibling = object(&mut root, &mesh, &colors[2]);
+        root.object(sibling);
+        frame
+            .finish()
+            .expect("nested writers complete one shared frame");
+        assert_eq!(frame.scene.phases.len(), 2);
+        assert_eq!(frame.scene.phases[0].objects.len(), 1);
+        let objects = &frame.scene.phases[1].objects;
+        assert_eq!(objects.len(), 3);
+        assert_eq!(
+            objects[0].transform,
+            world * child_transform * grandchild_transform
+        );
+        assert_eq!(objects[1].transform, world * child_transform);
+        assert_eq!(objects[2].transform, world);
+        assert_eq!(
+            objects.iter().map(|o| o.texture).collect::<Vec<_>>(),
+            vec![colors[1].id(), colors[2].id(), colors[2].id()]
+        );
+        assert!(objects.iter().all(|o| o.opacity == 0.5));
+    }
+
+    #[test]
     fn nested_mask_and_transform_scopes_resolve_once_and_restore_sibling_state() {
         let (mesh, color) = (mesh(), texture());
         let (outer, inner) = (coverage(), coverage());
@@ -630,10 +703,9 @@ mod tests {
         {
             let mut draw = frame.draw(world, None, 0.4);
             draw.masked(&mesh, &outer, mask_geometry, |masked| {
-                masked.translated(scope, |translated| {
-                    assert_eq!(translated.transform(), world * scope);
-                    translated.quad(&color, [8., 9.], geometry, Some(&inner));
-                });
+                let mut transformed = masked.transformed(scope);
+                assert_eq!(transformed.transform(), world * scope);
+                transformed.quad(&color, [8., 9.], geometry, Some(&inner));
                 assert_eq!(
                     masked.transform(),
                     world,

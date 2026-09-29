@@ -167,9 +167,13 @@ fn checkbox_render_item(shape: ShapeCtx, state: CheckboxState) -> RenderItem {
         if state.checked {
             let fill_size = [(w - inset * 2.0).max(0.0), (h - inset * 2.0).max(0.0)];
             let transform = Matrix4::new_translation(&Vector3::new(inset, inset, 0.0));
-            draw.translated(transform, |draw| {
-                paint_box(draw, ctx, &shape, fill_size, &tick)
-            });
+            paint_box(
+                &mut draw.transformed(transform),
+                ctx,
+                &shape,
+                fill_size,
+                &tick,
+            );
         }
     })
 }

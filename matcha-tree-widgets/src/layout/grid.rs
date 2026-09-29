@@ -352,7 +352,7 @@ impl Widget for GridWidget {
         for (pod, setting) in &mut self.children {
             let (child_size, affine) =
                 GridWidget::child_arrangement(setting, &column_ranges, &row_ranges);
-            draw.translated(affine, |draw| pod.render(child_size, ctx, draw));
+            pod.render(child_size, ctx, &mut draw.transformed(affine));
         }
     }
 }

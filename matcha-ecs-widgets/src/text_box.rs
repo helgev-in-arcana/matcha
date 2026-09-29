@@ -1116,16 +1116,14 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
                 None,
             );
         }
-        draw.translated(place(0., 0.), |draw| {
-            draw_parley_layout(
-                draw,
-                &font_ctx,
-                ctx,
-                layout,
-                &text_tints,
-                &mut glyphs.lock(),
-            )
-        });
+        draw_parley_layout(
+            &mut draw.transformed(place(0., 0.)),
+            &font_ctx,
+            ctx,
+            layout,
+            &text_tints,
+            &mut glyphs.lock(),
+        );
 
         if ctx.focused && live.caret_visible() {
             if let Some(caret) = editor.cursor_geometry(CARET_WIDTH)

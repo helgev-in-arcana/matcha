@@ -283,7 +283,7 @@ impl Widget for RowWidget {
     fn render(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>) {
         let arrangements = self.compute_arrangements(bounds, ctx);
         for (child, (child_size, affine)) in self.children.iter_mut().zip(arrangements.iter()) {
-            draw.translated(*affine, |draw| child.render(*child_size, ctx, draw));
+            child.render(*child_size, ctx, &mut draw.transformed(*affine));
         }
     }
 }

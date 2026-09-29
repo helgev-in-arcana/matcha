@@ -206,6 +206,6 @@ impl Widget for PositionWidget {
             .child
             .as_mut()
             .expect("child exists and layout does not remove it");
-        draw.translated(affine, |draw| child.render(child_size, ctx, draw));
+        child.render(child_size, ctx, &mut draw.transformed(affine));
     }
 }

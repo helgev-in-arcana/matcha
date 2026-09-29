@@ -122,12 +122,9 @@ fn emit(pod: &mut WidgetPod, frame: &mut Frame, ctx: &UiContext, x: f32, size: [
     frame.begin();
     {
         let mut draw = frame.draw(Matrix4::identity(), None, 1.0);
-        draw.translated(
-            Matrix4::new_translation(&nalgebra::Vector3::new(x, 0., 0.)),
-            |draw| {
-                pod.render(size, ctx, draw);
-            },
-        );
+        let mut child_draw =
+            draw.transformed(Matrix4::new_translation(&nalgebra::Vector3::new(x, 0., 0.)));
+        pod.render(size, ctx, &mut child_draw);
     }
     frame.finish().expect("valid emitted frame");
 }

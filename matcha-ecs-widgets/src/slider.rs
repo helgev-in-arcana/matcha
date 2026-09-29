@@ -248,31 +248,47 @@ fn slider_render_item(shape: ShapeCtx, style: SliderStyle, range: SliderRange) -
         let (start, span) = travel(w, style.knob_radius);
         let knob_x = start + span * range.fraction();
 
-        draw.translated(
-            Matrix4::new_translation(&Vector3::new(0.0, track_y, 0.0)),
-            |draw| paint_box(draw, ctx, &shape, [w, style.track_height], &track),
+        paint_box(
+            &mut draw.transformed(Matrix4::new_translation(&Vector3::new(0.0, track_y, 0.0))),
+            ctx,
+            &shape,
+            [w, style.track_height],
+            &track,
         );
-        draw.translated(
-            Matrix4::new_translation(&Vector3::new(0.0, track_y, 0.0)),
-            |draw| paint_box(draw, ctx, &shape, [knob_x, style.track_height], &fill),
+        paint_box(
+            &mut draw.transformed(Matrix4::new_translation(&Vector3::new(0.0, track_y, 0.0))),
+            ctx,
+            &shape,
+            [knob_x, style.track_height],
+            &fill,
         );
 
         // The focus ring goes under the knob so the knob stays crisp.
         let d = style.knob_radius * 2.0;
         if ctx.focused {
             let rd = d + 4.0;
-            draw.translated(
-                Matrix4::new_translation(&Vector3::new(knob_x - rd / 2.0, (h - rd) / 2.0, 0.0)),
-                |draw| paint_box(draw, ctx, &shape, [rd, rd], &ring),
+            paint_box(
+                &mut draw.transformed(Matrix4::new_translation(&Vector3::new(
+                    knob_x - rd / 2.0,
+                    (h - rd) / 2.0,
+                    0.0,
+                ))),
+                ctx,
+                &shape,
+                [rd, rd],
+                &ring,
             );
         }
-        draw.translated(
-            Matrix4::new_translation(&Vector3::new(
+        paint_box(
+            &mut draw.transformed(Matrix4::new_translation(&Vector3::new(
                 knob_x - style.knob_radius,
                 (h - d) / 2.0,
                 0.0,
-            )),
-            |draw| paint_box(draw, ctx, &shape, [d, d], &knob),
+            ))),
+            ctx,
+            &shape,
+            [d, d],
+            &knob,
         );
     })
 }

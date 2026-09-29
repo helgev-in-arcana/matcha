@@ -51,7 +51,7 @@ fn backdrop_boundaries_follow_paint_order_across_widget_writers() {
 }
 
 #[test]
-fn draw_records_rebuild_but_definitions_and_mask_placement_are_reused() {
+fn frames_register_shared_definitions_again_and_rebuild_draw_records() {
     let mut frame = Frame::default();
     let t = texture();
     let hint = texture();
@@ -62,30 +62,34 @@ fn draw_records_rebuild_but_definitions_and_mask_placement_are_reused() {
     let placed = Matrix4::new_translation(&nalgebra::Vector3::new(10., 20., 0.));
     for _ in 0..3 {
         frame.begin();
+        assert!(frame.scene.resources.is_empty());
         let mut draw = frame.draw(placed, None, 0.5);
         draw.texture(&hint);
         draw.quad(&t, [1., 1.], Matrix4::identity(), Some(&mask));
-        draw.translated(placed, |draw| {
-            draw.quad(&t, [1., 1.], Matrix4::identity(), None)
-        });
+        let mut child_draw = draw.transformed(placed);
+        child_draw.quad(&t, [1., 1.], Matrix4::identity(), None);
         frame.finish().expect("valid");
         assert_eq!(frame.scene.resources.len(), 4);
+        assert!(frame.scene.resources.texture(hint.id()).is_some());
+        assert!(frame.scene.resources.texture(t.id()).is_some());
         assert_eq!(frame.scene.phases[0].objects.len(), 2);
         assert_eq!(frame.scene.phases[0].objects[0].opacity, 0.5);
         assert_eq!(frame.scene.phases[0].objects[1].transform, placed * placed);
         assert_eq!(frame.scene.pixel_masks[0].transform, placed);
     }
     frame.begin();
+    assert!(frame.scene.resources.is_empty());
     frame.finish().expect("empty");
     assert!(frame.scene.resources.is_empty());
     assert!(frame.scene.phases[0].objects.is_empty());
 }
 
 #[test]
-fn failed_frames_prune_definitions_and_recover() {
+fn failed_frames_clear_definitions_on_begin_and_recover() {
     let mut frame = Frame::default();
     for _ in 0..20 {
         frame.begin();
+        assert!(frame.scene.resources.is_empty());
         let t = texture();
         let conflict = TextureSource::with_id(
             t.id(),
@@ -123,11 +127,12 @@ fn mask_scopes_inherit_coverage_and_restore_sibling_state() {
     let translated = Matrix4::new_translation(&nalgebra::Vector3::new(3., 5., 0.));
     let mut draw = frame.draw(Matrix4::identity(), None, 1.);
     draw.masked(&mesh, &mask, translated, |draw| {
-        draw.translated(translated, |draw| {
-            draw.masked(&mesh, &mask, Matrix4::identity(), |draw| {
+        {
+            let mut child_draw = draw.transformed(translated);
+            child_draw.masked(&mesh, &mask, Matrix4::identity(), |draw| {
                 draw.quad(&texture, [1., 1.], Matrix4::identity(), None);
-            })
-        });
+            });
+        }
         draw.quad(&texture, [1., 1.], Matrix4::identity(), None);
     });
     draw.quad(&texture, [1., 1.], Matrix4::identity(), None);

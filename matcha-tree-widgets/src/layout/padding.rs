@@ -182,7 +182,7 @@ impl Widget for PaddingWidget {
         let inner = self.inner_bounds(bounds);
         let affine = self.child_affine();
         if let Some(child) = &mut self.child {
-            draw.translated(affine, |draw| child.render(inner, ctx, draw));
+            child.render(inner, ctx, &mut draw.transformed(affine));
         }
     }
 }

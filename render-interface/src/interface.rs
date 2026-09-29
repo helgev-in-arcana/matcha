@@ -136,6 +136,14 @@ pub struct ResourcePool {
 pub struct DuplicateResource(pub u64);
 
 impl ResourcePool {
+    /// Remove all CPU source definitions, retaining map capacity for reuse.
+    /// This does not invalidate content IDs or clear a renderer's GPU cache.
+    pub fn clear(&mut self) {
+        self.meshes.clear();
+        self.textures.clear();
+        self.masks.clear();
+    }
+
     pub fn share_mesh(&mut self, source: &MeshSource) -> Result<MeshId, DuplicateResource> {
         if let Some(existing) = self.mesh(source.id()) {
             if !source.same_definition(existing) {

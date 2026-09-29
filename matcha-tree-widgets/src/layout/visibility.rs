@@ -133,9 +133,7 @@ impl Widget for VisibilityWidget {
     fn render(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>) {
         if self.visibility == VisibilityState::Visible {
             if let Some(child) = &mut self.child {
-                draw.translated(nalgebra::Matrix4::identity(), |draw| {
-                    child.render(bounds, ctx, draw)
-                });
+                child.render(bounds, ctx, draw);
             }
         }
     }
