@@ -11,12 +11,12 @@
 //!
 //! That is also exactly CSS's rule — `:hover` matches an element **and all its
 //! ancestors** — so there is deliberately only one marker,
-//! [`Hovered`](crate::components::input::Hovered), and no `:hover-within`
+//! [`Hovered`], and no `:hover-within`
 //! counterpart to focus's [`FocusWithin`](crate::components::focus::FocusWithin).
 //! Focus needed the distinction because keyboard delivery targets the vertex
 //! alone; nothing about hovering is vertex-specific.
 //!
-//! [`Active`](crate::components::input::Active) is the intersection of the
+//! [`Active`] is the intersection of the
 //! press chain with the current hover chain. Holding the button and dragging
 //! off a button therefore releases its pressed look, and dragging back on
 //! restores it — what every platform's buttons do.
@@ -29,7 +29,7 @@
 //! this frame's layout. The second pass is what makes a menu that opens
 //! *underneath* a stationary cursor come up already hovered.
 
-use bevy_ecs::{entity::Entity, resource::Resource, query::With, world::World};
+use bevy_ecs::{entity::Entity, query::With, resource::Resource, world::World};
 
 use matcha_window::window::CursorIcon;
 
@@ -128,12 +128,7 @@ fn chain_at(world: &mut World, pos: [f32; 2]) -> Vec<Entity> {
     let Some(picker) = world.get_resource::<PickerResource>() else {
         return Vec::new();
     };
-    let hit = picker.0.pick(
-        world,
-        &PickQuery {
-            viewport_pos: pos,
-        },
-    );
+    let hit = picker.0.pick(world, &PickQuery { viewport_pos: pos });
     let Some(hit) = hit else {
         return Vec::new();
     };
@@ -169,14 +164,14 @@ pub fn set_pressed(world: &mut World, pressed: Option<Entity>) -> bool {
 }
 
 /// Exclusive system: re-resolve against this frame's layout, then bring the
-/// [`Hovered`]/[`Active`] markers in line and invalidate the cached render node
+/// [`Hovered`]/[`Active`] markers in line and invalidate the draw revision
 /// of every entity that changed state.
 ///
 /// Invalidation happens here rather than in a `Changed<Hovered>` system for the
 /// same reason [`crate::focus::sync_focus_components`] does it inline:
 /// `Changed<T>` never fires on component **removal**, so an entity *losing*
-/// hover would keep painting its hover appearance forever. This pass already
-/// knows the exact transition set in both directions.
+/// hover would otherwise miss its draw-revision update. This pass knows the
+/// exact transition set in both directions.
 pub fn sync_pointer_components(world: &mut World) {
     resolve(world);
 
@@ -205,7 +200,11 @@ pub fn sync_cursor(world: &mut World) {
         .find_map(|&e| world.get::<Cursor>(e).map(|c| c.0))
         .unwrap_or_default();
 
-    if world.get_resource_or_insert_with(CursorWindowState::default).0 == wanted {
+    if world
+        .get_resource_or_insert_with(CursorWindowState::default)
+        .0
+        == wanted
+    {
         return;
     }
 
@@ -217,17 +216,14 @@ pub fn sync_cursor(world: &mut World) {
 }
 
 /// Add `M` to everything in `wanted`, remove it from everything else, and
-/// invalidate the render node of each entity that moved either way.
+/// advance the draw revision of each entity that changed either way.
 fn sync_marker<M: bevy_ecs::component::Component + Clone>(
     world: &mut World,
     wanted: &[Entity],
     marker: M,
 ) {
     let mut query = world.query_filtered::<Entity, With<M>>();
-    let stale: Vec<Entity> = query
-        .iter(world)
-        .filter(|e| !wanted.contains(e))
-        .collect();
+    let stale: Vec<Entity> = query.iter(world).filter(|e| !wanted.contains(e)).collect();
 
     for entity in stale {
         if let Ok(mut e) = world.get_entity_mut(entity) {
@@ -248,7 +244,7 @@ fn sync_marker<M: bevy_ecs::component::Component + Clone>(
     }
 }
 
-/// Drop `entity`'s cached render node, if it has one.
+/// Advance `entity`'s draw revision, if it has one.
 fn invalidate_render_item(world: &mut World, entity: Entity) {
     if let Some(mut item) = world.get_mut::<crate::components::render::RenderItem>(entity) {
         item.invalidate();

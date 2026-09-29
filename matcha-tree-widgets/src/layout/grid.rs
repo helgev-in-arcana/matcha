@@ -8,7 +8,7 @@ use matcha_tree::{
         widget::{View, Widget, WidgetInteractionResult, WidgetPod},
     },
 };
-use renderer::render_node::RenderNode;
+use render_interface::Draw;
 
 use crate::types::{
     grow_size::GrowSize,
@@ -347,15 +347,12 @@ impl Widget for GridWidget {
         ]
     }
 
-    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext) -> RenderNode {
+    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>) {
         let (column_ranges, row_ranges) = self.calc_grid_layout(bounds, ctx);
-        let mut render_node = RenderNode::new();
         for (pod, setting) in &mut self.children {
             let (child_size, affine) =
                 GridWidget::child_arrangement(setting, &column_ranges, &row_ranges);
-            let child_node = pod.render(child_size, ctx);
-            render_node = render_node.add_child(child_node, affine);
+            pod.render(child_size, ctx, &mut draw.transformed(affine));
         }
-        render_node
     }
 }

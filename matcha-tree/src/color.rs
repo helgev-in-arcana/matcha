@@ -35,7 +35,7 @@ macro_rules! convert_srgb_u8 {
         if *$x <= 0.0031308 {
             (*$x * 12.92 * 255.0).round() as u8
         } else {
-            ((1.055 * $x.powf(-2.4) - 0.055) * 255.0).round() as u8
+            ((1.055 * $x.powf(1.0 / 2.4) - 0.055) * 255.0).round() as u8
         }
     };
 }
@@ -45,12 +45,31 @@ impl Color {
         Color::Rgb8USrgb { r, g, b }
     }
 
+    /// sRGB byte channels with normalized linear alpha in 0..=1.
     pub const fn rgba(r: u8, g: u8, b: u8, a: f32) -> Self {
         Color::Rgba8USrgb {
             r,
             g,
             b,
-            a: a as u8,
+            a: (a * 255.0 + 0.5) as u8,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Color;
+
+    #[test]
+    fn normalized_alpha_and_srgb_round_trip_preserve_colour() {
+        for (alpha, byte) in [(0.0, 0), (0.5, 128), (1.0, 255)] {
+            let color = Color::rgba(128, 64, 32, alpha);
+            assert_eq!(color.to_rgba_u8(), [128, 64, 32, byte]);
+            assert_eq!(color.to_rgba_f32()[3], byte as f32 / 255.0);
+        }
+        for byte in 0..=255u8 {
+            let linear = Color::rgb(byte, byte, byte).to_rgba_f32();
+            assert_eq!(Color::from(linear).to_rgba_u8(), [byte, byte, byte, 255]);
         }
     }
 }

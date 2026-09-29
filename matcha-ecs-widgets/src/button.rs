@@ -1,24 +1,12 @@
 //! Button — a clickable leaf widget: a solid-colour rect with a centred,
 //! shaped text label, emitting an Elm-style message on click.
 //!
-//! `Message`/`OnClick<Msg>` now live in `matcha_ecs::components::input`
-//! (moved there in M5 so core hit-test dispatch can read `OnClick<Msg>`
-//! without knowing about `Button`); re-exported here for compatibility.
+//! `Message` and `OnClick<Msg>` are core input types re-exported here. Core
+//! hit-test dispatch reads `OnClick<Msg>` independently of the widget type.
 //!
-//! The label is baked directly into `Button`'s own `RenderItem` (box quad +
-//! shaped glyph quads composited into one node) rather than via a child
-//! entity: a real child slot would need a new `Layout` impl that actually
-//! arranges a child within the box (today's `RectGeometry::arrange` is a hard
-//! leaf) and would break every existing `Button::new(label)` call site's
-//! shape. Text shaping/rasterisation is reused from `crate::text` (the same
-//! `FontCtx` resource, `shape`, `paint_tint_region`, `glyph_run_nodes` helpers
-//! `Text` uses), so no shaping/stencil-cache logic is duplicated here.
-//!
-//! (A formerly-documented "known issue" here — intermittent corruption of
-//! unrelated widgets while this widget rebuilt per click — was root-caused
-//! and fixed on 2026-07-10: it was never atlas churn, but nondeterministic
-//! instance ordering in `renderer`'s culling compute shader. See
-//! `renderer/src/core_renderer/renderer_cull.wgsl` and CLAUDE.md.)
+//! The button is a layout leaf. Its `RenderItem` emits the decorated box and
+//! centred glyph quads, using `crate::text`'s `FontCtx`, shaping and glyph
+//! drawing helpers to share text resource definitions.
 
 use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, world::EntityWorldMut,
@@ -39,12 +27,12 @@ use matcha_ecs::{
 
 use crate::{
     animation::Easing,
-    shape::ShapeCtx,
-    box_style::{box_node, BoxStyle, Corners},
+    box_style::{BoxStyle, Corners, paint_box},
     color_rect::RectColor,
-    interaction::{interaction_cell, ColorCell, InteractionColors},
+    interaction::{ColorCell, InteractionColors, interaction_cell},
+    shape::ShapeCtx,
     sizing::{RectGeometry, Sizing},
-    text::{glyph_run_nodes, paint_tint_region, shape, FontCtx},
+    text::{FontCtx, draw_glyph_run, shape, solid_source},
 };
 use std::time::Duration;
 
@@ -171,7 +159,6 @@ impl<Msg: Message> Button<Msg> {
         self
     }
 
-
     /// What the pointer looks like over this widget (CSS `cursor`).
     pub fn cursor(mut self, cursor: CursorIcon) -> Self {
         self.cursor = cursor;
@@ -213,10 +200,10 @@ impl<Msg: Message> Button<Msg> {
     /// Build a fresh `RenderItem` for `entity`, fetching (or lazily
     /// inserting) the shared `FontCtx` resource. Shared by `after_spawn` and
     /// `patch`, the two places a `Button` entity's `RenderItem` gets
-    /// (re)built (it needs world access for `FontCtx`, so unlike `ColorRect`
-    /// it cannot be built inside `bundle()`).
+    /// rebuilt. These hooks provide the world access needed for `FontCtx`.
     fn rebuild_render_item(&self, entity: &mut EntityWorldMut) -> RenderItem {
-        let font_ctx = entity.world_scope(|world| world.get_resource_or_insert_with(FontCtx::new).clone());
+        let font_ctx =
+            entity.world_scope(|world| world.get_resource_or_insert_with(FontCtx::new).clone());
         // The cell survives this rebuild, so an in-flight hover transition is
         // not restarted by an unrelated prop change.
         let box_color = interaction_cell(entity, self.colors());
@@ -246,9 +233,9 @@ const FOCUS_RING_WIDTH: f32 = 2.0;
 /// builder without a rebuild of the closure itself.
 ///
 /// When the button holds focus (`ctx.focused`) the box is drawn as a ring in
-/// `focus_ring_color` with the normal fill inset inside it. `focus.rs`'s
-/// `sync_focus_components` invalidates the cached node on every focus
-/// transition, so this is re-evaluated exactly when it changes.
+/// `focus_ring_color` with the normal fill inset inside it.
+/// The writer reads extracted focus state each redraw. The shaped label and
+/// tint source are retained independently of these draw records.
 #[allow(clippy::too_many_arguments)]
 fn button_render_item(
     font_ctx: FontCtx,
@@ -260,10 +247,13 @@ fn button_render_item(
     focus_ring_color: [f32; 4],
     radius: f32,
 ) -> RenderItem {
-    RenderItem::new(move |ctx: &RenderCtx| {
+    // Keep shaping on the render worker, but perform it only once per writer.
+    let layout = parking_lot::Mutex::new(None);
+    let tint_cache = parking_lot::Mutex::new(None);
+    RenderItem::new(move |ctx: &RenderCtx, draw| {
         let [w, h] = ctx.size;
         // Read live: `advance_interaction_colors` writes this between frames
-        // and invalidates the cached node, so each rebuild sees the current
+        // and advances the draw revision, so each redraw sees the current
         // step of the hover/press transition.
         let box_color = box_color.get();
 
@@ -273,23 +263,20 @@ fn button_render_item(
         if ctx.focused {
             style = style.border(FOCUS_RING_WIDTH, focus_ring_color);
         }
-        let mut node = box_node(ctx, &shape_ctx, [w, h], &style);
+        paint_box(draw, ctx, &shape_ctx, [w, h], &style);
 
-        let layout = shape(&font_ctx, &label, font_size, f32::MAX);
-        let Some(tint_region) = paint_tint_region(ctx, label_color) else {
-            return node;
-        };
+        let mut layout = layout.lock();
+        let layout = layout.get_or_insert_with(|| shape(&font_ctx, &label, font_size, f32::MAX));
+        let mut cached = tint_cache.lock();
+        let tint_source =
+            cached.get_or_insert_with(|| solid_source(ctx, label_color).expect("solid tint"));
 
         let offset = Matrix4::new_translation(&Vector3::new(
             ((w - layout.total_width) / 2.0).max(0.0),
             ((h - layout.total_height) / 2.0).max(0.0),
             0.0,
         ));
-        for (glyph_node, transform) in glyph_run_nodes(&font_ctx, ctx, &layout, &tint_region) {
-            node.push_child(glyph_node, offset * transform);
-        }
-
-        node
+        draw_glyph_run(draw, &font_ctx, &layout, &tint_source, offset);
     })
 }
 

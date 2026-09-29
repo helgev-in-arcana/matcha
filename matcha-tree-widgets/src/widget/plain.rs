@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::buffer::Buffer;
 use crate::layout::reconcile_single_child;
 use crate::style::Style;
 use matcha_tree::event::device_event::DeviceEvent;
@@ -8,7 +9,7 @@ use matcha_tree::ui_tree::{
     metrics::Constraints,
     widget::{View, Widget, WidgetInteractionResult, WidgetPod},
 };
-use renderer::render_node::RenderNode;
+use render_interface::Draw;
 
 use crate::types::size::{ChildSize, Size};
 
@@ -59,6 +60,7 @@ impl View for Plain {
             0usize,
             PlainWidget {
                 style: self.style.clone(),
+                buffer: Buffer::clipped(self.style.clone()),
                 size: self.size.clone(),
                 child,
             },
@@ -73,6 +75,7 @@ impl View for Plain {
 // MARK: Widget
 
 pub struct PlainWidget {
+    buffer: Buffer,
     style: Vec<Arc<dyn Style>>,
     size: [Size; 2],
     child: Option<WidgetPod>,
@@ -83,18 +86,25 @@ impl Widget for PlainWidget {
 
     fn update(&mut self, view: &Plain, ctx: &UiContext) -> WidgetInteractionResult {
         let size_changed = self.size != view.size;
-        // Style is a dyn trait so we cannot do value equality; treat any non-empty
-        // style as potentially changed (new Arc is created every frame in view()).
-        let style_changed = !view.style.is_empty();
+        // Stable shared styles keep their content identities across view updates.
+        let style_changed = self.style.len() != view.style.len()
+            || self
+                .style
+                .iter()
+                .zip(&view.style)
+                .any(|(a, b)| !Arc::ptr_eq(a, b));
+        if style_changed {
+            self.buffer = Buffer::clipped(view.style.clone());
+        }
         self.style = view.style.clone();
         self.size = view.size.clone();
-        let child_changed = reconcile_single_child(&mut self.child, view.content.as_deref(), ctx);
-        if size_changed || child_changed {
+        let child_result = reconcile_single_child(&mut self.child, view.content.as_deref(), ctx);
+        if size_changed || matches!(child_result, WidgetInteractionResult::LayoutNeeded) {
             WidgetInteractionResult::LayoutNeeded
         } else if style_changed {
             WidgetInteractionResult::RedrawNeeded
         } else {
-            WidgetInteractionResult::NoChange
+            child_result
         }
     }
 
@@ -125,34 +135,10 @@ impl Widget for PlainWidget {
         [w, h]
     }
 
-    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext) -> RenderNode {
-        let mut render_node = RenderNode::new();
-
-        if bounds[0] > 0.0 && bounds[1] > 0.0 {
-            let texture_size = [bounds[0].ceil() as u32, bounds[1].ceil() as u32];
-            if let Ok(style_region) =
-                ctx.texture_atlas()
-                    .allocate(ctx.gpu_device(), ctx.gpu_queue(), texture_size)
-            {
-                let mut encoder =
-                    ctx.gpu_device()
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("Plain Render Encoder"),
-                        });
-                for style in &self.style {
-                    style.draw(&mut encoder, &style_region, bounds, [0.0, 0.0], ctx);
-                }
-                ctx.gpu_queue().submit(Some(encoder.finish()));
-                render_node =
-                    render_node.with_texture(style_region, bounds, nalgebra::Matrix4::identity());
-            }
-        }
-
+    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>) {
+        self.buffer.paint(bounds, ctx, draw);
         if let Some(child) = &mut self.child {
-            let child_node = child.render(bounds, ctx);
-            render_node.push_child(child_node, nalgebra::Matrix4::identity());
+            child.render(bounds, ctx, draw);
         }
-
-        render_node
     }
 }

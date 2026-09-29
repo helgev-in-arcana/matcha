@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use renderer::RenderNode;
+use plain_renderer::{PlainRenderer, PlainTarget};
+use render_interface::Matrix4;
+use render_interface::{Draw, Frame};
 
 use crate::ui_tree::{
     context::{UiContext, WindowCtx},
@@ -17,9 +19,9 @@ use matcha_window::window::{Window as OsWindow, WindowConfig, WindowError, Windo
 
 /// Declares a window anywhere in the view tree.
 ///
-/// When built, creates a [`WindowWidgetInstance`] and registers it with
-/// [`UiContext::register_window_instance`] so that [`UiArch`](super::UiArch) can
-/// route events and rendering directly to this window.
+/// When built, creates a [`WindowWidgetInstance`] and registers it through the
+/// [`UiContext`] so that [`UiTree`](super::UiTree) can route events and rendering
+/// directly to this window.
 pub struct Window {
     pub window_id: String,
     pub config: WindowConfig,
@@ -49,8 +51,8 @@ impl View for Window {
 /// The [`Widget`] counterpart of [`Window`].
 ///
 /// Holds the strong [`Arc`] to the [`WindowWidgetInstance`].
-/// This is a zero-size widget in the parent's layout 窶・rendering and input for
-/// the window's content are handled by [`UiArch`](super::UiArch) directly via
+/// This is a zero-size widget in the parent's layout; rendering and input for
+/// the window's content are handled by [`UiTree`](super::UiTree) directly via
 /// the window registry, never through the parent widget tree.
 pub struct WindowWidget {
     instance: Arc<Mutex<WindowWidgetInstance>>,
@@ -63,7 +65,7 @@ impl Widget for WindowWidget {
         // The window already exists; just keep the inner widget in sync.
         // Registration was done in Window::build() and is not repeated here.
         let mut instance = self.instance.lock();
-        instance.try_update(view, &ctx)
+        instance.try_update(view, ctx)
     }
 
     fn device_input(
@@ -72,7 +74,7 @@ impl Widget for WindowWidget {
         _event: &DeviceEvent,
         _ctx: &UiContext,
     ) -> WidgetInteractionResult {
-        // Input does not cross window boundaries; handled by UiArch per-window.
+        // UiTree dispatches input to the window registered for the event.
         WidgetInteractionResult::NoChange
     }
 
@@ -81,9 +83,8 @@ impl Widget for WindowWidget {
         [0.0, 0.0]
     }
 
-    fn render(&mut self, _bounds: [f32; 2], _ctx: &UiContext) -> RenderNode {
+    fn render(&mut self, _bounds: [f32; 2], _ctx: &UiContext, _draw: &mut Draw<'_>) {
         // Nothing to render in the parent tree; the window draws to its own surface.
-        RenderNode::new()
     }
 }
 
@@ -101,6 +102,10 @@ pub struct WindowWidgetInstance {
     /// triggers `WindowHandle::drop`, which removes the window from `WindowManager`.
     window: OsWindow,
     widget: WidgetPod,
+    /// One complete borrowed submission per window. Widgets retain Sources,
+    /// while this owner retains the reusable drawing arrays and backend cache.
+    frame: Frame,
+    renderer: Option<PlainRenderer>,
 }
 
 impl WindowWidgetInstance {
@@ -109,6 +114,8 @@ impl WindowWidgetInstance {
             window_id,
             window,
             widget,
+            frame: Frame::default(),
+            renderer: None,
         }
     }
 
@@ -150,23 +157,17 @@ impl WindowWidgetInstance {
 
 /// Type-erased interface for [`WindowWidgetInstance`].
 ///
-/// [`UiArch`](super::UiArch) stores `Weak<Mutex<dyn AnyWindowWidgetInstance>>` in its
-/// registry keyed by [`WindowId`]. The strong [`Arc`] lives in the owning [`WindowWidget`];
-/// when the window is removed from the view tree the widget is dropped, the `Arc` count
-/// reaches zero, and `UiArch`'s `Weak` becomes dead (window is destroyed automatically
-/// via [`WindowHandle`]'s [`Drop`] impl).
+/// [`UiTree`](super::UiTree) stores `Weak<Mutex<dyn AnyWindowWidgetInstance>>` in its
+/// registry keyed by [`WindowId`]. The owning [`WindowWidget`] holds a strong
+/// [`Arc`]; removing it from the view tree releases that handle. Once all strong
+/// handles are dropped, the instance and its owned OS window are dropped and
+/// the registry's weak handle can no longer be upgraded.
 pub trait AnyWindowWidgetInstance: utils::MaybeSendSync {
     fn window_id(&self) -> WindowId;
     fn size(&self) -> [f32; 2];
     fn request_redraw(&self);
     fn device_input(&mut self, event: &DeviceEvent, ctx: &UiContext) -> WidgetInteractionResult;
-    fn render(
-        &mut self,
-        renderer: &renderer::CoreRenderer,
-        texture_atlas: &wgpu::Texture,
-        stencil_atlas: &wgpu::Texture,
-        ctx: &UiContext,
-    );
+    fn render(&mut self, ctx: &UiContext);
     fn measure(&self, constraints: &metrics::Constraints, ctx: &UiContext) -> [f32; 2];
     fn create_surface(
         &mut self,
@@ -214,15 +215,13 @@ impl AnyWindowWidgetInstance for WindowWidgetInstance {
         result
     }
 
-    fn render(
-        &mut self,
-        renderer: &renderer::CoreRenderer,
-        texture_atlas: &wgpu::Texture,
-        stencil_atlas: &wgpu::Texture,
-        ctx: &UiContext,
-    ) {
+    fn render(&mut self, ctx: &UiContext) {
         let size = self.size();
         let s = self.window.inner_size();
+        if s.contains(&0) {
+            self.widget.invalidate_render();
+            return;
+        }
         let window_ctx = WindowCtx {
             dpi: self.window.dpi(),
             format: self.window.format(),
@@ -234,34 +233,72 @@ impl AnyWindowWidgetInstance for WindowWidgetInstance {
             shared: ctx.shared,
             window: Some(&window_ctx),
         };
-        let render_node = self.widget.render(size, &widget_ctx);
+        self.frame.begin();
+        {
+            let mut draw = self.frame.draw(Matrix4::identity(), None, 1.0);
+            self.widget.render(size, &widget_ctx, &mut draw);
+        }
+        if let Err(error) = self.frame.finish() {
+            self.widget.invalidate_render();
+            log::error!(
+                "tree window {:?} scene assembly failed: {error}",
+                self.window_id
+            );
+            return;
+        }
 
         let format = self.window.format();
 
         let device = &ctx.shared.gpu_device;
         let queue = &ctx.shared.gpu_queue;
 
-        let _ = self
+        let renderer = self
+            .renderer
+            .get_or_insert_with(|| PlainRenderer::new(device, queue));
+        // Presentation belongs to the framework. A failed prepare leaves the
+        // acquired texture untouched, so discard it instead of presenting it.
+        let result = self
             .window
             .surface()
-            .rendering_with_surface_texture(device, |view, _texture| {
-                let _ = renderer.render(
-                    device,
-                    queue,
-                    format,
-                    view,
-                    size,
-                    &render_node,
-                    wgpu::Color {
-                        r: 0.1,
-                        g: 0.1,
-                        b: 0.1,
-                        a: 1.0,
-                    },
-                    texture_atlas,
-                    stencil_atlas,
-                );
+            .get_surface_texture(device)
+            .map(|surface| {
+                surface.map(|surface| {
+                    let view = surface.texture.create_view(&Default::default());
+                    renderer.render(
+                        &self.frame.scene,
+                        PlainTarget {
+                            region: render_interface::TextureRegion::whole(&view, format).map_err(
+                                |error| plain_renderer::PlainError::Invalid(error.to_string()),
+                            )?,
+                            logical_size: size,
+                            clear: wgpu::Color {
+                                r: 0.1,
+                                g: 0.1,
+                                b: 0.1,
+                                a: 1.0,
+                            },
+                            initial: None,
+                        },
+                    )?;
+                    surface.present();
+                    Ok::<(), plain_renderer::PlainError>(())
+                })
             });
+        match result {
+            Ok(Some(Ok(()))) => {}
+            Ok(Some(Err(error))) => {
+                self.widget.invalidate_render();
+                log::error!("tree window {:?} rendering failed: {error}", self.window_id);
+            }
+            Ok(None) => self.widget.invalidate_render(),
+            Err(error) => {
+                self.widget.invalidate_render();
+                log::warn!(
+                    "tree window {:?} surface unavailable: {error}",
+                    self.window_id
+                );
+            }
+        }
     }
 
     fn measure(&self, constraints: &metrics::Constraints, ctx: &UiContext) -> [f32; 2] {

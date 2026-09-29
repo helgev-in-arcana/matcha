@@ -1,0 +1,21 @@
+[package]
+name = "render-interface"
+version.workspace = true
+edition = "2024"
+
+[features]
+default = []
+scene-builder = []
+
+[dependencies]
+wgpu.workspace = true
+nalgebra.workspace = true
+bytemuck.workspace = true
+thiserror.workspace = true
+fxhash.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+
+[lints]
+workspace = true

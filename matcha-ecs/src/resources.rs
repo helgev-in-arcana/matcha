@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
+use crate::render::GuiRenderer;
 use bevy_ecs::{entity::Entity, resource::Resource, world::World};
-use gpu_utils::texture_atlas::TextureAtlas;
-use renderer::CoreRenderer;
+use parking_lot::Mutex;
 
 use matcha_window::window::WindowId;
 
@@ -16,36 +16,17 @@ pub struct GpuResource {
     pub gpu: gpu_utils::gpu::Gpu,
 }
 
-/// Shared rendering resources: the core wgpu pipeline plus the color and stencil
-/// texture atlases. All `Arc` so future render tasks (M4) can share them.
+/// UI assembly state and backend cache, serialized across render workers.
 #[derive(Resource)]
 pub struct RendererResource {
-    pub core: Arc<CoreRenderer>,
-    pub texture_atlas: Arc<TextureAtlas>,
-    pub stencil_atlas: Arc<TextureAtlas>,
+    pub core: Arc<Mutex<GuiRenderer>>,
 }
 
-/// The coverage image every rectangular clip is drawn with: a single fully
-/// opaque texel, stretched over the clip's box by its own transform.
+/// The UI-root window entity and its id. The application manages one root;
+/// the render stage walks that entity's `ViewChildren`.
 ///
-/// One texel is enough because a mask's shape comes from its transform, and the
-/// shader rejects anything outside the mask's unit square rather than clamping
-/// to its edge. So a rectangular clip of any size costs no allocation at all,
-/// and the whole application shares this one region. Non-rectangular clips will
-/// want their own coverage images, or an analytic mask kind.
-///
-/// Allocated on first use, from the one place that owns the atlas.
-#[derive(Resource, Clone)]
-pub struct ClipMask {
-    pub region: gpu_utils::texture_atlas::AtlasRegion,
-}
-
-/// The single UI-root window entity and its id. M1 supports one window; this is
-/// how the render stage finds the entity whose `ViewChildren` to walk.
-///
-/// Prefer [`ui_root`] and [`ui_root_window`] over reading this directly: the
-/// singleton is temporary, and every site that spells out the lookup is a site
-/// that has to change when it stops being one.
+/// [`ui_root`] and [`ui_root_window`] centralize root lookup for layout, input
+/// and rendering.
 #[derive(Resource)]
 pub struct RenderWindowRoot {
     pub entity: Entity,
@@ -55,8 +36,7 @@ pub struct RenderWindowRoot {
 /// The entity whose view tree is the UI, or `None` before the window exists.
 ///
 /// Layout, picking, focus validation and tab order all need exactly this and
-/// nothing else. Going through one function keeps "which root?" answerable in
-/// one place — which is the whole preparation for there being more than one.
+/// nothing else. This helper centralizes the root-selection policy.
 pub fn ui_root(world: &World) -> Option<Entity> {
     world.get_resource::<RenderWindowRoot>().map(|r| r.entity)
 }

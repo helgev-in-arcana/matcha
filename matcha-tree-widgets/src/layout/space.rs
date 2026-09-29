@@ -6,7 +6,7 @@ use matcha_tree::{
         widget::{View, Widget, WidgetInteractionResult, WidgetPod},
     },
 };
-use renderer::render_node::RenderNode;
+use render_interface::Draw;
 
 use crate::types::size::{ChildSize, Size};
 
@@ -102,7 +102,5 @@ impl Widget for SpaceWidget {
         ]
     }
 
-    fn render(&mut self, _bounds: [f32; 2], _ctx: &UiContext) -> RenderNode {
-        RenderNode::new()
-    }
+    fn render(&mut self, _bounds: [f32; 2], _ctx: &UiContext, _draw: &mut Draw<'_>) {}
 }

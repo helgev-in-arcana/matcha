@@ -6,13 +6,14 @@ publish = false
 
 [dependencies]
 # self
-renderer = { workspace = true }
+render-interface = { workspace = true, features = ["scene-builder"] }
+plain-renderer = { workspace = true }
 utils = { workspace = true }
 gpu-utils = { workspace = true }
 shared-buffer = { workspace = true }
 
 # async runtime, utility
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
 
@@ -41,6 +42,9 @@ enum-map = "2.7.3"
 
 [build-dependencies]
 cfg_aliases = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [features]
 default = ["winit"]

@@ -25,7 +25,7 @@
 //! path names a text engine, so parley can be replaced here without touching
 //! `matcha-ecs` or `matcha-window`.
 //!
-//! # v1 limits
+//! # Supported editing behaviour
 //!
 //! - **Multi-line only.** The box wraps at its own width; Enter inserts a
 //!   newline by default and confirmation is bound to Ctrl+Enter — see
@@ -49,6 +49,7 @@ use bevy_ecs::{
     system::{Query, Res, ResMut, ScheduleSystem},
     world::EntityWorldMut,
 };
+
 use matcha_ecs::{
     components::{
         focus::{FocusDispatch, FocusPolicy, Focused},
@@ -69,13 +70,12 @@ use matcha_window::event::device_event::{ImeEvent, Key as LogicalKey, KeyInput, 
 use nalgebra::{Matrix4, Point3, Vector3};
 use parking_lot::Mutex;
 use parley::{PlainEditor, StyleProperty};
-use renderer::RenderNode;
 
 use crate::{
+    box_style::{BoxStyle, paint_box},
     live::{LiveBool, LiveF32, LiveVec},
+    rich_text::{ParleyFontCtx, RichTextBrush, draw_parley_layout},
     sizing::Sizing,
-    box_style::{box_node, BoxStyle},
-    rich_text::{draw_parley_layout, paint_tint_region, ParleyFontCtx, RichTextBrush},
 };
 
 /// How long the caret stays visible, then invisible, per blink.
@@ -100,7 +100,7 @@ const CARET_WIDTH: f32 = 1.5;
 ///    hands out `&World`.
 ///
 /// The main thread must not hold this lock while the render thread might build
-/// a node — the same invariant `RenderItem::cache` already documents.
+/// drawing records. The editor owns its expensive layout independently of Draw.
 #[derive(Component, Clone)]
 pub struct TextEditor(Arc<Mutex<PlainEditor<RichTextBrush>>>);
 
@@ -146,7 +146,7 @@ pub struct TextBoxStyle {
 /// The builder is a closure with no world access, so these travel through
 /// [`crate::live`] cells it holds a clone of — the same side-channel
 /// `Text`/`RichText` use for their wrap width. Written by [`default_systems`],
-/// read on every rebuild.
+/// read on every redraw.
 #[derive(Component, Clone, Default)]
 pub struct TextBoxLive {
     inner: Arc<TextBoxLiveInner>,
@@ -239,7 +239,7 @@ pub struct OnTextConfirm<Msg: Message>(pub Option<fn(&str) -> Msg>);
 #[derive(Component, Clone, Copy)]
 pub struct ConfirmKey(pub fn(&KeyInput) -> bool);
 
-/// Confirm on plain Enter. Enter no longer inserts a newline, which is what a
+/// Confirm on plain Enter. The event is consumed without inserting a newline, as a
 /// single-line-style field wants.
 pub fn confirm_on_enter(input: &KeyInput) -> bool {
     matches!(input.logical_key(), LogicalKey::Named(NamedKey::Enter))
@@ -539,8 +539,11 @@ fn with_editor_driver<R>(
     f: impl FnOnce(&mut parley::PlainEditorDriver<'_, RichTextBrush>) -> R,
 ) -> Option<R> {
     let editor = entity.get::<TextEditor>()?.0.clone();
-    let font_ctx = entity
-        .world_scope(|world| world.get_resource_or_insert_with(ParleyFontCtx::new).clone());
+    let font_ctx = entity.world_scope(|world| {
+        world
+            .get_resource_or_insert_with(ParleyFontCtx::new)
+            .clone()
+    });
     let mut editor = editor.lock();
     let mut font_cx = font_ctx.0.font_cx.lock();
     let mut layout_cx = font_ctx.0.layout_cx.lock();
@@ -601,18 +604,18 @@ fn handle_clipboard_key(entity: &mut EntityWorldMut, input: &KeyInput) -> Option
             };
             clipboard.set_text(selected);
             if matches!(op, Op::Cut) {
-                return Some(with_editor_driver(entity, |d| {
-                    d.delete_selection();
-                    true
-                })
-                .unwrap_or(false));
+                return Some(
+                    with_editor_driver(entity, |d| {
+                        d.delete_selection();
+                        true
+                    })
+                    .unwrap_or(false),
+                );
             }
             Some(false)
         }
         Op::Paste => {
-            // Newlines are pasted verbatim: this widget is multi-line, so
-            // there is nothing to strip. A future single-line variant is where
-            // that decision would have to be made.
+            // This multi-line editor preserves pasted newlines verbatim.
             let Some(text) = clipboard.get_text().filter(|t| !t.is_empty()) else {
                 return Some(false);
             };
@@ -718,7 +721,7 @@ fn on_key<Msg: Message>(entity: &mut EntityWorldMut, input: &KeyInput) -> bool {
                 // the character `" "`, so it arrives in the `Character` arm
                 // below along with every other text-producing key.
                 //
-                // Left alone so a future focus-traversal binding can have it.
+                // Text editing does not consume Tab or insert a tab character.
                 NamedKey::Tab => return false,
                 _ => return false,
             },
@@ -892,7 +895,7 @@ impl Layout for TextBoxLayout {
     /// width while the box is painted at another. Same side-channel `Text` and
     /// `RichText` use to publish their wrap width from `arrange`.
     ///
-    /// A leaf otherwise: decorative children are not supported in v1.
+    /// A layout leaf: decorative children are not supported.
     fn arrange(&self, ctx: &mut LayoutCtx, me: Entity, size: [f32; 2]) {
         if let Some(live) = ctx.world().get::<TextBoxLive>(me) {
             live.set_allocated(size);
@@ -948,13 +951,20 @@ fn refresh_text_boxes(
         // Fall back to the declared size until the first arrange has run.
         let allocated = live.allocated();
         let allocated = [
-            if allocated[0] > 0.0 { allocated[0] } else { layout.w },
-            if allocated[1] > 0.0 { allocated[1] } else { layout.h },
+            if allocated[0] > 0.0 {
+                allocated[0]
+            } else {
+                layout.w
+            },
+            if allocated[1] > 0.0 {
+                allocated[1]
+            } else {
+                layout.h
+            },
         ];
 
-        // Re-wrap if the parent gave us a different width than we last shaped
-        // at. One frame behind a resize (arrange runs after this stage), which
-        // converges immediately and matches `RichText`'s existing behaviour.
+        // Re-wrap at the last arranged width. Since arrange runs after this
+        // stage, a resized width is applied to text layout on the next frame.
         let wrap_width = (allocated[0] - inset * 2.0).max(0.0);
         if live.take_wrap_width_change(wrap_width) {
             editor.set_width(Some(wrap_width));
@@ -1051,11 +1061,16 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
         .map(|e| e.0.clone())
         .expect("TextEditor is inserted by bundle() before any render item is built");
     let live = entity.get::<TextBoxLive>().cloned().unwrap_or_default();
-    let font_ctx = entity
-        .world_scope(|world| world.get_resource_or_insert_with(ParleyFontCtx::new).clone());
+    let font_ctx = entity.world_scope(|world| {
+        world
+            .get_resource_or_insert_with(ParleyFontCtx::new)
+            .clone()
+    });
     let shape_ctx = crate::shape::ShapeCtx::get(entity);
+    let text_tints = crate::shape::ShapeCtx::default();
+    let glyphs = Mutex::new(crate::rich_text::ActiveGlyphs::default());
 
-    RenderItem::new(move |ctx: &RenderCtx| {
+    RenderItem::new(move |ctx: &RenderCtx, draw| {
         let [w, h] = ctx.size;
         let border = style.border_width;
 
@@ -1064,12 +1079,12 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
         } else {
             style.border_color
         };
-        let mut node = box_node(
+        paint_box(
+            draw,
             ctx,
             &shape_ctx,
             [w, h],
-            &BoxStyle::fill(style.background_color)
-                .border(border, border_color),
+            &BoxStyle::fill(style.background_color).border(border, border_color),
         );
 
         let inset = style.border_width + style.padding;
@@ -1077,7 +1092,8 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
 
         let editor = editor.lock();
         let Some(layout) = editor.try_layout() else {
-            return node;
+            glyphs.lock().clear();
+            return;
         };
 
         let place = |x: f32, y: f32| {
@@ -1087,35 +1103,36 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
         // Selection sits under the glyphs.
         for (rect, _line) in editor.selection_geometry() {
             let y0 = rect.y0 as f32;
-            let Some(tint) = paint_tint_region(ctx, style.selection_color) else {
+            let Some(tint) = shape_ctx.tint_source(style.selection_color, ctx) else {
                 continue;
             };
-            let selection = RenderNode::new().with_texture(
-                tint,
+            draw.quad(
+                &tint,
                 [rect.width() as f32, rect.height() as f32],
-                Matrix4::identity(),
+                place(rect.x0 as f32, y0),
+                None,
             );
-            node.push_child(selection, place(rect.x0 as f32, y0));
         }
-
-        node.push_child(
-            draw_parley_layout(&font_ctx, ctx, layout),
-            place(0.0, 0.0),
+        draw_parley_layout(
+            &mut draw.transformed(place(0., 0.)),
+            &font_ctx,
+            ctx,
+            layout,
+            &text_tints,
+            &mut glyphs.lock(),
         );
 
         if ctx.focused && live.caret_visible() {
             if let Some(caret) = editor.cursor_geometry(CARET_WIDTH)
-                && let Some(tint) = paint_tint_region(ctx, style.caret_color)
+                && let Some(tint) = shape_ctx.tint_source(style.caret_color, ctx)
             {
-                let caret_node = RenderNode::new().with_texture(
-                    tint,
+                draw.quad(
+                    &tint,
                     [caret.width() as f32, caret.height() as f32],
-                    Matrix4::identity(),
+                    place(caret.x0 as f32, caret.y0 as f32),
+                    None,
                 );
-                node.push_child(caret_node, place(caret.x0 as f32, caret.y0 as f32));
             }
         }
-
-        node
     })
 }

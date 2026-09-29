@@ -8,7 +8,7 @@ use matcha_tree::{
         widget::{View, Widget, WidgetInteractionResult, WidgetPod},
     },
 };
-use renderer::render_node::RenderNode;
+use render_interface::Draw;
 
 use super::reconcile_single_child;
 
@@ -134,11 +134,11 @@ impl Widget for PaddingWidget {
         self.right = view.right;
         self.bottom = view.bottom;
         self.left = view.left;
-        let child_changed = reconcile_single_child(&mut self.child, view.content.as_deref(), ctx);
-        if dims_changed || child_changed {
+        let child_result = reconcile_single_child(&mut self.child, view.content.as_deref(), ctx);
+        if dims_changed {
             WidgetInteractionResult::LayoutNeeded
         } else {
-            WidgetInteractionResult::NoChange
+            child_result
         }
     }
 
@@ -178,14 +178,11 @@ impl Widget for PaddingWidget {
         [content_size[0] + h_pad, content_size[1] + v_pad]
     }
 
-    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext) -> RenderNode {
+    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>) {
         let inner = self.inner_bounds(bounds);
         let affine = self.child_affine();
         if let Some(child) = &mut self.child {
-            let child_node = child.render(inner, ctx);
-            RenderNode::new().add_child(child_node, affine)
-        } else {
-            RenderNode::new()
+            child.render(inner, ctx, &mut draw.transformed(affine));
         }
     }
 }

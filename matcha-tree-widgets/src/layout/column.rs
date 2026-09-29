@@ -8,7 +8,7 @@ use matcha_tree::{
         widget::{View, Widget, WidgetInteractionResult, WidgetPod},
     },
 };
-use renderer::render_node::RenderNode;
+use render_interface::Draw;
 
 use crate::types::flex::{AlignItems, JustifyContent};
 use crate::types::grow_size::GrowSize;
@@ -306,13 +306,10 @@ impl Widget for ColumnWidget {
         ]
     }
 
-    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext) -> RenderNode {
+    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>) {
         let arrangements = self.compute_arrangements(bounds, ctx);
-        let mut render_node = RenderNode::new();
         for (child, (child_size, affine)) in self.children.iter_mut().zip(arrangements.iter()) {
-            let child_node = child.render(*child_size, ctx);
-            render_node = render_node.add_child(child_node, *affine);
+            child.render(*child_size, ctx, &mut draw.transformed(*affine));
         }
-        render_node
     }
 }

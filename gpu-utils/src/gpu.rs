@@ -3,6 +3,10 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 
 /// Descriptor used to configure and create a [`Gpu`] instance.
+///
+/// `Default` requests the platform-specific features in `gpu_defaults`.
+/// [`GpuDescriptor::standard`] requests no optional GPU features; its feature
+/// selection is independent of Cargo feature unification.
 pub struct GpuDescriptor {
     /// Which wgpu backends to enable.
     pub backends: wgpu::Backends,
@@ -34,6 +38,16 @@ impl Default for GpuDescriptor {
 }
 
 impl GpuDescriptor {
+    /// Request a device without optional GPU features. Backend selection, limits
+    /// and surface format use the platform defaults. Enabling the crate's `atlas`
+    /// feature does not change the GPU features requested by this preset.
+    pub fn standard() -> Self {
+        Self {
+            required_features: wgpu::Features::empty(),
+            ..Default::default()
+        }
+    }
+
     /// GPU-less preset for headless tests: selects wgpu's noop backend, which
     /// needs no OS, driver or hardware. The noop adapter reports every feature
     /// as supported, so the default `required_features` pass unchanged. It can
@@ -193,10 +207,19 @@ impl Gpu {
 mod tests {
     use super::*;
 
-    /// Gate for the whole headless-testing stack: `request_adapter` must find
-    /// the noop backend (it is selected via the same code path as real
-    /// backends, not `enumerate_adapters`), and the noop adapter must satisfy
-    /// the default `required_features`.
+    #[test]
+    fn standard_preset_does_not_inherit_optional_feature_requirements() {
+        assert!(GpuDescriptor::standard().required_features.is_empty());
+        #[cfg(not(web))]
+        assert!(
+            GpuDescriptor::default()
+                .required_features
+                .contains(wgpu::Features::IMMEDIATES | wgpu::Features::VERTEX_WRITABLE_STORAGE)
+        );
+    }
+
+    /// Verify that `Gpu::new` selects the noop adapter through `request_adapter`
+    /// and accepts the platform's default required features without GPU hardware.
     #[test]
     fn noop_gpu_initializes() {
         let gpu = futures::executor::block_on(Gpu::new(GpuDescriptor::noop()))

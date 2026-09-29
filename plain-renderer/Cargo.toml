@@ -1,0 +1,20 @@
+[package]
+name = "plain-renderer"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
+render-interface.workspace = true
+wgpu.workspace = true
+nalgebra.workspace = true
+bytemuck.workspace = true
+thiserror.workspace = true
+guillotiere = "0.6"
+
+[dev-dependencies]
+gpu-utils.workspace = true
+futures.workspace = true
+image.workspace = true
+
+[lints]
+workspace = true

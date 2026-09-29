@@ -6,7 +6,7 @@ use matcha_tree::{
         widget::{View, Widget, WidgetInteractionResult, WidgetPod},
     },
 };
-use renderer::render_node::RenderNode;
+use render_interface::Draw;
 
 use super::reconcile_single_child;
 
@@ -97,11 +97,11 @@ impl Widget for VisibilityWidget {
     fn update(&mut self, view: &Visibility, ctx: &UiContext) -> WidgetInteractionResult {
         let vis_changed = self.visibility != view.visibility;
         self.visibility = view.visibility;
-        let child_changed = reconcile_single_child(&mut self.child, view.content.as_deref(), ctx);
-        if vis_changed || child_changed {
+        let child_result = reconcile_single_child(&mut self.child, view.content.as_deref(), ctx);
+        if vis_changed {
             WidgetInteractionResult::LayoutNeeded
         } else {
-            WidgetInteractionResult::NoChange
+            child_result
         }
     }
 
@@ -130,13 +130,11 @@ impl Widget for VisibilityWidget {
         }
     }
 
-    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext) -> RenderNode {
+    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>) {
         if self.visibility == VisibilityState::Visible {
             if let Some(child) = &mut self.child {
-                let child_node = child.render(bounds, ctx);
-                return RenderNode::new().add_child(child_node, nalgebra::Matrix4::identity());
+                child.render(bounds, ctx, draw);
             }
         }
-        RenderNode::new()
     }
 }

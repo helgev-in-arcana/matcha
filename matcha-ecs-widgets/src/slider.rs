@@ -7,30 +7,27 @@
 //!
 //! # What it reuses
 //!
-//! Almost everything. The drag is `PointerDispatch` plus the pointer capture a
+//! The drag uses `PointerDispatch` plus the pointer capture a
 //! press establishes (`matcha_ecs::input::PointerCapture`), which is what makes
-//! a drag keep working once the cursor leaves the track — the same mechanism
-//! that fixed the scrollbar thumb. Painting is three [`box_node`] calls, so a
-//! rounded track and a round knob cost nothing this crate did not already have.
+//! drag continue after the cursor leaves the track. [`paint_box`] draws the
+//! track, fill, knob and optional focus ring using shared shape definitions.
 //! Keyboard support is `KeyDispatch` on a `FocusPolicy::Normal` entity, so
 //! arrows work as soon as it is tabbed to.
 //!
 //! # Not supported
 //!
-//! Vertical orientation (nothing wants it yet; it would be an `Axis` field and
-//! a swap in three places), tick marks, and a two-handle range. The value is a
-//! plain `f32` — a discrete slider is `step`, which *is* here.
+//! Vertical orientation, tick marks and two-handle ranges are not supported.
+//! The value is a plain `f32`; `step` configures discrete increments.
 
 use bevy_ecs::{
-    bundle::Bundle, change_detection::DetectChangesMut, component::Component,
-    world::EntityWorldMut,
+    bundle::Bundle, change_detection::DetectChangesMut, component::Component, world::EntityWorldMut,
 };
+
 use matcha_window::{
     event::device_event::{Key as LogicalKey, KeyInput, NamedKey},
     window::CursorIcon,
 };
 use nalgebra::{Matrix4, Vector3};
-use renderer::RenderNode;
 
 use matcha_ecs::{
     components::{
@@ -47,7 +44,7 @@ use matcha_ecs::{
 };
 
 use crate::{
-    box_style::{box_node, BoxStyle},
+    box_style::{BoxStyle, paint_box},
     shape::ShapeCtx,
     sizing::{RectGeometry, Sizing},
 };
@@ -242,41 +239,55 @@ fn slider_render_item(shape: ShapeCtx, style: SliderStyle, range: SliderRange) -
     let knob = BoxStyle::fill(style.knob_color).radius(style.knob_radius);
     let ring = BoxStyle::fill(style.focus_ring_color).radius(style.knob_radius + 2.0);
 
-    RenderItem::new(move |ctx: &RenderCtx| {
+    RenderItem::new(move |ctx: &RenderCtx, draw| {
         let [w, h] = ctx.size;
-        let mut node = RenderNode::new();
 
         let track_y = ((h - style.track_height) / 2.0).max(0.0);
         let (start, span) = travel(w, style.knob_radius);
         let knob_x = start + span * range.fraction();
 
-        node.push_child(
-            box_node(ctx, &shape, [w, style.track_height], &track),
-            Matrix4::new_translation(&Vector3::new(0.0, track_y, 0.0)),
+        paint_box(
+            &mut draw.transformed(Matrix4::new_translation(&Vector3::new(0.0, track_y, 0.0))),
+            ctx,
+            &shape,
+            [w, style.track_height],
+            &track,
         );
-        node.push_child(
-            box_node(ctx, &shape, [knob_x, style.track_height], &fill),
-            Matrix4::new_translation(&Vector3::new(0.0, track_y, 0.0)),
+        paint_box(
+            &mut draw.transformed(Matrix4::new_translation(&Vector3::new(0.0, track_y, 0.0))),
+            ctx,
+            &shape,
+            [knob_x, style.track_height],
+            &fill,
         );
 
         // The focus ring goes under the knob so the knob stays crisp.
         let d = style.knob_radius * 2.0;
         if ctx.focused {
             let rd = d + 4.0;
-            node.push_child(
-                box_node(ctx, &shape, [rd, rd], &ring),
-                Matrix4::new_translation(&Vector3::new(
+            paint_box(
+                &mut draw.transformed(Matrix4::new_translation(&Vector3::new(
                     knob_x - rd / 2.0,
                     (h - rd) / 2.0,
                     0.0,
-                )),
+                ))),
+                ctx,
+                &shape,
+                [rd, rd],
+                &ring,
             );
         }
-        node.push_child(
-            box_node(ctx, &shape, [d, d], &knob),
-            Matrix4::new_translation(&Vector3::new(knob_x - style.knob_radius, (h - d) / 2.0, 0.0)),
+        paint_box(
+            &mut draw.transformed(Matrix4::new_translation(&Vector3::new(
+                knob_x - style.knob_radius,
+                (h - d) / 2.0,
+                0.0,
+            ))),
+            ctx,
+            &shape,
+            [d, d],
+            &knob,
         );
-        node
     })
 }
 
@@ -306,10 +317,7 @@ fn report<Msg: Message>(entity: &mut EntityWorldMut, value: f32) -> bool {
 /// means. The drag arrives even once the cursor has left the widget, because
 /// consuming the press captured the pointer.
 fn on_pointer<Msg: Message>(entity: &mut EntityWorldMut, input: &PointerInput) -> bool {
-    if !matches!(
-        input.phase,
-        PointerPhase::Press { .. } | PointerPhase::Drag
-    ) {
+    if !matches!(input.phase, PointerPhase::Press { .. } | PointerPhase::Drag) {
         return false;
     }
     let (Some(range), Some(style)) = (
@@ -432,14 +440,42 @@ mod tests {
     #[test]
     fn the_knob_sits_where_the_value_says() {
         assert_eq!(range().fraction(), 0.5);
-        assert_eq!(SliderRange { value: 0.0, ..range() }.fraction(), 0.0);
-        assert_eq!(SliderRange { value: 100.0, ..range() }.fraction(), 1.0);
+        assert_eq!(
+            SliderRange {
+                value: 0.0,
+                ..range()
+            }
+            .fraction(),
+            0.0
+        );
+        assert_eq!(
+            SliderRange {
+                value: 100.0,
+                ..range()
+            }
+            .fraction(),
+            1.0
+        );
     }
 
     #[test]
     fn a_value_outside_the_range_is_clamped_rather_than_extrapolated() {
-        assert_eq!(SliderRange { value: -20.0, ..range() }.fraction(), 0.0);
-        assert_eq!(SliderRange { value: 999.0, ..range() }.fraction(), 1.0);
+        assert_eq!(
+            SliderRange {
+                value: -20.0,
+                ..range()
+            }
+            .fraction(),
+            0.0
+        );
+        assert_eq!(
+            SliderRange {
+                value: 999.0,
+                ..range()
+            }
+            .fraction(),
+            1.0
+        );
     }
 
     #[test]
@@ -456,7 +492,10 @@ mod tests {
 
     #[test]
     fn step_snaps_to_the_grid() {
-        let r = SliderRange { step: 25.0, ..range() };
+        let r = SliderRange {
+            step: 25.0,
+            ..range()
+        };
         assert_eq!(r.value_at(0.5), 50.0);
         assert_eq!(r.value_at(0.44), 50.0, "0.44 -> 44 -> nearest 25 is 50");
         assert_eq!(r.value_at(0.0), 0.0);
@@ -481,6 +520,13 @@ mod tests {
     #[test]
     fn a_continuous_slider_nudges_by_a_hundredth_of_its_span() {
         assert_eq!(range().nudge(), 1.0);
-        assert_eq!(SliderRange { step: 25.0, ..range() }.nudge(), 25.0);
+        assert_eq!(
+            SliderRange {
+                step: 25.0,
+                ..range()
+            }
+            .nudge(),
+            25.0
+        );
     }
 }

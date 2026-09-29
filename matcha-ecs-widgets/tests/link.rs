@@ -1,13 +1,7 @@
-//! Headless verification of `Link` (Tier-1 HTML/CSS widgets batch): it
-//! delegates `Widget::bundle`/`patch`/`after_spawn` to a wrapped `RichText`
-//! while also carrying `OnClick`/`Pickable` — confirm both halves
-//! (click dispatch membership and text-cache invalidation) actually work
-//! through the delegation, not just compile. Same GPU-free style as
-//! `tests/render_item_reuse.rs`; `Link`'s `RenderItem` is built in
-//! `after_spawn` (inherited from `RichText`), which `run_view` already runs
-//! on first spawn.
-
-use std::sync::Arc;
+//! Headless verification of Link's delegation to RichText and its
+//! OnClick/Pickable components. Checks click-dispatch membership and draw
+//! revisions after patching. `run_view` invokes RichText's `after_spawn` hook
+//! to create the RenderItem; the writer does not run in these tests.
 
 use bevy_ecs::{entity::Entity, world::World};
 
@@ -37,12 +31,11 @@ fn first_child(world: &World, root: Entity) -> Entity {
         .1
 }
 
-fn cache(world: &World, e: Entity) -> Arc<parking_lot::Mutex<Option<Arc<renderer::RenderNode>>>> {
+fn cache(world: &World, e: Entity) -> u64 {
     world
         .get::<RenderItem>(e)
         .expect("Link carries a RenderItem (delegated from RichText)")
-        .cache
-        .clone()
+        .revision
 }
 
 #[test]
@@ -54,7 +47,10 @@ fn carries_hit_test_membership_and_the_assigned_message() {
     let child = first_child(&world, root);
 
     assert!(world.get::<Pickable>(child).is_some());
-    assert_eq!(world.get::<OnClick<Msg>>(child).cloned(), Some(OnClick(Some(Msg::Navigate))));
+    assert_eq!(
+        world.get::<OnClick<Msg>>(child).cloned(),
+        Some(OnClick(Some(Msg::Navigate)))
+    );
 }
 
 #[test]
@@ -70,7 +66,10 @@ fn unchanged_props_do_not_invalidate_cache() {
     matcha_ecs::view::run_view(&mut world, root, build);
     let after = cache(&world, child);
 
-    assert!(Arc::ptr_eq(&before, &after), "cache Arc must be unchanged when no draw-relevant prop changed");
+    assert!(
+        (before == after),
+        "draw revision must be unchanged when no draw-relevant prop changed"
+    );
 }
 
 #[test]
@@ -88,8 +87,8 @@ fn changed_content_invalidates_cache_via_delegated_patch() {
     let after = cache(&world, child);
 
     assert!(
-        !Arc::ptr_eq(&before, &after),
-        "cache Arc must change when content changed, delegated through RichText::patch"
+        (before != after),
+        "draw revision must change when content changed, delegated through RichText::patch"
     );
 }
 

@@ -1,5 +1,4 @@
 use dashmap::DashMap;
-use gpu_utils::texture_atlas::atlas_simple::atlas::TextureAtlas;
 use parking_lot::Mutex;
 use std::sync::Weak;
 use std::{any::Any, sync::Arc};
@@ -9,7 +8,7 @@ use matcha_window::adapter::EventLoop;
 use matcha_window::window::WindowId;
 use matcha_window::window::{Window, WindowConfig, WindowError};
 
-pub use super::runtime::RuntimeHandle;
+pub use super::runtime::{Runtime, RuntimeHandle};
 
 // ----------------------------------------------------------------------------
 // EventSender / EventReceiver
@@ -32,10 +31,11 @@ impl<T: Any + utils::MaybeSend> AnyMessage for T {
 
 pub(super) type BoxedMessage = Box<dyn AnyMessage>;
 
-/// Type-erased sender for messages from Component background tasks back to TreeApp.
+/// Type-erased sender for messages from Component background tasks to UiTree.
 ///
 /// Clone-able; each clone sends to the same channel. Use `emit()` to post a
-/// message that TreeApp will downcast to `C::Message` in `buffer_updated()`.
+/// message that the application bridge downcasts to `C::Message` and forwards
+/// to the component's `update()` method.
 #[derive(Clone)]
 pub struct EventSender {
     sender: tokio::sync::mpsc::UnboundedSender<BoxedMessage>,
@@ -89,7 +89,7 @@ impl<'a> AppContext<'a> {
     }
 
     /// Returns a clone of the type-erased event sender.
-    /// Use `sender.emit(your_message)` in spawned tasks to wake up TreeApp.
+    /// Use `sender.emit(your_message)` in spawned tasks to wake up UiTree.
     pub fn event_sender(&self) -> EventSender {
         self.event_sender.clone()
     }
@@ -119,7 +119,6 @@ pub(super) struct SharedCtx<'a> {
     pub(super) gpu_instance: &'a wgpu::Instance,
     pub(super) gpu_device: wgpu::Device,
     pub(super) gpu_queue: wgpu::Queue,
-    pub(super) texture_atlas: &'a TextureAtlas,
     pub(super) surface_creation_permitted: bool,
 }
 
@@ -127,7 +126,7 @@ pub(super) struct SharedCtx<'a> {
 // WindowCtx
 // ----------------------------------------------------------------------------
 
-/// Per-window context set by [`WindowWidgetInstance::map_ui_context`].
+/// Per-window values supplied while measuring, drawing or dispatching input.
 ///
 /// Stored as `Option<WindowCtx>` inside [`UiContext`]; `None` outside a window pass.
 #[derive(Clone)]
@@ -144,9 +143,9 @@ pub(super) struct WindowCtx {
 
 /// Context passed to all Component and Widget methods.
 ///
-/// Internally holds a reference to [`SharedCtx`] (stable GPU + registry resources)
-/// plus a small optional [`WindowCtx`] for per-window values (DPI, format, config).
-/// The struct itself stays small regardless of how many resources are added to `SharedCtx`.
+/// Borrows shared GPU and registry resources, plus optional per-window values
+/// such as DPI, texture format and configuration. Resource storage lives outside
+/// this handle, keeping copies small as the shared resource set grows.
 #[derive(Copy)]
 pub struct UiContext<'a> {
     pub(super) event_loop: Option<&'a dyn EventLoop>,
@@ -164,6 +163,60 @@ impl<'a> Clone for UiContext<'a> {
     }
 }
 
+/// Run UI construction, measurement and drawing against a caller-owned GPU
+/// without creating a window or an event loop.
+///
+/// The context reports `dpi() == Some(1.0)`, the given output format and viewport
+/// in physical pixels, so viewport-relative sizes resolve as they do in a window
+/// pass. GPU handles are only cloned for this scope; no GPU is created or submitted
+/// here. The caller owns the runtime and must keep it alive for any spawned tasks.
+///
+/// The temporary message channel and window registry are scoped to this call;
+/// messages are not delivered to an application. Window widgets cannot be created
+/// through this context. Its borrowed state cannot escape the callback, although
+/// owned widget trees and resource definitions may be returned and reused.
+pub fn with_offscreen_context<R>(
+    runtime_handle: RuntimeHandle,
+    instance: &wgpu::Instance,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    viewport: [f32; 2],
+    format: wgpu::TextureFormat,
+    run: impl for<'ctx> FnOnce(&UiContext<'ctx>) -> R,
+) -> R {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    // There is no application event pump; do not accumulate undelivered messages.
+    drop(receiver);
+    let sender = EventSender::new(sender);
+    let registry = DashMap::new();
+    let shared = SharedCtx {
+        runtime_handle,
+        event_sender: &sender,
+        window_registry: &registry,
+        gpu_instance: instance,
+        gpu_device: device.clone(),
+        gpu_queue: queue.clone(),
+        surface_creation_permitted: false,
+    };
+    let physical_size = viewport.map(|value| value.max(0.0) as u32);
+    let mut config = WindowConfig::default()
+        .with_surface_format(format)
+        .with_inner_size(physical_size);
+    config.surface_config.width = physical_size[0];
+    config.surface_config.height = physical_size[1];
+    let window = WindowCtx {
+        dpi: 1.0,
+        format,
+        config,
+        inner_size: viewport,
+    };
+    run(&UiContext {
+        event_loop: None,
+        shared: &shared,
+        window: Some(&window),
+    })
+}
+
 impl UiContext<'_> {
     pub(crate) fn register_window_instance(
         &self,
@@ -176,9 +229,9 @@ impl UiContext<'_> {
     }
 
     pub(crate) fn create_window(&self, config: &WindowConfig) -> Result<Window, WindowError> {
-        let event_loop = self
-            .event_loop
-            .expect("create_window called outside of UI pass");
+        let event_loop = self.event_loop.ok_or_else(|| {
+            WindowError::BackendError("window creation requires an application event loop".into())
+        })?;
         let mut window = Window::new(config, event_loop)?;
         if self.shared.surface_creation_permitted {
             window.create_surface(self.shared.gpu_instance, &self.shared.gpu_device)?;
@@ -214,10 +267,6 @@ impl UiContext<'_> {
     /// `None` when called outside a window pass (e.g. during update without a window).
     pub fn viewport_size(&self) -> Option<[f32; 2]> {
         self.window.map(|w| w.inner_size)
-    }
-
-    pub fn texture_atlas(&self) -> &TextureAtlas {
-        self.shared.texture_atlas
     }
 
     pub fn gpu_instance(&self) -> &wgpu::Instance {

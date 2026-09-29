@@ -1,3 +1,5 @@
+//! Render-node composition, GPU pipeline caching, and widget drawing primitives.
+
 pub mod core_renderer;
 pub use core_renderer::{CoreRenderer, FlatItem, MaskNode};
 pub mod pipeline_cache;

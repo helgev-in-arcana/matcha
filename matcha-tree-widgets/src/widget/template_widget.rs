@@ -4,7 +4,7 @@ use matcha_tree::ui_tree::{
     metrics::Constraints,
     widget::{View, Widget, WidgetInteractionResult, WidgetPod},
 };
-use renderer::render_node::RenderNode;
+use render_interface::Draw;
 
 // MARK: View
 
@@ -57,7 +57,5 @@ impl Widget for TemplateWidget {
         [0.0, 0.0]
     }
 
-    fn render(&mut self, _bounds: [f32; 2], _ctx: &UiContext) -> RenderNode {
-        RenderNode::new()
-    }
+    fn render(&mut self, _bounds: [f32; 2], _ctx: &UiContext, _draw: &mut Draw<'_>) {}
 }

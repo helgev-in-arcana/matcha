@@ -1,25 +1,26 @@
 //! Render dispatch: snapshot extraction and the [`RenderDriver`] that turns a
 //! per-frame [`RenderSnapshot`] into pixels.
 //!
-//! M4 moves encode/submit/present off the main thread. The main thread runs the
-//! render schedule, acquires the window's `SurfaceTexture`, extracts a flat list
-//! of `(RenderItem, transform)` into a [`RenderSnapshot`], and hands it to a
+//! The main thread runs the render schedule, acquires the window's
+//! `SurfaceTexture`, extracts a flat list of `(RenderItem, transform)` into a
+//! [`RenderSnapshot`], and hands it to a
 //! [`RenderDriver`]. The default [`ThreadDriver`] forwards each snapshot to a
-//! per-window worker thread that builds the (still-deferred) render nodes, calls
-//! [`CoreRenderer::render_flat`], and presents. The `RenderItem` builders run on
+//! per-window worker thread that invokes lightweight draw writers, calls
+//! [`PlainRenderer::render`], and presents. The `RenderItem` builders run on
 //! that worker thread, not the main thread.
 //!
-//! [`InlineDriver`] runs the same `build_and_present` synchronously; it exists to
-//! isolate regressions between "the snapshot/extract split" and "the threading".
+//! [`InlineDriver`] runs the same `build_and_present` synchronously on the caller.
+//! Both drivers share the same scene assembly and GPU recording path.
 
-use std::{collections::HashMap, sync::mpsc, sync::Arc, thread::JoinHandle};
+use std::{collections::HashMap, sync::Arc, sync::mpsc, thread::JoinHandle};
 
 use bevy_ecs::{entity::Entity, world::World};
-use gpu_utils::texture_atlas::TextureAtlas;
 use matcha_window::window::WindowId;
 use nalgebra::Matrix4;
 use parking_lot::{Condvar, Mutex};
-use renderer::{CoreRenderer, FlatItem, MaskNode, RenderNode};
+use plain_renderer::{PlainError, PlainRenderer, PlainTarget};
+use render_interface::PixelMaskIndex;
+use render_interface::{MaskDescriptor, MaskSource, MeshSource, PixelMask};
 
 use crate::{
     clip::ClipArena,
@@ -32,8 +33,8 @@ use crate::{
     traversal,
 };
 
-/// One drawable entity captured for a frame: the shared node cache, its deferred
-/// builder, its window-space transform (already composed by M3 layout), the size
+/// One drawable entity captured for a frame: its revision and shared deferred
+/// builder, its window-space transform composed by layout, the size
 /// layout allocated to it (`LayoutOutput::size` — what the builder must draw at),
 /// its current opacity (`1.0` if the entity has no `RenderOpacity`), and its
 /// focus and pointer state.
@@ -42,8 +43,8 @@ pub struct RenderItemSnapshot {
     /// it — it is here so a frame can be traced back to the tree that produced
     /// it, by a debugger or a test asserting on paint order.
     pub entity: Entity,
-    pub cache: Arc<Mutex<Option<Arc<RenderNode>>>>,
-    pub builder: Arc<dyn Fn(&RenderCtx) -> RenderNode + Send + Sync>,
+    pub revision: u64,
+    pub builder: Arc<crate::components::render::DrawBuilder>,
     pub transform: Matrix4<f32>,
     pub size: [f32; 2],
     pub opacity: f32,
@@ -66,8 +67,9 @@ pub struct ExtractedFrame {
 }
 
 /// Everything a [`RenderDriver`] needs to draw one window's frame. Owns the
-/// acquired `SurfaceTexture` (moved from the main thread) and clones of the GPU
-/// resources so the worker thread is self-contained.
+/// acquired `SurfaceTexture` and a shared handle to the scene assembly state
+/// and backend. This CPU dispatch snapshot is distinct from the GPU phase-start
+/// image provided to resource generators by `render-interface`.
 pub struct RenderSnapshot {
     pub window_id: WindowId,
     pub surface_texture: wgpu::SurfaceTexture,
@@ -75,19 +77,98 @@ pub struct RenderSnapshot {
     pub viewport_size: [f32; 2],
     pub load_color: wgpu::Color,
     pub items: Vec<RenderItemSnapshot>,
-    /// The frame's clips, already paired with their coverage image. Indices in
+    /// The frame's CPU clip geometry. Indices in
     /// [`RenderItemSnapshot::clip`] point into this.
-    pub clips: Vec<MaskNode>,
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    pub core: Arc<CoreRenderer>,
-    pub texture_atlas: Arc<TextureAtlas>,
-    pub stencil_atlas: Arc<TextureAtlas>,
+    pub clips: ClipArena,
+    pub core: Arc<Mutex<GuiRenderer>>,
+}
+
+/// The UI owns the reusable Scene; the backend owns GPU resources. Render
+/// workers share this pair under one lock, serializing assembly and submission
+/// while preserving the backend's resource cache across frames.
+pub struct GuiRenderer {
+    pub frame: crate::scene::Frame,
+    pub backend: PlainRenderer,
+    quad: MeshSource,
+    clip: MaskSource,
+}
+impl GuiRenderer {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        let mut desc = MaskDescriptor::new([1, 1], wgpu::TextureFormat::R8Unorm);
+        desc.usages = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        let clip = MaskSource::new(desc, |mut c| {
+            let _pass = c.target.region.begin_render_pass(
+                &mut c.gpu,
+                render_interface::RegionRenderPassDescriptor {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .with_output_layout(render_interface::PrepareOutputLayout::AnyRegion);
+        Self {
+            frame: crate::scene::Frame::default(),
+            backend: PlainRenderer::new(device, queue),
+            quad: crate::scene::unit_quad(),
+            clip,
+        }
+    }
+    /// Invoke widget writers in paint order. The framework owns phase scheduling.
+    /// Unused resource registrations remain optional retention hints.
+    pub fn render_extracted(
+        &mut self,
+        items: &[RenderItemSnapshot],
+        clips: &ClipArena,
+        target: PlainTarget<'_>,
+    ) -> Result<(), PlainError> {
+        self.assemble(items, clips, target.logical_size)?;
+        self.backend.render(&self.frame.scene, target)
+    }
+    /// Write Objects directly into one complete interface submission.
+    /// Separate from GPU recording so construction costs can be measured directly.
+    pub fn assemble(
+        &mut self,
+        items: &[RenderItemSnapshot],
+        clips: &ClipArena,
+        viewport: [f32; 2],
+    ) -> Result<(), PlainError> {
+        self.frame.begin();
+        {
+            let mut draw = self.frame.draw(Matrix4::identity(), None, 1.);
+            draw.mesh(&self.quad);
+            draw.mask(&self.clip);
+        }
+        for clip in clips.as_slice() {
+            self.frame.scene.pixel_masks.push(PixelMask {
+                mesh: self.quad.id(),
+                texture: self.clip.id(),
+                transform: clip.transform,
+                parent: clip.parent.map(PixelMaskIndex),
+            });
+        }
+        for item in items {
+            let ctx = RenderCtx {
+                transform: item.transform,
+                viewport_size: viewport,
+                size: item.size,
+                focused: item.focused,
+                focus_within: item.focus_within,
+                hovered: item.hovered,
+                active: item.active,
+            };
+            let mut draw =
+                self.frame
+                    .draw(item.transform, item.clip.map(PixelMaskIndex), item.opacity);
+            (item.builder)(&ctx, &mut draw);
+        }
+        self.frame.finish().map_err(PlainError::Invalid)
+    }
 }
 
 /// Collect a window root's drawable entities and the clips enclosing them, in
-/// paint order. Clones each entity's `RenderItem` (the `cache`/`builder`
-/// `Arc`s are shared, not deep-copied) and its `GlobalTransform`; the builder
+/// paint order. Captures each entity's revision and shared `RenderItem` builder
+/// together with its `GlobalTransform`; the builder
 /// is not invoked here.
 ///
 /// Order comes from [`crate::traversal::walk`], the same walk picking uses, so
@@ -129,7 +210,7 @@ fn extract_one(
             .unwrap_or(1.0);
         out.items.push(RenderItemSnapshot {
             entity,
-            cache: item.cache.clone(),
+            revision: item.revision,
             builder: item.builder.clone(),
             transform,
             size,
@@ -145,7 +226,7 @@ fn extract_one(
     own_clip
 }
 
-/// Build each item's (cached) render node and present the frame. Shared by both
+/// Invoke each item's draw writer and present the frame. Shared by both
 /// drivers; runs on the worker thread under [`ThreadDriver`].
 pub fn build_and_present(snapshot: RenderSnapshot) {
     let RenderSnapshot {
@@ -156,87 +237,36 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
         load_color,
         items,
         clips,
-        device,
-        queue,
         core,
-        texture_atlas,
-        stencil_atlas,
     } = snapshot;
 
-    let mut nodes: Vec<FlatItem> = Vec::with_capacity(items.len());
-    for item in &items {
-        // Size and interaction state vary per item, so `RenderCtx` is built fresh per item
-        // rather than shared across the loop. Opacity is deliberately not in
-        // it: it is applied at draw time, so it never reaches a builder and
-        // never invalidates a cached node.
-        let ctx = RenderCtx {
-            device: &device,
-            queue: &queue,
-            texture_atlas: &texture_atlas,
-            stencil_atlas: &stencil_atlas,
-            size: item.size,
-            focused: item.focused,
-            focus_within: item.focus_within,
-            hovered: item.hovered,
-            active: item.active,
-        };
-        let node = build_node(&item.cache, &item.builder, &ctx);
-        nodes.push(
-            FlatItem::new(node, item.transform)
-                .with_alpha(item.opacity)
-                .with_clip(item.clip),
-        );
-    }
-
+    let mut renderer = core.lock();
     let view = surface_texture
         .texture
         .create_view(&wgpu::TextureViewDescriptor::default());
+    let region = match render_interface::TextureRegion::whole(&view, format) {
+        Ok(region) => region,
+        Err(error) => {
+            log::error!("Invalid render target for window {window_id:?}: {error}");
+            return;
+        }
+    };
 
-    if let Err(e) = core.render_flat(
-        &device,
-        &queue,
-        format,
-        &view,
-        viewport_size,
-        &nodes,
+    if let Err(e) = renderer.render_extracted(
+        &items,
         &clips,
-        load_color,
-        &texture_atlas.texture(),
-        &stencil_atlas.texture(),
+        PlainTarget {
+            region,
+            logical_size: viewport_size,
+            clear: load_color,
+            initial: None,
+        },
     ) {
-        log::error!("render_flat failed for window {window_id:?}: {e}");
+        log::error!("Plain renderer failed for window {window_id:?}: {e}");
+        return;
     }
 
     surface_texture.present();
-}
-
-/// Fetch (building on first use) an item's render node. In debug builds this
-/// first tries a non-blocking lock and warns on contention: the §7.4 invariant
-/// is that the main thread and render thread never hold this lock at once.
-fn build_node(
-    cache: &Arc<Mutex<Option<Arc<RenderNode>>>>,
-    builder: &Arc<dyn Fn(&RenderCtx) -> RenderNode + Send + Sync>,
-    ctx: &RenderCtx,
-) -> Arc<RenderNode> {
-    #[cfg(debug_assertions)]
-    {
-        match cache.try_lock() {
-            Some(mut guard) => {
-                return guard
-                    .get_or_insert_with(|| Arc::new(builder(ctx)))
-                    .clone();
-            }
-            None => {
-                log::warn!(
-                    "render cache lock contended on render thread; \
-                     main and render threads should never lock it at once"
-                );
-            }
-        }
-    }
-
-    let mut guard = cache.lock();
-    guard.get_or_insert_with(|| Arc::new(builder(ctx))).clone()
 }
 
 /// Consumes per-frame [`RenderSnapshot`]s. The main thread checks
@@ -260,8 +290,8 @@ pub trait RenderDriver: Send {
     fn wait_idle(&self, window: WindowId);
 }
 
-/// Synchronous driver: builds and presents on the calling (main) thread. Never
-/// busy. Retained to isolate render-threading regressions from the M4 refactor.
+/// Synchronous driver: builds and presents on the calling thread. Dispatch
+/// returns after presentation, so there is no queued frame and it is never busy.
 #[derive(Default)]
 pub struct InlineDriver;
 
@@ -277,7 +307,7 @@ impl RenderDriver for InlineDriver {
     fn wait_idle(&self, _window: WindowId) {}
 }
 
-/// Per-window worker-thread driver (the M4 default). Each window gets one thread
+/// Default worker-thread driver. Each window gets one thread
 /// that owns nothing but the receiving end of a snapshot channel plus a shared
 /// busy flag.
 #[derive(Default)]

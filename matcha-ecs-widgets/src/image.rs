@@ -1,5 +1,5 @@
 //! `Image` — a fixed-size leaf widget displaying a decoded raster image,
-//! fit within its box preserving aspect ratio (CSS `object-fit: contain`).
+//! fitted within its box according to [`ObjectFit`].
 //!
 //! `(w, h)` are mandatory constructor arguments, not an optional `.size()`
 //! with a natural-size default — deliberately, so `measure()` never needs
@@ -8,22 +8,15 @@
 //! `RectGeometry`/`LayoutDispatch::of::<RectGeometry>()` verbatim, same as
 //! `ColorRect`/`Checkbox`.
 //!
-//! Decode+resize+upload happens synchronously inside the `RenderItem`
-//! builder (matching `Text`'s existing "shape on first render-item build, no
-//! async" precedent) but is cached by `(source identity, display size)` in a
-//! lazily-inserted `ImageCtx` resource — mirroring `Text`'s `FontCtx`
-//! stencil cache. This matters because `matcha-ecs/src/systems.rs`'s
-//! `invalidate_on_layout_change` invalidates *every* `RenderItem` on any
-//! `LayoutOutput` change, including a pure reposition with unchanged size;
-//! without this cache, any reflow near an `Image` would force a full
-//! re-decode. Resizing before upload is also a correctness requirement, not
-//! just an optimisation: atlas pages are fixed 4096×4096, and `allocate()`
-//! fails outright above that, so a natural-resolution large photo would
-//! otherwise hard-fail.
+//! Decode and resize run synchronously inside the `RenderItem` writer. The
+//! writer retains decoded pixels, and `ImageCtx` shares fitted TextureSource
+//! definitions by source identity, display size and fit mode. Moving an image
+//! therefore reuses its definition. The source records a lazy upload when the
+//! renderer needs its content; the renderer owns GPU residency.
+//! Fitting before upload also avoids retaining unnecessarily large textures.
 //!
-//! Object-fit: v1 supports exactly `contain` — this is
-//! `image::DynamicImage::resize`'s documented behaviour verbatim, so no
-//! custom fit math is needed. `fill`/`cover` are not implemented.
+//! Fit modes are `contain`, `fill`, `cover` and `scale-down`, implemented with
+//! the `image` crate's resize operations.
 //!
 //! **`ImageSource::Bytes`'s cache/change-detection identity is the `Arc<[u8]>`'s
 //! pointer, not its byte content** (`ImageSource`'s `PartialEq` uses
@@ -38,10 +31,8 @@
 //! decode cache *and* `patch`'s change-detection on every single re-render,
 //! not just real content changes.
 //!
-//! Async decode (e.g. via `matcha_ecs::task::spawn_task`) is explicitly
-//! deferred: reporting completion back into the ECS world needs the *app's*
-//! own `ModelHandle::update`/`Msg` routing, a bigger cross-cutting design
-//! than this widget alone.
+//! Decode is synchronous. Applications loading images asynchronously can
+//! publish the resulting encoded bytes through their model update path.
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
@@ -49,10 +40,10 @@ use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, resource::Resource,
     world::EntityWorldMut,
 };
-use gpu_utils::texture_atlas::AtlasRegion;
+use matcha_ecs::scene::Draw;
 use nalgebra::{Matrix4, Vector3};
 use parking_lot::Mutex;
-use renderer::RenderNode;
+use render_interface::{TextureDescriptor, TextureSource, upload_texture};
 
 use matcha_ecs::{
     components::{
@@ -63,8 +54,8 @@ use matcha_ecs::{
     view::Widget,
 };
 
-use crate::sizing::Sizing;
 use crate::sizing::RectGeometry;
+use crate::sizing::Sizing;
 
 /// Where an `Image`'s bytes come from. Identity (not content) is what
 /// matters for change-detection and cache keying — see `PartialEq`/
@@ -128,10 +119,9 @@ impl ImageCacheKey {
 /// semantics are exactly that crate's documented behaviour rather than fit
 /// arithmetic maintained here.
 ///
-/// CSS's `none` (natural size, overflowing) is deliberately absent: the atlas
-/// pages are a fixed 4096x4096 and `allocate` hard-fails above that, so a
-/// natural-resolution photo would not merely overflow, it would fail to draw
-/// at all. [`ScaleDown`](Self::ScaleDown) is the usable half of that intent.
+/// CSS's `none` (natural size, overflowing) is not exposed: these modes fit the
+/// image inside the widget's declared box. This policy is independent of the
+/// renderer's placement policy and device texture-size limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ObjectFit {
     /// Fit inside the box, preserving aspect ratio; the leftover is letterboxed.
@@ -167,17 +157,46 @@ impl ObjectFit {
     }
 }
 
-/// World resource caching decoded-and-fitted images by `(source, display
-/// size)`, keyed via [`ImageCacheKey`]. Lazily inserted on first use, exactly
-/// like `text.rs`'s `FontCtx`. Unbounded, same accepted tradeoff as
-/// `FontCtx`'s glyph stencil cache — fine for v1, revisit only if a real app
-/// displays many distinct large images over a long session.
+/// World resource sharing fitted image definitions via [`ImageCacheKey`].
+/// Entries for byte inputs expire with their input owner; path entries have no
+/// capacity limit. Dead byte inputs are reclaimed on a cache miss.
 #[derive(Resource, Clone)]
-struct ImageCtx(Arc<Mutex<HashMap<ImageCacheKey, (AtlasRegion, [f32; 2]), fxhash::FxBuildHasher>>>);
+struct ImageCtx(Arc<Mutex<HashMap<ImageCacheKey, CachedImage, fxhash::FxBuildHasher>>>);
+
+#[derive(Clone)]
+struct CachedImage {
+    value: (TextureSource, [f32; 2]),
+    // Keep address identity tied to its allocation and remove entries whose
+    // input owner died. A naked (ptr,len) cache key can otherwise identify an
+    // unrelated later image when the allocator reuses that address.
+    owner: Option<std::sync::Weak<[u8]>>,
+}
 
 impl ImageCtx {
     fn new() -> Self {
         Self(Arc::new(Mutex::new(HashMap::default())))
+    }
+    fn lookup(&self, key: &ImageCacheKey) -> Option<(TextureSource, [f32; 2])> {
+        let mut cache = self.0.lock();
+        // Writers run every frame. A warm hit must not sweep every other image
+        // (N visible images would otherwise make frame assembly quadratic).
+        if let Some(entry) = cache.get(key).filter(|entry| {
+            entry
+                .owner
+                .as_ref()
+                .is_none_or(|owner| owner.strong_count() > 0)
+        }) {
+            return Some(entry.value.clone());
+        }
+        // The weak owner also prevents pointer reuse from aliasing old content.
+        // Reclaim dead inputs on a miss; successful hot lookups remain O(1).
+        cache.retain(|_, entry| {
+            entry
+                .owner
+                .as_ref()
+                .is_none_or(|owner| owner.strong_count() > 0)
+        });
+        None
     }
 }
 
@@ -202,53 +221,97 @@ fn decode(source: &ImageSource) -> Option<image::DynamicImage> {
 
 /// Build a `RenderItem` fitting `source` within the layout-allocated box
 /// (`ctx.size` — which a parent layout may have stretched beyond the declared
-/// `w`×`h`; CSS `object-fit: contain`), decoding/resizing/uploading at most
-/// once per distinct `(source, box size)` pair via `image_ctx`.
+/// `w`×`h`). Decoding is retained by the writer; fitted definitions are shared
+/// by `(source, box size, fit)`. GPU uploads run when residency is missing.
 fn image_render_item(image_ctx: ImageCtx, source: ImageSource, fit: ObjectFit) -> RenderItem {
-    RenderItem::new(move |ctx: &RenderCtx| {
+    // Retain decoding independently of fitted texture definitions. Failed input
+    // is remembered for this writer too, avoiding repeated IO/errors each frame.
+    // Replacing the widget content installs a fresh writer and permits a retry.
+    let decoded = std::sync::OnceLock::new();
+    RenderItem::new(move |ctx: &RenderCtx, draw| {
         let [box_w, box_h] = ctx.size;
-        let mut node = RenderNode::new();
         if box_w <= 0.0 || box_h <= 0.0 {
-            return node;
+            return;
         }
         let target = [box_w.ceil() as u32, box_h.ceil() as u32];
         let key = ImageCacheKey::new(&source, target, fit);
 
-        if let Some(cached) = image_ctx.0.lock().get(&key) {
-            return compose(node, cached, box_w, box_h);
+        if let Some(cached) = image_ctx.lookup(&key) {
+            return compose(draw, &cached, box_w, box_h);
         }
 
-        let Some(decoded) = decode(&source) else {
-            return node;
+        let Some(decoded) = decoded.get_or_init(|| decode(&source)) else {
+            return;
         };
-        let fitted = fit.apply(&decoded, target);
+        let fitted = fit.apply(decoded, target);
         let rgba = fitted.to_rgba8();
         let (w, h) = rgba.dimensions();
         if w == 0 || h == 0 {
-            return node;
+            return;
         }
 
-        let region = match ctx.texture_atlas.allocate(ctx.device, ctx.queue, [w, h]) {
-            Ok(region) => region,
-            Err(e) => {
-                log::error!("Image atlas allocation failed: {e}");
-                return node;
+        // Decode sRGB to linear, premultiply, then encode for source-over.
+        let mut bytes = rgba.into_raw();
+        for pixel in bytes.chunks_exact_mut(4) {
+            let alpha = pixel[3] as f32 / 255.0;
+            for channel in &mut pixel[..3] {
+                let encoded = *channel as f32 / 255.0;
+                let linear = if encoded <= 0.04045 {
+                    encoded / 12.92
+                } else {
+                    ((encoded + 0.055) / 1.055).powf(2.4)
+                };
+                *channel = crate::color::linear_to_srgb_u8(linear * alpha);
             }
-        };
-        // `.to_rgba8()`'s bytes are already sRGB-gamma-encoded by convention
-        // (matching the atlas's Rgba8UnormSrgb format), unlike `ColorRect`/
-        // `Text`'s linear-float colours which need `linear_to_srgb_u8`
-        // before a raw `write_data` — no conversion needed here.
-        if let Err(e) = region.write_data(ctx.queue, rgba.as_raw()) {
-            log::error!("Image upload failed: {e}");
-            return node;
         }
+        let region = TextureSource::new(
+            TextureDescriptor::new([w, h], wgpu::TextureFormat::Rgba8UnormSrgb),
+            move |mut c| upload_texture(&mut c.gpu, &c.target, &bytes),
+        )
+        .with_output_layout(render_interface::PrepareOutputLayout::AnyRegion);
 
         let entry = (region, [w as f32, h as f32]);
-        image_ctx.0.lock().insert(key, entry.clone());
-        node = compose(node, &entry, box_w, box_h);
-        node
+        let owner = match &source {
+            ImageSource::Bytes(bytes) => Some(Arc::downgrade(bytes)),
+            ImageSource::Path(_) => None,
+        };
+        image_ctx.0.lock().insert(
+            key,
+            CachedImage {
+                value: entry.clone(),
+                owner,
+            },
+        );
+        compose(draw, &entry, box_w, box_h);
     })
+}
+
+#[cfg(test)]
+mod source_identity_tests {
+    use super::*;
+    #[test]
+    fn byte_address_cache_expires_with_its_input_owner() {
+        let cache = ImageCtx::new();
+        let bytes: Arc<[u8]> = Arc::from([1u8, 2, 3, 4]);
+        let source = ImageSource::Bytes(bytes.clone());
+        let key = ImageCacheKey::new(&source, [1, 1], ObjectFit::Contain);
+        let texture = TextureSource::new(
+            TextureDescriptor::new([1, 1], wgpu::TextureFormat::Rgba8Unorm),
+            |_| Ok(()),
+        );
+        cache.0.lock().insert(
+            key.clone(),
+            CachedImage {
+                value: (texture, [1., 1.]),
+                owner: Some(Arc::downgrade(&bytes)),
+            },
+        );
+        assert!(cache.lookup(&key).is_some());
+        drop(source);
+        drop(bytes);
+        assert!(cache.lookup(&key).is_none());
+        assert!(cache.0.lock().is_empty());
+    }
 }
 
 /// Centre `(region, fitted_size)` within its box.
@@ -256,15 +319,18 @@ fn image_render_item(image_ctx: ImageCtx, source: ImageSource, fit: ObjectFit) -
 /// This is what produces `contain`'s letterbox/pillarbox bars. For `fill` and
 /// `cover` the fitted size already equals the box, so the offset is zero and
 /// this costs nothing; for `scale-down` of a small image it centres it.
-fn compose(mut node: RenderNode, (region, fitted_size): &(AtlasRegion, [f32; 2]), box_w: f32, box_h: f32) -> RenderNode {
+fn compose(
+    draw: &mut Draw<'_>,
+    (region, fitted_size): &(TextureSource, [f32; 2]),
+    box_w: f32,
+    box_h: f32,
+) {
     let offset = Matrix4::new_translation(&Vector3::new(
         ((box_w - fitted_size[0]) / 2.0).max(0.0),
         ((box_h - fitted_size[1]) / 2.0).max(0.0),
         0.0,
     ));
-    let image_node = RenderNode::new().with_texture(region.clone(), *fitted_size, Matrix4::identity());
-    node.push_child(image_node, offset);
-    node
+    matcha_ecs::scene::push_quad(draw, region, *fitted_size, offset, None);
 }
 
 /// The declared [`ObjectFit`], carried so `patch` can detect a change to it.
@@ -341,7 +407,8 @@ impl Image {
     }
 
     fn rebuild_render_item(&self, entity: &mut EntityWorldMut) -> RenderItem {
-        let image_ctx = entity.world_scope(|world| world.get_resource_or_insert_with(ImageCtx::new).clone());
+        let image_ctx =
+            entity.world_scope(|world| world.get_resource_or_insert_with(ImageCtx::new).clone());
         image_render_item(image_ctx, self.source.clone(), self.fit)
     }
 }
@@ -352,9 +419,8 @@ impl Widget for Image {
     }
 
     fn bundle(&self) -> impl Bundle {
-        // Unlike `ColorRect`, the `RenderItem` can't be built here: `ImageCtx`
-        // is a world resource and `bundle()` has no world access. Built in
-        // `after_spawn` instead, mirroring `Text`/`Button`.
+        // `after_spawn` builds the RenderItem because it can access ImageCtx
+        // in the world; bundle() only supplies the entity's initial components.
         (
             ImageContent(self.source.clone()),
             ImageFit(self.fit),

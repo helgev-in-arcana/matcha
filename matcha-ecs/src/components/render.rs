@@ -1,26 +1,29 @@
-//! Rendering component: a deferred, cached render-tree builder per widget entity.
-//!
-//! A widget entity that draws carries a [`RenderItem`]. It does not hold a
-//! `RenderNode` directly; instead it holds a `builder` closure that produces one
-//! given GPU resources ([`RenderCtx`]), plus a shared `cache` slot. The render
-//! stage lazily fills the cache on first use and reuses it on subsequent frames.
-//! Invalidation ([`RenderItem::invalidate`]) swaps the cache for a fresh empty
-//! slot so the next frame rebuilds it.
+//! Widget draw producers. Each redraw writes Objects into framework-owned storage.
+//! Providers retain expensive shaping/decoding resources, not local Scenes/phases.
+//! One shared builder per entity supports immutable in-flight extraction; Objects
+//! themselves have no Arc or retained cache. Revision tracks prop invalidation.
 
 use std::sync::Arc;
 
+use crate::scene::Draw;
 use bevy_ecs::component::Component;
-use gpu_utils::texture_atlas::TextureAtlas;
-use parking_lot::Mutex;
-use renderer::RenderNode;
+use std::sync::atomic::{AtomicU64, Ordering};
+static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
+fn next_revision() -> u64 {
+    NEXT_REVISION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
+        .expect("render revision space exhausted")
+}
+pub type DrawBuilder = dyn Fn(&RenderCtx, &mut Draw<'_>) + Send + Sync;
 
-/// GPU resources handed to a [`RenderItem`] builder so it can allocate atlas
-/// space and record draw commands while producing its [`RenderNode`].
-pub struct RenderCtx<'a> {
-    pub device: &'a wgpu::Device,
-    pub queue: &'a wgpu::Queue,
-    pub texture_atlas: &'a TextureAtlas,
-    pub stencil_atlas: &'a TextureAtlas,
+/// CPU-only state handed to a [`RenderItem`] builder. GPU work belongs in
+/// render-interface resource generators contributed directly by the Scene.
+pub struct RenderCtx {
+    /// Resolved widget-local -> UI transform. Background-dependent generators
+    /// need this to sample their own region of the full viewport snapshot.
+    /// Draw accepts local transforms and resolves placement exactly once.
+    pub transform: nalgebra::Matrix4<f32>,
+    pub viewport_size: [f32; 2],
     /// The size layout allocated to this entity (`LayoutOutput::size`).
     /// Builders must draw at *this* size, not a constructor-declared one: a
     /// parent layout may allocate more than the widget asked for (e.g.
@@ -34,17 +37,15 @@ pub struct RenderCtx<'a> {
     /// Focus has to arrive through the context rather than being read from the
     /// world, for the same reason `size` does: a builder is a
     /// closure captured back at `bundle()`/`patch()` time and has no world
-    /// access when it runs (on the render thread, no less). The rebuild is
-    /// triggered by `focus::sync_focus_components`, which invalidates the
-    /// cached node of every entity whose focus state changed.
+    /// access when it runs on the render thread. Every redraw reads the extracted
+    /// focus state; focus changes also advance the draw revision.
     pub focused: bool,
     /// Whether the focus vertex is this entity or one of its descendants
     /// (CSS `:focus-within`). Always `true` when [`focused`](Self::focused) is.
     pub focus_within: bool,
     /// Whether the pointer is inside this entity's box (CSS `:hover`), whether
     /// directly or via a descendant. Arrives through the context for the same
-    /// reason `focused` does; `pointer::sync_pointer_components` invalidates
-    /// the cached node on every transition.
+    /// reason `focused` does; pointer transitions advance the draw revision.
     pub hovered: bool,
     /// Whether a held press landed inside this entity and the pointer has not
     /// left it since (CSS `:active`).
@@ -53,10 +54,9 @@ pub struct RenderCtx<'a> {
 
 /// A widget's current opacity, `0.0` (invisible) to `1.0` (fully visible).
 ///
-/// One of the two components the extract stage reads off a drawable entity
-/// (the other being `GlobalTransform`). The core only ever *reads* it: whoever
-/// wants to animate opacity writes it from a registered PreLayout system. An
-/// entity without this component renders at full opacity.
+/// Extraction reads this value alongside the drawable entity's placement and
+/// interaction state. Opacity animations can write it from a registered
+/// PreLayout system. An entity without this component renders at full opacity.
 ///
 /// Applied at draw time, so changing it costs nothing beyond a redraw — a fade
 /// does not re-rasterise anything, and a builder never sees it.
@@ -79,33 +79,21 @@ impl Default for RenderOpacity {
     }
 }
 
-/// A cached, deferred render-tree source for one widget entity.
-///
-/// The `builder` captures the widget's draw-relevant props (color, size, …) and
-/// returns a [`RenderNode`] when invoked. `cache` memoises the last built node so
-/// unchanged entities are not re-rasterised every frame. Widgets must call
-/// [`invalidate`](Self::invalidate) from their `patch` when (and only when) a
-/// draw-relevant prop changed, since `RenderItem` cannot implement `PartialEq`.
+/// A lightweight per-redraw writer. Capture reusable provider data, not a Scene.
 #[derive(Component, Clone)]
 pub struct RenderItem {
-    pub cache: Arc<Mutex<Option<Arc<RenderNode>>>>,
-    pub builder: Arc<dyn Fn(&RenderCtx) -> RenderNode + Send + Sync>,
+    pub revision: u64,
+    pub builder: Arc<DrawBuilder>,
 }
-
 impl RenderItem {
-    /// Create a `RenderItem` from a builder closure. The cache starts empty and
-    /// is filled lazily by the render stage.
-    pub fn new(builder: impl Fn(&RenderCtx) -> RenderNode + Send + Sync + 'static) -> Self {
+    pub fn new(builder: impl Fn(&RenderCtx, &mut Draw<'_>) + Send + Sync + 'static) -> Self {
         Self {
-            cache: Arc::new(Mutex::new(None)),
+            revision: next_revision(),
             builder: Arc::new(builder),
         }
     }
-
-    /// Drop the cached node so the next render rebuilds it. Swaps in a fresh
-    /// cache `Arc` rather than clearing the existing one, so any in-flight reader
-    /// holding the old `Arc` is unaffected.
+    /// Notify observers of changed draw properties without allocating a cache.
     pub fn invalidate(&mut self) {
-        self.cache = Arc::new(Mutex::new(None));
+        self.revision = next_revision();
     }
 }

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use renderer::RenderNode;
+use render_interface::Draw;
 
 use super::widget::{View, Widget, WidgetInteractionResult, WidgetPod};
 use crate::ui_tree::{
@@ -19,7 +19,7 @@ use matcha_window::window::WindowId;
 ///
 /// # Lifecycle
 ///
-/// 1. [`setup`](Component::setup) is called once when the component is first attached.
+/// 1. [`init`](Component::init) is called once when the application starts.
 /// 2. [`view`](Component::view) is called to build the widget tree.
 /// 3. [`update`](Component::update) is called when a discrete [`Message`](Component::Message)
 ///    arrives from the application layer.
@@ -39,8 +39,8 @@ use matcha_window::window::WindowId;
 ///
 /// # Events
 ///
-/// Widgets emit events via `ctx.emit_event(Box<dyn Any + Send>)` rather than
-/// returning typed events. The application layer receives and downcasts them.
+/// Widgets send messages with `ctx.emit(message)`. The application bridge
+/// downcasts messages to `Component::Message` before delivering them to `update`.
 pub trait Component: utils::MaybeSendSync + 'static {
     /// Discrete commands delivered from the application layer.
     type Message: utils::MaybeSendSync + 'static;
@@ -65,9 +65,9 @@ pub trait Component: utils::MaybeSendSync + 'static {
     // Window Event Handling
     // -----------------
 
-    /// Called for every window event.
+    /// Window-event hook. The default implementation does nothing.
     fn window_event(&self, window_id: WindowId, event: WindowEvent, ctx: &AppContext) {
-        // TODO: Prepare a default implementation to exit on close request.
+        // The default handler does not close windows on a close request.
     }
 
     // -----------------
@@ -215,7 +215,7 @@ impl<C: Component> Widget for ComponentWidget<C> {
         self.inner_widget.measure(constraints, ctx)
     }
 
-    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext) -> RenderNode {
-        self.inner_widget.render(bounds, ctx)
+    fn render(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>) {
+        self.inner_widget.render(bounds, ctx, draw);
     }
 }

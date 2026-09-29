@@ -1,97 +1,163 @@
+//! UI-dependent values are resolved before immutable GPU painters are captured.
+//! Painters record into a widget's logical image; they do not submit or own atlas slots.
 pub mod image;
 pub mod polygon;
 pub mod solid_box;
-// Disabled: depends on crates.io suzuri 0.2.1 (pins wgpu ^27), which blocks the
-// workspace's wgpu 29 upgrade. Re-enable once suzuri supports wgpu 29.
-// pub mod text;
 pub mod viewport_clear;
-
-use std::sync::Arc;
-
-use gpu_utils::texture_atlas::atlas_simple::atlas::AtlasRegion;
+// Text styles are disabled because suzuri requires an incompatible wgpu version.
 use matcha_tree::ui_tree::{
     context::UiContext,
     metrics::{Constraints, QRect},
 };
-
-/// A trait that defines the visual appearance and drawing logic of a widget.
-///
-/// This allows for custom rendering logic to be encapsulated and reused.
-pub trait Style: utils::MaybeSendSync {
-    /// Calculates the size required to draw this style within the given constraints.
-    ///
-    /// This method returns the intrinsic size of the visual content defined by the style,
-    /// such as the dimensions of an image or the bounding box of a piece of text,
-    /// adjusted to fit within the provided `constraints`.
-    /// The layout system uses this information to determine the widget's final size.
-    ///
-    /// # Parameters
-    ///
-    /// - `constraints`: The layout constraints (e.g., max width and height) that the style must adhere to.
-    /// - `ctx`: The widget context, providing access to GPU resources and other shared data.
-    ///
-    /// # Returns
-    ///
-    /// An array `[width, height]` representing the required size in pixels.
-    /// If the style does not have a specific size requirement, it returns `None`.
-    fn required_region(&self, constraints: &Constraints, ctx: &UiContext) -> Option<QRect>;
-
-    /// Checks if a given position is inside the shape defined by this style.
-    /// This is necessary for styles that have non-rectangular shapes.
-    fn is_inside(&self, position: [f32; 2], bounds: [f32; 2], ctx: &UiContext) -> bool {
-        let Some(rect) = self.required_region(&Constraints::from_boundary(bounds), ctx) else {
-            return false;
-        };
-        rect.contains(position)
+use render_interface::{PrepareOutputLayout, PrepareResult, TexturePrepareContext};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+#[derive(Clone)]
+pub struct PreparedStyle {
+    ids: Arc<[u64]>,
+    paint: Arc<dyn for<'a> Fn(TexturePrepareContext<'a>) -> PrepareResult + Send + Sync>,
+    output_layout: PrepareOutputLayout,
+}
+impl PreparedStyle {
+    /// Custom painters require a whole logical texture by default. Painters that
+    /// honor the assigned region may opt into `AnyRegion`.
+    pub fn new(
+        paint: impl for<'a> Fn(TexturePrepareContext<'a>) -> PrepareResult + Send + Sync + 'static,
+    ) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self {
+            ids: Arc::from([NEXT
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+                .expect("style identity exhausted")]),
+            paint: Arc::new(paint),
+            output_layout: PrepareOutputLayout::WholeResource,
+        }
     }
-
-    /// Draws the style onto the render pass.
-    ///
-    /// - `offset`: The position of the upper left corner of the texture relative to the upper left corner of the boundary.
-    /// - Coordinates are in pixels; the origin is the upper-left of the boundary and the Y axis points downwards.
-    fn draw(
+    /// Opt into an output region whose origin may be nonzero. A painter making
+    /// this promise must confine all reads and writes using the region contract.
+    pub fn with_output_layout(mut self, layout: PrepareOutputLayout) -> Self {
+        self.output_layout = layout;
+        self
+    }
+    pub fn output_layout(&self) -> PrepareOutputLayout {
+        self.output_layout
+    }
+    pub(crate) fn ids(&self) -> &[u64] {
+        &self.ids
+    }
+    pub(crate) fn record(&self, context: TexturePrepareContext<'_>) -> PrepareResult {
+        (self.paint)(context)
+    }
+}
+/// Resolve borrowed UI state into an owned painter. Keep its identity stable
+/// while its logical drawing remains unchanged. It must initialize only the
+/// pixels it covers; Buffer initializes the complete output before all painters.
+pub trait Style: utils::MaybeSendSync {
+    fn required_region(&self, constraints: &Constraints, ctx: &UiContext) -> Option<QRect>;
+    fn is_inside(&self, position: [f32; 2], bounds: [f32; 2], ctx: &UiContext) -> bool {
+        self.required_region(&Constraints::from_boundary(bounds), ctx)
+            .is_some_and(|r| r.contains(position))
+    }
+    fn prepare(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
-        target: &AtlasRegion,
-        boundary_size: [f32; 2],
+        boundary: [f32; 2],
         offset: [f32; 2],
         ctx: &UiContext,
-    );
+    ) -> Option<PreparedStyle>;
 }
-
 impl Style for Vec<Arc<dyn Style>> {
     fn required_region(&self, constraints: &Constraints, ctx: &UiContext) -> Option<QRect> {
-        let mut result: Option<QRect> = None;
-        for style in self {
-            if let Some(region) = style.required_region(constraints, ctx) {
-                result = Some(match result {
-                    Some(r) => r.union(&region),
-                    None => region,
-                });
-            }
-        }
-        result
+        self.iter()
+            .filter_map(|s| s.required_region(constraints, ctx))
+            .reduce(|a, b| a.union(&b))
     }
-
-    fn is_inside(&self, position: [f32; 2], bounds: [f32; 2], ctx: &UiContext) -> bool {
-        for style in self {
-            if style.is_inside(position, bounds, ctx) {
-                return true;
-            }
-        }
-        false
+    fn is_inside(&self, p: [f32; 2], bounds: [f32; 2], ctx: &UiContext) -> bool {
+        self.iter().any(|s| s.is_inside(p, bounds, ctx))
     }
-
-    fn draw(
+    fn prepare(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
-        target: &AtlasRegion,
-        boundary_size: [f32; 2],
+        bounds: [f32; 2],
         offset: [f32; 2],
         ctx: &UiContext,
-    ) {
-        for style in self {
-            style.draw(encoder, target, boundary_size, offset, ctx);
+    ) -> Option<PreparedStyle> {
+        let painters: Vec<_> = self
+            .iter()
+            .filter_map(|s| s.prepare(bounds, offset, ctx))
+            .collect();
+        if painters.is_empty() {
+            return None;
         }
+        // Composition is ordered painting, so retain the flattened leaf identities.
+        // Creating a fresh composite wrapper must not invalidate immutable pixels.
+        let ids = painters
+            .iter()
+            .flat_map(|p| p.ids().iter().copied())
+            .collect::<Vec<_>>()
+            .into();
+        let output_layout = combined_output_layout(&painters);
+        Some(PreparedStyle {
+            ids,
+            output_layout,
+            paint: Arc::new(move |context| record_all(&painters, context)),
+        })
+    }
+}
+pub(crate) fn combined_output_layout(painters: &[PreparedStyle]) -> PrepareOutputLayout {
+    if painters
+        .iter()
+        .all(|paint| paint.output_layout() == PrepareOutputLayout::AnyRegion)
+    {
+        PrepareOutputLayout::AnyRegion
+    } else {
+        PrepareOutputLayout::WholeResource
+    }
+}
+pub(crate) fn record_all(
+    painters: &[PreparedStyle],
+    context: TexturePrepareContext<'_>,
+) -> PrepareResult {
+    for paint in painters {
+        paint.record(TexturePrepareContext {
+            gpu: render_interface::GpuPrepareContext {
+                device: context.gpu.device,
+                encoder: &mut *context.gpu.encoder,
+                snapshot: context.gpu.snapshot,
+                render_pass_cache: &mut *context.gpu.render_pass_cache,
+            },
+            target: render_interface::TextureTarget {
+                desc: context.target.desc,
+                region: context.target.region,
+            },
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod output_layout_tests {
+    use super::*;
+
+    #[test]
+    fn custom_painters_require_whole_output_until_they_opt_in() {
+        let custom = PreparedStyle::new(|_| Ok(()));
+        assert_eq!(custom.output_layout(), PrepareOutputLayout::WholeResource);
+        let aware = custom.with_output_layout(PrepareOutputLayout::AnyRegion);
+        assert_eq!(aware.output_layout(), PrepareOutputLayout::AnyRegion);
+    }
+
+    #[test]
+    fn composite_capability_requires_every_painter_to_support_regions() {
+        let aware =
+            PreparedStyle::new(|_| Ok(())).with_output_layout(PrepareOutputLayout::AnyRegion);
+        assert_eq!(
+            combined_output_layout(&[aware.clone(), aware.clone()]),
+            PrepareOutputLayout::AnyRegion
+        );
+        assert_eq!(
+            combined_output_layout(&[aware, PreparedStyle::new(|_| Ok(()))]),
+            PrepareOutputLayout::WholeResource
+        );
     }
 }

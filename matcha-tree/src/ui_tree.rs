@@ -6,6 +6,9 @@ pub mod sub_widgets;
 pub mod widget;
 pub mod window;
 
+#[cfg(all(test, not(web)))]
+mod render_tests;
+
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -24,7 +27,6 @@ use matcha_window::window::WindowId;
 use component::{Component, ComponentPod};
 use context::{AppContext, EventReceiver, EventSender, SharedCtx, UiContext};
 use gpu_utils::gpu::{Gpu, GpuDescriptor, GpuError};
-use gpu_utils::texture_atlas::atlas_simple::atlas::TextureAtlas;
 use runtime::{JoinHandle, Runtime, RuntimeHandle};
 use shared_buffer::BufferContext;
 use widget::{View, WidgetPod, WidgetUpdateError};
@@ -43,7 +45,7 @@ pub struct UiTree<C: Component> {
 
     root: ComponentPod<C>,
 
-    /// Built widget tree.  `None` until the first `create_window` / `buffer_updated`.
+    /// Built widget tree, populated by `run_update()`.
     widget_pod: Mutex<Option<WidgetPod>>,
 
     /// Weak registry keyed by [`WindowId`].
@@ -59,15 +61,6 @@ pub struct UiTree<C: Component> {
 
     /// Handle to the bridge task spawned in `init()`.
     bridge_handle: OnceLock<JoinHandle>,
-
-    /// Shared texture atlas for widget rendering (format: Rgba8UnormSrgb).
-    texture_atlas: Arc<TextureAtlas>,
-
-    /// Renderer pipeline. Wrapped in Arc so render tasks can share it.
-    core_renderer: Arc<renderer::CoreRenderer>,
-
-    /// Texture atlas for stencils (format: R8Unorm).
-    stencil_atlas: Arc<TextureAtlas>,
 
     /// Flag tracking whether surface creation is currently permitted.
     surface_creation_permitted: AtomicBool,
@@ -98,31 +91,15 @@ impl<C: Component> UiTree<C> {
         Ok(Self::with_runtime(root, gpu, runtime))
     }
 
+    /// Creates the native application with the standard WebGPU feature set.
+    /// Call new_with_descriptor when widget generators require additional features.
+    #[cfg(not(web))]
+    pub fn new_standard(root: C) -> Result<Self, GpuError> {
+        Self::new_with_descriptor(root, GpuDescriptor::standard())
+    }
+
     fn with_runtime(root: C, gpu: Gpu, runtime: Runtime) -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let (gpu_device, _) = gpu.context().unwrap();
-        let texture_atlas = TextureAtlas::new(
-            &gpu_device,
-            wgpu::Extent3d {
-                width: 4096,
-                height: 4096,
-                depth_or_array_layers: 4,
-            },
-            wgpu::TextureFormat::Rgba8UnormSrgb,
-            TextureAtlas::DEFAULT_MARGIN_PX,
-        );
-        let stencil_atlas = TextureAtlas::new(
-            &gpu_device,
-            wgpu::Extent3d {
-                width: 4096,
-                height: 4096,
-                depth_or_array_layers: 4,
-            },
-            wgpu::TextureFormat::R8Unorm,
-            TextureAtlas::DEFAULT_MARGIN_PX,
-        );
-        let core_renderer = Arc::new(renderer::CoreRenderer::new(&gpu_device));
 
         Self {
             runtime,
@@ -133,9 +110,6 @@ impl<C: Component> UiTree<C> {
             event_sender: EventSender::new(tx),
             event_receiver: Mutex::new(Some(EventReceiver::new(rx))),
             bridge_handle: OnceLock::new(),
-            texture_atlas,
-            core_renderer,
-            stencil_atlas,
             surface_creation_permitted: AtomicBool::new(false),
             rendering_tasks: Mutex::new(HashMap::new()),
         }
@@ -167,7 +141,6 @@ impl<C: Component> UiTree<C> {
             gpu_instance,
             gpu_device,
             gpu_queue,
-            texture_atlas: self.texture_atlas.as_ref(),
             surface_creation_permitted: self.surface_creation_permitted.load(Ordering::SeqCst),
         };
         let ctx = UiContext {
@@ -290,7 +263,12 @@ impl<C: Component> Application for UiTree<C> {
             .store(false, Ordering::SeqCst);
 
         // Abort and join all in-flight render tasks before destroying surfaces.
-        let handles: Vec<_> = self.rendering_tasks.lock().drain().map(|(_, h)| h).collect();
+        let handles: Vec<_> = self
+            .rendering_tasks
+            .lock()
+            .drain()
+            .map(|(_, h)| h)
+            .collect();
         self.runtime.abort_and_join(handles);
 
         for entry in self.window_registry.iter() {
@@ -338,14 +316,10 @@ impl<C: Component> Application for UiTree<C> {
 
             // Clone Arcs to move into the spawned task.
             let gpu = Arc::clone(&self.gpu);
-            let core_renderer = Arc::clone(&self.core_renderer);
-            let texture_atlas = Arc::clone(&self.texture_atlas);
-            let stencil_atlas = Arc::clone(&self.stencil_atlas);
             let window_registry = Arc::clone(&self.window_registry);
             let event_sender = self.event_sender.clone();
             let runtime_handle = self.runtime_handle();
-            let surface_creation_permitted =
-                self.surface_creation_permitted.load(Ordering::SeqCst);
+            let surface_creation_permitted = self.surface_creation_permitted.load(Ordering::SeqCst);
 
             let handle = self.runtime.handle().spawn(async move {
                 let op_arc = window_registry.get(&window_id).and_then(|w| w.upgrade());
@@ -362,7 +336,6 @@ impl<C: Component> Application for UiTree<C> {
                         gpu_instance,
                         gpu_device,
                         gpu_queue,
-                        texture_atlas: texture_atlas.as_ref(),
                         surface_creation_permitted,
                     };
                     let ctx = UiContext {
@@ -371,12 +344,7 @@ impl<C: Component> Application for UiTree<C> {
                         window: None,
                     };
                     let mut instance = arc.lock();
-                    instance.render(
-                        &core_renderer,
-                        &texture_atlas.texture(),
-                        &stencil_atlas.texture(),
-                        &ctx,
-                    );
+                    instance.render(&ctx);
                 }
             });
 
@@ -394,11 +362,11 @@ impl<C: Component> Application for UiTree<C> {
         _window_id: WindowId,
         _event: WindowEvent,
     ) {
-        // TODO
+        // Window events are not forwarded to the component or its widgets.
     }
 
     fn window_destroyed(&mut self, _event_loop: &impl EventLoop, _window_id: WindowId) {
-        // TODO
+        // Window-destruction notifications do not remove widgets or registry entries.
     }
 
     fn device_event(
@@ -423,7 +391,6 @@ impl<C: Component> Application for UiTree<C> {
                 gpu_instance,
                 gpu_device,
                 gpu_queue,
-                texture_atlas: self.texture_atlas.as_ref(),
                 surface_creation_permitted: self.surface_creation_permitted.load(Ordering::SeqCst),
             };
             let ctx = UiContext {
@@ -443,7 +410,7 @@ impl<C: Component> Application for UiTree<C> {
         _raw_device_id: RawDeviceId,
         _raw_event: RawDeviceEvent,
     ) {
-        // TODO
+        // Raw device events are not dispatched to components or widgets.
     }
 
     // -------------------------------------------------------------------------
@@ -466,7 +433,6 @@ impl<C: Component> Application for UiTree<C> {
                     gpu_instance,
                     gpu_device,
                     gpu_queue,
-                    texture_atlas: self.texture_atlas.as_ref(),
                     surface_creation_permitted: self
                         .surface_creation_permitted
                         .load(Ordering::SeqCst),

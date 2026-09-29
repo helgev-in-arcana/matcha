@@ -4,30 +4,42 @@ version = { workspace = true }
 edition = "2024"
 publish = false
 
+[features]
+default = []
+# Texture/buffer atlas APIs are available only to consumers that request them.
+atlas = [
+    "dep:guillotiere",
+    "dep:uuid",
+    "dep:dashmap",
+    "dep:fxhash",
+    "dep:bytemuck",
+    "dep:getrandom",
+]
+
 [dependencies]
 wgpu = { workspace = true }
 log = { workspace = true }
-guillotiere = "0.6"                              # texture atlas library # internal use only
+guillotiere = { version = "0.6", optional = true }
 parking_lot = { workspace = true }
-uuid = { version = "1.17.0", features = ["v4"] } # internal use only
-dashmap = { workspace = true }
-fxhash = { workspace = true }
+uuid = { version = "1.17.0", features = ["v4"], optional = true }
+dashmap = { workspace = true, optional = true }
+fxhash = { workspace = true, optional = true }
 thiserror = { workspace = true }
-futures = { workspace = true }
-bytemuck = { workspace = true }
+bytemuck = { workspace = true, optional = true }
 
 # uuid (v4) needs an explicit RNG source on wasm; route it through
 # getrandom with its browser-backed wasm_js source.
 # NOTE: the `cfg` expression below must stay in sync with the `web` alias
 # defined in build.rs (`all(target_arch = "wasm32", target_os = "unknown")`).
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-uuid = { version = "1.17.0", features = ["v4", "rng-getrandom"] }
-getrandom = { version = "0.4", features = ["wasm_js"] }
+uuid = { version = "1.17.0", features = ["v4", "rng-getrandom"], optional = true }
+getrandom = { version = "0.4", features = ["wasm_js"], optional = true }
 
 [build-dependencies]
 cfg_aliases = { workspace = true }
 
 [dev-dependencies]
+futures = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]

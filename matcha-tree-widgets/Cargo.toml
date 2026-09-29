@@ -6,10 +6,9 @@ publish = false
 
 [dependencies]
 # matcha
-renderer = { workspace = true }
+render-interface = { workspace = true, features = ["scene-builder"] }
 matcha-tree = { workspace = true }
 utils = { workspace = true }
-gpu-utils = { workspace = true }
 
 # runtime
 tokio = { workspace = true }
@@ -42,3 +41,7 @@ smallvec = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+gpu-utils = { workspace = true }
+plain-renderer = { workspace = true }

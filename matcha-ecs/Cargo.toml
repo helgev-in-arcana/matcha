@@ -6,7 +6,8 @@ publish = false
 
 [dependencies]
 # self
-renderer = { workspace = true }
+render-interface = { workspace = true, features = ["scene-builder"] }
+plain-renderer = { workspace = true }
 gpu-utils = { workspace = true }
 matcha-window = { workspace = true }
 
@@ -29,6 +30,8 @@ log = { workspace = true }
 web-time = { workspace = true }
 
 [dev-dependencies]
+bytemuck = { workspace = true }
+image = { workspace = true }
 # Widget implementations are only needed by tests/examples. A dev-dependency
 # keeps the one-way crate rule (matcha-ecs-widgets -> matcha-ecs) intact.
 #
