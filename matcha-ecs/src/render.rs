@@ -12,12 +12,17 @@
 //! [`InlineDriver`] runs the same `build_and_present` synchronously on the caller.
 //! Both drivers share the same scene assembly and GPU recording path.
 
-use std::{collections::HashMap, sync::Arc, sync::mpsc, thread::JoinHandle};
+use std::sync::Arc;
+// `ThreadDriver`'s alone — it is native-only, and so are these.
+#[cfg(not(web))]
+use std::{collections::HashMap, sync::mpsc, thread::JoinHandle};
 
 use bevy_ecs::{entity::Entity, world::World};
 use matcha_window::window::WindowId;
 use nalgebra::Matrix4;
-use parking_lot::{Condvar, Mutex};
+#[cfg(not(web))]
+use parking_lot::Condvar;
+use parking_lot::Mutex;
 use plain_renderer::{PlainError, PlainRenderer, PlainTarget};
 use render_interface::PixelMaskIndex;
 use render_interface::{MaskDescriptor, MaskSource, MeshSource, PixelMask};
@@ -73,6 +78,12 @@ pub struct ExtractedFrame {
 pub struct RenderSnapshot {
     pub window_id: WindowId,
     pub surface_texture: wgpu::SurfaceTexture,
+    /// Render target view of `surface_texture`, made by
+    /// `WindowSurface::create_render_view` — the one place that knows a view's
+    /// format is not always its texture's. Built when the snapshot is, because
+    /// that is where the surface is still in reach.
+    pub view: wgpu::TextureView,
+    /// The format `view` is in, and so the format pipelines target.
     pub format: wgpu::TextureFormat,
     pub viewport_size: [f32; 2],
     pub load_color: wgpu::Color,
@@ -166,6 +177,30 @@ impl GuiRenderer {
     }
 }
 
+/// The size, in physical pixels, of the framebuffer this window's frames are
+/// actually drawn into.
+///
+/// **Not `Window::inner_size()`**, which is what the OS says the window is
+/// right now. The two disagree whenever the surface has not been reconfigured
+/// since the window changed — and then layout, the renderer's normalise matrix
+/// and the real attachment all disagree about how big the frame is. Deriving
+/// both the layout extent and `RenderSnapshot::viewport_size` from *this*
+/// makes that class of mismatch unobservable: whatever the surface is
+/// configured to, the frame is laid out and normalised to exactly fill it.
+///
+/// Falls back to the window when the surface has no size yet — a surfaceless
+/// headless window, or the web before the first `ResizeObserver` callback
+/// lands, where the config is seeded `0x0` and dividing by it would poison
+/// every coordinate with `inf`.
+pub fn framebuffer_size(window: &matcha_window::window::Window) -> [f32; 2] {
+    let config = window.surface().surface_config();
+    if config.width != 0 && config.height != 0 {
+        return [config.width as f32, config.height as f32];
+    }
+    let inner = window.inner_size();
+    [inner[0] as f32, inner[1] as f32]
+}
+
 /// Collect a window root's drawable entities and the clips enclosing them, in
 /// paint order. Captures each entity's revision and shared `RenderItem` builder
 /// together with its `GlobalTransform`; the builder
@@ -232,6 +267,7 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
     let RenderSnapshot {
         window_id,
         surface_texture,
+        view,
         format,
         viewport_size,
         load_color,
@@ -241,9 +277,6 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
     } = snapshot;
 
     let mut renderer = core.lock();
-    let view = surface_texture
-        .texture
-        .create_view(&wgpu::TextureViewDescriptor::default());
     let region = match render_interface::TextureRegion::whole(&view, format) {
         Ok(region) => region,
         Err(error) => {
@@ -292,6 +325,7 @@ pub trait RenderDriver: Send {
 
 /// Synchronous driver: builds and presents on the calling thread. Dispatch
 /// returns after presentation, so there is no queued frame and it is never busy.
+/// Used on the web, where spawning worker threads is unsupported.
 #[derive(Default)]
 pub struct InlineDriver;
 
@@ -310,11 +344,14 @@ impl RenderDriver for InlineDriver {
 /// Default worker-thread driver. Each window gets one thread
 /// that owns nothing but the receiving end of a snapshot channel plus a shared
 /// busy flag.
+/// Native only; the web uses [InlineDriver].
+#[cfg(not(web))]
 #[derive(Default)]
 pub struct ThreadDriver {
     threads: HashMap<WindowId, WindowThread>,
 }
 
+#[cfg(not(web))]
 struct WindowThread {
     sender: mpsc::Sender<RenderSnapshot>,
     /// `true` between `dispatch` and the worker finishing that frame (i.e.
@@ -325,11 +362,13 @@ struct WindowThread {
     _handle: JoinHandle<()>,
 }
 
+#[cfg(not(web))]
 struct Busy {
     flag: Mutex<bool>,
     cvar: Condvar,
 }
 
+#[cfg(not(web))]
 impl Busy {
     fn new() -> Self {
         Self {
@@ -358,6 +397,7 @@ impl Busy {
     }
 }
 
+#[cfg(not(web))]
 impl RenderDriver for ThreadDriver {
     fn dispatch(&mut self, snapshot: RenderSnapshot) {
         let window_id = snapshot.window_id;
@@ -387,6 +427,7 @@ impl RenderDriver for ThreadDriver {
     }
 }
 
+#[cfg(not(web))]
 impl WindowThread {
     fn spawn(window_id: WindowId) -> Self {
         let (sender, receiver) = mpsc::channel::<RenderSnapshot>();
