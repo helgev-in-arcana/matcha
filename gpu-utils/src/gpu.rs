@@ -214,7 +214,13 @@ mod tests {
         assert!(
             GpuDescriptor::default()
                 .required_features
-                .contains(wgpu::Features::IMMEDIATES | wgpu::Features::VERTEX_WRITABLE_STORAGE)
+                .contains(wgpu::Features::IMMEDIATES)
+        );
+        assert!(
+            !GpuDescriptor::default()
+                .required_features
+                .contains(wgpu::Features::VERTEX_WRITABLE_STORAGE),
+            "the legacy renderer also binds vertex storage read-only"
         );
     }
 

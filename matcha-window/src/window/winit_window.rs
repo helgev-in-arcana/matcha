@@ -23,6 +23,45 @@ impl From<winit::window::WindowId> for super::WindowId {
 /// A real OS window managed by winit.
 pub(crate) struct WinitWindow(Arc<winit::window::Window>);
 
+/// The drawing buffer a canvas needs, in physical pixels: its CSS box times
+/// `devicePixelRatio`.
+///
+/// **This is what `inner_size` must report on the web, and winit's own answer
+/// is not reliably it.** winit derives the canvas's size from its
+/// `ResizeObserver`, preferring `devicePixelContentBox` but falling back to the
+/// CSS content box where that is unavailable — and the fallback is in *CSS*
+/// pixels. Taking that as physical and then dividing by the scale factor (which
+/// is what `UiScale` does downstream) applies the scale twice: at
+/// `devicePixelRatio` 2 the surface is configured to half the resolution it
+/// needs and the UI is laid out into half the space it has, so the frame is
+/// magnified and clipped rather than merely soft. Measured directly: a 375x812
+/// CSS canvas at dpr 2 reported `375x812` and laid out into `187.5x406`.
+///
+/// Computing it from the canvas closes that off whichever branch winit took —
+/// where winit is already right this returns the same number — and it is the
+/// same formula `window_config::web::sync_backing_store_to_css_size` uses to
+/// seed the buffer before the window exists, so the two cannot disagree.
+///
+/// `None` when there is no canvas or it has no CSS size yet (not laid out, or
+/// `display: none`), leaving the caller with winit's answer.
+#[cfg(web)]
+fn web_drawing_buffer_size(window: &winit::window::Window) -> Option<[u32; 2]> {
+    use winit::platform::web::WindowExtWebSys;
+
+    let canvas = window.canvas()?;
+    let (css_w, css_h) = (canvas.client_width(), canvas.client_height());
+    if css_w <= 0 || css_h <= 0 {
+        return None;
+    }
+    let dpr = web_sys::window()
+        .map(|w| w.device_pixel_ratio())
+        .unwrap_or(1.0);
+    Some([
+        (css_w as f64 * dpr).round() as u32,
+        (css_h as f64 * dpr).round() as u32,
+    ])
+}
+
 /// Winit constructor
 impl WindowSurface {
     /// Creates the native window only. The wgpu surface is not attached yet.
@@ -58,6 +97,10 @@ impl NativeWindow for WinitWindow {
     // --- Size ---
 
     fn inner_size(&self) -> [u32; 2] {
+        #[cfg(web)]
+        if let Some(size) = web_drawing_buffer_size(&self.0) {
+            return size;
+        }
         let s = self.0.inner_size();
         [s.width, s.height]
     }
@@ -186,30 +229,19 @@ impl NativeWindow for WinitWindow {
     }
 
     fn set_cursor_icon(&self, icon: super::CursorIcon) {
-        use super::CursorIcon as C;
-        use winit::window::CursorIcon as W;
-        match icon {
-            C::Hidden => self.0.set_cursor_visible(false),
-            other => {
-                self.0.set_cursor_visible(true);
-                self.0.set_cursor(match other {
-                    C::Default | C::Hidden => W::Default,
-                    C::Pointer => W::Pointer,
-                    C::Text => W::Text,
-                    C::Progress => W::Progress,
-                    C::Wait => W::Wait,
-                    C::Crosshair => W::Crosshair,
-                    C::Move => W::Move,
-                    C::Grab => W::Grab,
-                    C::Grabbing => W::Grabbing,
-                    C::NotAllowed => W::NotAllowed,
-                    C::ResizeHorizontal => W::EwResize,
-                    C::ResizeVertical => W::NsResize,
-                    C::ResizeNeSw => W::NeswResize,
-                    C::ResizeNwSe => W::NwseResize,
-                });
-            }
+        #[cfg(web)]
+        {
+            // Winit dispatches scale-change events while borrowing its canvas.
+            // Cursor setters borrow that canvas mutably, so applying a hover
+            // change inside the callback would panic. spawn_local schedules the
+            // update on the next microtask, after the event callback returns.
+            let window = Arc::clone(&self.0);
+            wasm_bindgen_futures::spawn_local(async move {
+                apply_cursor_icon(&window, icon);
+            });
         }
+        #[cfg(not(web))]
+        apply_cursor_icon(&self.0, icon);
     }
 
     fn set_ime_allowed(&self, allowed: bool) {
@@ -235,5 +267,32 @@ impl NativeWindow for WinitWindow {
 
     fn get_config(&self, surface_config: wgpu::SurfaceConfiguration) -> super::WindowConfig {
         super::WindowConfig::from_winit_window(&self.0, surface_config)
+    }
+}
+
+fn apply_cursor_icon(window: &winit::window::Window, icon: super::CursorIcon) {
+    use super::CursorIcon as C;
+    use winit::window::CursorIcon as W;
+    match icon {
+        C::Hidden => window.set_cursor_visible(false),
+        other => {
+            window.set_cursor_visible(true);
+            window.set_cursor(match other {
+                C::Default | C::Hidden => W::Default,
+                C::Pointer => W::Pointer,
+                C::Text => W::Text,
+                C::Progress => W::Progress,
+                C::Wait => W::Wait,
+                C::Crosshair => W::Crosshair,
+                C::Move => W::Move,
+                C::Grab => W::Grab,
+                C::Grabbing => W::Grabbing,
+                C::NotAllowed => W::NotAllowed,
+                C::ResizeHorizontal => W::EwResize,
+                C::ResizeVertical => W::NsResize,
+                C::ResizeNeSw => W::NeswResize,
+                C::ResizeNwSe => W::NwseResize,
+            });
+        }
     }
 }

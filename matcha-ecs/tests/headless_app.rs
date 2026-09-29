@@ -24,7 +24,7 @@ use matcha_ecs_widgets::Button;
 use matcha_window::{
     adapter::{Adapter, EventLoop},
     event::device_event::{
-        mouse_input::PhysicalMouseButton, DeviceEvent, DeviceEventData, ElementState, MouseInput,
+        DeviceEvent, DeviceEventData, ElementState, MouseInput, mouse_input::PhysicalMouseButton,
     },
     headless_interface::{HeadlessEventLoop, HeadlessEventLoopProxy},
     window::WindowId,
@@ -188,6 +188,42 @@ fn click_outside_button_is_a_no_op() {
     assert_eq!(h.view_runs.load(Ordering::Relaxed), 1);
 }
 
+/// Picking and pointer hover must use the same UI coordinates as layout after
+/// a scale change, even when no resize event follows it.
+#[test]
+fn scaled_pointer_hits_the_button_in_ui_coordinates() {
+    let mut h = boot();
+    h.adapter.window_event(
+        &h.event_loop,
+        h.window_id,
+        matcha_window::event::window_event::WindowEvent::ScaleFactorChanged { scale_factor: 2.0 },
+    );
+    // The 120x40 UI button occupies 240x80 physical pixels at this scale.
+    h.click([180.0, 60.0]);
+    assert_eq!(h.count.load(Ordering::Relaxed), 1);
+    // Hover markers are synchronized in PreExtract on the requested redraw.
+    h.adapter.render(h.window_id);
+    let world = h.adapter.app().world();
+    let root = matcha_ecs::resources::ui_root(world).expect("root exists");
+    let button = world
+        .get::<matcha_ecs::components::view::ViewChildren>(root)
+        .expect("root children")
+        .slots[0]
+        .1;
+    assert!(
+        world
+            .get::<matcha_ecs::components::input::Hovered>(button)
+            .is_some()
+    );
+
+    h.click([260.0, 100.0]);
+    assert_eq!(
+        h.count.load(Ordering::Relaxed),
+        1,
+        "outside the scaled button"
+    );
+}
+
 /// A move alone must not trigger a click (the state machine only emits
 /// `Click` on a button press).
 #[test]
@@ -257,7 +293,11 @@ fn surfaceless_render_skips_frames_safely() {
 #[test]
 fn click_on_button_also_focuses_it() {
     let mut h = boot();
-    assert_eq!(h.adapter.app().focus().top(), None, "nothing focused at boot");
+    assert_eq!(
+        h.adapter.app().focus().top(),
+        None,
+        "nothing focused at boot"
+    );
 
     h.click([10.0, 10.0]);
 
@@ -290,7 +330,11 @@ fn click_on_background_clears_focus_without_touching_the_model() {
     h.click([600.0, 400.0]);
 
     assert_eq!(h.adapter.app().focus().top(), None, "focus cleared");
-    assert_eq!(h.count.load(Ordering::Relaxed), count_before, "model untouched");
+    assert_eq!(
+        h.count.load(Ordering::Relaxed),
+        count_before,
+        "model untouched"
+    );
     assert_eq!(
         h.view_runs.load(Ordering::Relaxed),
         views_before,
