@@ -9,6 +9,7 @@ matcha/src/assets/
 
 # Memos
 *.md
+temp/
 
 # Old implementation for reference when refactoring
 **/*.old
