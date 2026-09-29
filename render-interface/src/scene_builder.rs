@@ -187,7 +187,7 @@ impl Draw<'_> {
 
     /// Register a coverage definition without drawing or executing its generator.
     /// Call even without an Object to convey a retention hint for this frame.
-    pub fn mask_source(&mut self, source: &MaskSource) -> MaskId {
+    pub fn mask(&mut self, source: &MaskSource) -> MaskId {
         if let Err(e) = self.frame.scene.resources.share_mask(source) {
             self.frame.fail(e);
         }
@@ -288,7 +288,7 @@ impl Draw<'_> {
         paint: impl FnOnce(&mut Draw<'_>),
     ) {
         let mesh = self.mesh(mesh);
-        let texture = self.mask_source(coverage);
+        let texture = self.mask(coverage);
         let Ok(index) = u32::try_from(self.frame.scene.pixel_masks.len()) else {
             self.frame.fail("mask index capacity exceeded");
             return;
@@ -324,7 +324,7 @@ impl Draw<'_> {
             * Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(size[0], size[1], 1.));
         let mut object = Object::new(mesh, texture, transform);
         if let Some(source) = mask {
-            let texture = self.mask_source(source);
+            let texture = self.mask(source);
             let Ok(index) = u32::try_from(self.frame.scene.pixel_masks.len()) else {
                 self.frame.fail("mask index capacity exceeded");
                 return;
@@ -414,11 +414,11 @@ mod tests {
             let mut draw = frame.draw(Matrix4::identity(), None, 1.);
             draw.mesh(&mesh);
             draw.texture(&texture);
-            draw.mask_source(&mask);
+            draw.mask(&mask);
             // Duplicate registration has the same logical identity, not a second entry.
             draw.mesh(&mesh.clone());
             draw.texture(&texture.clone());
-            draw.mask_source(&mask.clone());
+            draw.mask(&mask.clone());
         }
         frame.finish().expect("retention-only frame");
         assert_eq!(frame.scene.resources.len(), 3);
@@ -459,8 +459,8 @@ mod tests {
             draw.mesh(&object_mesh);
             draw.mesh(&ancestor_mesh);
             draw.texture(&color);
-            draw.mask_source(&outer);
-            draw.mask_source(&inner);
+            draw.mask(&outer);
+            draw.mask(&inner);
         }
         // Framework-owned registries can contribute definitions directly. No
         // parallel builder bookkeeping is needed, even for an undrawn source.
@@ -755,7 +755,7 @@ mod tests {
                 let mut draw = frame.draw(Matrix4::identity(), None, 1.);
                 draw.mesh(&mesh);
                 draw.texture(&color);
-                draw.mask_source(&coverage);
+                draw.mask(&coverage);
             }
             append_mask(&mut frame, &mesh, &coverage, None);
             append_mask(&mut frame, &mesh, &coverage, Some(PixelMaskIndex(0)));
@@ -802,7 +802,7 @@ mod tests {
                 draw.mesh(&mesh);
                 draw.texture(&color);
                 if define_mask {
-                    draw.mask_source(&mask);
+                    draw.mask(&mask);
                 }
             }
             append_mask(&mut frame, &mesh, &mask, parent.map(PixelMaskIndex));

@@ -126,9 +126,9 @@ pub struct PixelMask {
 /// Owns logical source definitions, not GPU allocations.
 #[derive(Default)]
 pub struct ResourcePool {
-    meshes: HashMap<MeshId, MeshSource>,
-    textures: HashMap<TextureId, TextureSource>,
-    masks: HashMap<MaskId, MaskSource>,
+    meshes: HashMap<MeshId, MeshSource, fxhash::FxBuildHasher>,
+    textures: HashMap<TextureId, TextureSource, fxhash::FxBuildHasher>,
+    masks: HashMap<MaskId, MaskSource, fxhash::FxBuildHasher>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -720,14 +720,14 @@ impl Default for RegionRenderPassDescriptor<'_> {
 /// snapshot handles; dropping the renderer can release all these resources.
 pub struct RegionRenderPassCache {
     device: wgpu::Device,
-    clear_pipelines: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    clear_pipelines: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline, fxhash::FxBuildHasher>,
 }
 
 impl RegionRenderPassCache {
     pub fn new(device: &wgpu::Device) -> Self {
         Self {
             device: device.clone(),
-            clear_pipelines: HashMap::new(),
+            clear_pipelines: HashMap::default(),
         }
     }
 

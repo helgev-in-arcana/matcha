@@ -12,6 +12,7 @@ wgpu.workspace = true
 nalgebra.workspace = true
 bytemuck.workspace = true
 thiserror.workspace = true
+fxhash.workspace = true
 
 [dev-dependencies]
 futures.workspace = true

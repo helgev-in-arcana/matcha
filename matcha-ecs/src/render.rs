@@ -136,7 +136,7 @@ impl GuiRenderer {
         {
             let mut draw = self.frame.draw(Matrix4::identity(), None, 1.);
             draw.mesh(&self.quad);
-            draw.mask_source(&self.clip);
+            draw.mask(&self.clip);
         }
         for clip in clips.as_slice() {
             self.frame.scene.pixel_masks.push(PixelMask {
