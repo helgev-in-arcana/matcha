@@ -284,8 +284,8 @@ fn verify_framework_order(device: &wgpu::Device, queue: &wgpu::Queue, directory:
                 &items,
                 &ClipArena::default(),
                 PlainTarget {
-                    view: &view,
-                    format: view.texture().format(),
+                    region: render_interface::TextureRegion::whole(&view, view.texture().format())
+                        .expect("whole output region"),
                     viewport: [32., 16.],
                     clear: wgpu::Color::BLACK,
                     initial: None,
@@ -344,8 +344,8 @@ fn verify_framework_order(device: &wgpu::Device, queue: &wgpu::Queue, directory:
             .render(
                 &renderer.frame.scene,
                 PlainTarget {
-                    view: &view,
-                    format: view.texture().format(),
+                    region: render_interface::TextureRegion::whole(&view, view.texture().format())
+                        .expect("whole output region"),
                     viewport: [32., 16.],
                     clear: wgpu::Color::BLACK,
                     initial: None,
@@ -463,8 +463,11 @@ fn main() {
             .render(
                 &frame.scene,
                 PlainTarget {
-                    view: &output.create_view(&Default::default()),
-                    format: output.format(),
+                    region: render_interface::TextureRegion::whole(
+                        &output.create_view(&Default::default()),
+                        output.format(),
+                    )
+                    .expect("whole output region"),
                     viewport: ctx.size,
                     clear: wgpu::Color::BLACK,
                     initial: None,
@@ -552,8 +555,11 @@ fn main() {
                 &frame.items,
                 &frame.clips,
                 PlainTarget {
-                    view: &output_view,
-                    format: output_view.texture().format(),
+                    region: render_interface::TextureRegion::whole(
+                        &output_view,
+                        output_view.texture().format(),
+                    )
+                    .expect("whole output region"),
                     viewport: [512., 176.],
                     clear,
                     initial: None,
@@ -601,8 +607,11 @@ fn main() {
         .render(
             &renderer.frame.scene,
             PlainTarget {
-                view: &output_view,
-                format: output_view.texture().format(),
+                region: render_interface::TextureRegion::whole(
+                    &output_view,
+                    output_view.texture().format(),
+                )
+                .expect("whole output region"),
                 viewport: [512., 176.],
                 clear,
                 initial: None,
@@ -645,8 +654,11 @@ fn main() {
         .render(
             &renderer.frame.scene,
             PlainTarget {
-                view: &output_view,
-                format: output_view.texture().format(),
+                region: render_interface::TextureRegion::whole(
+                    &output_view,
+                    output_view.texture().format(),
+                )
+                .expect("whole output region"),
                 viewport: [512., 176.],
                 clear,
                 initial: None,
@@ -700,8 +712,11 @@ fn main() {
             &frame.items,
             &frame.clips,
             PlainTarget {
-                view: &output_view,
-                format: output_view.texture().format(),
+                region: render_interface::TextureRegion::whole(
+                    &output_view,
+                    output_view.texture().format(),
+                )
+                .expect("whole output region"),
                 viewport: [512., 176.],
                 clear,
                 initial: None,

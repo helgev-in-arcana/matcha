@@ -113,8 +113,11 @@ fn render(
         renderer.render(
             scene,
             PlainTarget {
-                view,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                region: render_interface::TextureRegion::whole(
+                    view,
+                    wgpu::TextureFormat::Rgba8UnormSrgb,
+                )
+                .expect("whole output region"),
                 viewport: [SIZE[0] as f32, SIZE[1] as f32],
                 clear: wgpu::Color::BLACK,
                 initial: None,

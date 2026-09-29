@@ -209,8 +209,11 @@ impl Harness {
             .render(
                 &frame.scene,
                 PlainTarget {
-                    view: &self.output.create_view(&Default::default()),
-                    format: self.output.format(),
+                    region: render_interface::TextureRegion::whole(
+                        &self.output.create_view(&Default::default()),
+                        self.output.format(),
+                    )
+                    .expect("whole output region"),
                     viewport: [EDGE as f32; 2],
                     clear: wgpu::Color::TRANSPARENT,
                     initial: None,

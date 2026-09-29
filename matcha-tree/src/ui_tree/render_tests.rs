@@ -160,8 +160,11 @@ fn clean_widgets_emit_each_frame_while_the_backend_reuses_source_content() {
                 .render(
                     &frame.scene,
                     PlainTarget {
-                        view: &target_view,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        region: render_interface::TextureRegion::whole(
+                            &target_view,
+                            wgpu::TextureFormat::Rgba8Unorm,
+                        )
+                        .expect("whole output region"),
                         viewport: [32., 32.],
                         clear: wgpu::Color::TRANSPARENT,
                         initial: None,

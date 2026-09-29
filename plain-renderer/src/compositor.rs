@@ -42,11 +42,14 @@ impl<'a> From<&'a Image> for ImageRef<'a> {
         }
     }
 }
-impl<'a> From<&'a wgpu::TextureView> for ImageRef<'a> {
-    fn from(view: &'a wgpu::TextureView) -> Self {
+impl<'a> From<TextureRegion<'a>> for ImageRef<'a> {
+    fn from(region: TextureRegion<'a>) -> Self {
+        let [scale_x, scale_y, bias_x, bias_y] = region.uv_scale_bias();
         Self {
-            view,
-            uv: [0., 0., 1., 1.],
+            view: region.view(),
+            // The compositor's existing atlas sampler clamps this rectangle to
+            // texel centers, so initial images cannot sample adjacent regions.
+            uv: [bias_x, bias_y, scale_x, scale_y],
         }
     }
 }
@@ -236,7 +239,7 @@ impl Compositor {
     pub(crate) fn draw(
         &self,
         frame: &mut DrawFrame,
-        destination: &wgpu::TextureView,
+        destination: TextureRegion<'_>,
         pipeline: &wgpu::RenderPipeline,
         mesh: &Mesh,
         image: ImageRef<'_>,
@@ -296,14 +299,15 @@ impl Compositor {
         });
         entry.generation = generation;
         let group = entry.group.clone();
+        let destination = PassTarget::from(destination);
         if frame
             .destination
             .as_ref()
-            .is_some_and(|view| view != destination)
+            .is_some_and(|previous| previous != &destination)
         {
             flush(frame);
         }
-        frame.destination = Some(destination.clone());
+        frame.destination = Some(destination);
         frame.storage.pending.push(DrawCall {
             pipeline: pipeline.clone(),
             group,
@@ -322,8 +326,27 @@ pub(crate) struct DrawFrame {
     pub(crate) uniforms: wgpu::Buffer,
     pub(crate) storage: FrameWorkspace,
     pub(crate) stride: usize,
-    pub(crate) destination: Option<wgpu::TextureView>,
+    pub(crate) destination: Option<PassTarget>,
     pub(crate) batches: usize,
+}
+
+/// Owned attachment metadata for a pending batch. Work surfaces use origin zero;
+/// the final output uses the caller's region. Changing either view or rectangle
+/// starts a new pass, keeping viewport and scissor state coherent for the batch.
+#[derive(PartialEq)]
+pub(crate) struct PassTarget {
+    view: wgpu::TextureView,
+    rect: [u32; 4],
+}
+impl From<TextureRegion<'_>> for PassTarget {
+    fn from(region: TextureRegion<'_>) -> Self {
+        let [x, y] = region.origin();
+        let [width, height] = region.size();
+        Self {
+            view: region.view().clone(),
+            rect: [x, y, width, height],
+        }
+    }
 }
 
 struct CachedGroup {
@@ -370,7 +393,7 @@ pub(crate) fn flush(frame: &mut DrawFrame) {
     };
     frame.batches += 1;
     let attachments = [Some(wgpu::RenderPassColorAttachment {
-        view: &destination,
+        view: &destination.view,
         depth_slice: None,
         resolve_target: None,
         ops: wgpu::Operations {
@@ -386,13 +409,17 @@ pub(crate) fn flush(frame: &mut DrawFrame) {
                 color_attachments: &attachments,
                 ..Default::default()
             });
+        let [x, y, width, height] = destination.rect;
+        pass.set_viewport(x as f32, y as f32, width as f32, height as f32, 0., 1.);
         for draw in &frame.storage.pending {
-            let [x, y, w, h] = draw.scissor.unwrap_or([
-                0,
-                0,
-                destination.texture().width(),
-                destination.texture().height(),
-            ]);
+            // Scissors are attachment-pixel coordinates; always constrain them
+            // to this pass's destination, including the final unmasked blit.
+            let [x, y, w, h] = draw.scissor.map_or(destination.rect, |rect| {
+                intersection(rect, destination.rect)
+            });
+            if w == 0 || h == 0 {
+                continue;
+            }
             pass.set_scissor_rect(x, y, w, h);
             pass.set_pipeline(&draw.pipeline);
             pass.set_bind_group(0, &draw.group, &[draw.offset]);

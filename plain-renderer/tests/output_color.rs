@@ -66,8 +66,8 @@ fn output_bytes(
         .render(
             scene,
             PlainTarget {
-                view: &view,
-                format,
+                region: render_interface::TextureRegion::whole(&view, format)
+                    .expect("whole output region"),
                 viewport: [WIDTH as f32, 1.],
                 clear: wgpu::Color::TRANSPARENT,
                 initial: None,

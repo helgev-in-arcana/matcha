@@ -85,8 +85,11 @@ fn render(
     renderer.render(
         scene,
         PlainTarget {
-            view: &texture.create_view(&Default::default()),
-            format: texture.format(),
+            region: render_interface::TextureRegion::whole(
+                &texture.create_view(&Default::default()),
+                texture.format(),
+            )
+            .expect("whole output region"),
             viewport: [64., 64.],
             clear: wgpu::Color::BLACK,
             initial: None,
@@ -473,8 +476,11 @@ fn srgb_reinterpretation_uses_declared_view_format_and_rejects_incompatible_base
         .render(
             &fixture.scene,
             PlainTarget {
-                view: &srgb_view,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                region: render_interface::TextureRegion::whole(
+                    &srgb_view,
+                    wgpu::TextureFormat::Rgba8UnormSrgb,
+                )
+                .expect("whole output region"),
                 viewport: [64., 64.],
                 clear: wgpu::Color::BLACK,
                 initial: None,
@@ -490,24 +496,23 @@ fn srgb_reinterpretation_uses_declared_view_format_and_rejects_incompatible_base
         &actual[..4]
     );
 
-    let error = renderer.render(
-        &fixture.scene,
-        PlainTarget {
-            view: &srgb_view,
-            format: wgpu::TextureFormat::Bgra8UnormSrgb,
-            viewport: [64., 64.],
-            clear: wgpu::Color::BLACK,
-            initial: None,
-        },
-    );
+    let error = TextureRegion::whole(&srgb_view, wgpu::TextureFormat::Bgra8UnormSrgb);
     assert!(
-        matches!(error, Err(PlainError::Invalid(_))),
-        "a declaration with incompatible base format is a CPU error: {error:?}"
+        error.is_err(),
+        "incompatible metadata is rejected before a target can be submitted: {error:?}"
     );
     assert_eq!(
         actual,
         pixels(&device, &queue, &reinterpreted),
         "rejected target is unchanged"
+    );
+
+    // A valid region can still have an output format this renderer does not support.
+    let coverage_target = make_target(wgpu::TextureFormat::R8Unorm, &[]);
+    let error = render(&mut renderer, &fixture.scene, &coverage_target);
+    assert!(
+        matches!(error, Err(PlainError::Invalid(_))),
+        "a valid R8 region is rejected by the renderer's colour-output policy: {error:?}"
     );
     let error = futures::executor::block_on(validation.pop());
     assert!(error.is_none(), "{error:?}");

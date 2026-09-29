@@ -213,8 +213,8 @@ fn main() {
             .render(
                 &scene,
                 PlainTarget {
-                    view: &view,
-                    format: target.format(),
+                    region: render_interface::TextureRegion::whole(&view, target.format())
+                        .expect("whole output region"),
                     viewport: [256., 256.],
                     clear: wgpu::Color::BLACK,
                     initial: None,

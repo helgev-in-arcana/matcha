@@ -10,8 +10,10 @@
 //! Source images support R8Unorm, Rgba8Unorm, Rgba8UnormSrgb and Rgba16Float.
 //! Destinations additionally support Bgra8Unorm/Bgra8UnormSrgb, but not R8Unorm.
 //! The working colour image uses Rgba16Float; coverage uses R8Unorm. No optional
-//! device features are required. Final destinations are full, single-layer/mip/
-//! sample 2D views. Unsupported descriptors fail before source callbacks run.
+//! device features are required. Final destinations are rectangular regions of
+//! single-layer/mip/sample 2D views. Composition and snapshots use region-local
+//! coordinates; only the final output is offset into the destination texture.
+//! Unsupported descriptors fail before source callbacks run.
 //! AnyRegion providers generate directly into texture rectangles or aligned mesh
 //! slices in shared pages. WholeResource providers use complete output resources
 //! and, in atlas mode, a subsequent placement copy. Pages are separated by actual
@@ -57,18 +59,19 @@ pub use resources::{
 /// transparent presentation may need unpremultiply, encode, and re-premultiply.
 /// This renderer performs no gamut, tone-mapping, or presentation-alpha conversion.
 pub struct PlainTarget<'a> {
-    /// Full, single-sample 2D attachment; size is taken from its texture.
-    pub view: &'a wgpu::TextureView,
-    /// Actual attachment view format, including any sRGB reinterpretation.
-    /// wgpu exposes the underlying texture format but not its view descriptor;
-    /// the caller must declare the format used to create this full 2D view.
-    pub format: wgpu::TextureFormat,
+    /// Destination rectangle and declared attachment view format. Rendering
+    /// replaces only this region, preserving pixels elsewhere in the texture.
+    pub region: TextureRegion<'a>,
+    /// Logical scene dimensions, mapped onto the destination region's pixel size.
+    /// Object transforms and snapshots are independent of its physical origin.
     pub viewport: [f32; 2],
     /// Initial premultiplied linear-light RGBA, independent of output view format.
     pub clear: wgpu::Color,
-    /// Optional full-size sampled initial image, composited over clear before
-    /// phase zero. It must not alias the destination or any source output.
-    pub initial: Option<&'a wgpu::TextureView>,
+    /// Optional sampled initial region, composited over clear before phase zero.
+    /// Its pixel extent must equal `region.size()`; origins and underlying texture
+    /// sizes may differ. Sampling clamps to this region's texel centers. Its
+    /// texture must differ from the destination and any source output texture.
+    pub initial: Option<TextureRegion<'a>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -223,10 +226,7 @@ impl PlainRenderer {
             self.refresh_resource_stats();
             return Err(error);
         }
-        let size = [
-            target.view.texture().width(),
-            target.view.texture().height(),
-        ];
+        let size = target.region.size();
         if self.surfaces.as_ref().is_none_or(|s| s.size != size) {
             self.surfaces = Some(Surfaces::new(&self.device, size));
         }

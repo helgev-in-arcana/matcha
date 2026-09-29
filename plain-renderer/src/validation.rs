@@ -16,16 +16,10 @@ pub(crate) fn validate(
     target: &PlainTarget<'_>,
 ) -> Result<(), PlainError> {
     let invalid = |msg: &str| PlainError::Invalid(msg.into());
-    let destination = target.view.texture();
-    if destination.dimension() != wgpu::TextureDimension::D2
-        || destination.depth_or_array_layers() != 1
-        || destination.mip_level_count() != 1
-    {
-        return Err(invalid(
-            "destination must be a full single-layer, single-mip 2D view",
-        ));
-    }
-    validate_target_format(destination.format(), target.format)?;
+    // TextureRegion construction already checked subresource metadata, format
+    // compatibility and nonempty in-bounds extents. Usage is role-specific here.
+    let destination = target.region.texture();
+    validate_target_format(destination.format(), target.region.view_format())?;
     if [
         target.clear.r,
         target.clear.g,
@@ -41,20 +35,17 @@ pub(crate) fn validate(
     if let Some(initial) = target.initial {
         let texture = initial.texture();
         if texture == destination
-            || texture.size() != destination.size()
-            || texture.sample_count() != 1
-            || texture.mip_level_count() != 1
-            || texture.dimension() != wgpu::TextureDimension::D2
+            || initial.size() != target.region.size()
             || !texture
                 .usage()
                 .contains(wgpu::TextureUsages::TEXTURE_BINDING)
         {
             return Err(invalid(
-                "initial image must be a separate full-size sampled 2D image",
+                "initial region must have the destination extent and a separate sampled texture",
             ));
         }
         if !matches!(
-            texture.format(),
+            initial.view_format(),
             wgpu::TextureFormat::R8Unorm
                 | wgpu::TextureFormat::Rgba8Unorm
                 | wgpu::TextureFormat::Rgba8UnormSrgb
@@ -68,16 +59,11 @@ pub(crate) fn validate(
     if target.viewport.iter().any(|v| !v.is_finite() || *v <= 0.) {
         return Err(invalid("viewport must be finite and positive"));
     }
-    if target.view.texture().sample_count() != 1
-        || !target
-            .view
-            .texture()
-            .usage()
-            .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+    if !destination
+        .usage()
+        .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
     {
-        return Err(invalid(
-            "destination must be a single-sample render attachment",
-        ));
+        return Err(invalid("destination must be a render attachment"));
     }
     validate_scene(
         scene,
@@ -271,6 +257,72 @@ fn validate_texture_usages(usages: wgpu::TextureUsages) -> Result<(), PlainError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn noop_device() -> wgpu::Device {
+        futures::executor::block_on(async {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::NOOP,
+                backend_options: wgpu::BackendOptions {
+                    noop: wgpu::NoopBackendOptions { enable: true },
+                    ..Default::default()
+                },
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
+            });
+            instance
+                .request_adapter(&Default::default())
+                .await
+                .expect("noop adapter")
+                .request_device(&Default::default())
+                .await
+                .expect("noop device")
+                .0
+        })
+    }
+
+    fn view(device: &wgpu::Device, size: [u32; 2]) -> wgpu::TextureView {
+        device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("region validation fixture"),
+                size: crate::resources::extent(size),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default())
+    }
+
+    // NOOP checks only the CPU contract: pixel preservation and filtering have
+    // separate real-backend integration tests.
+    #[test]
+    fn initial_regions_match_extent_independently_of_texture_size_and_origin() {
+        let device = noop_device();
+        let destination = view(&device, [32, 16]);
+        let initial = view(&device, [64, 64]);
+        let region = |view, origin, size| {
+            TextureRegion::new(view, wgpu::TextureFormat::Rgba8Unorm, origin, size)
+                .expect("valid fixture region")
+        };
+        let mut resources = ResourceStore::new(&device);
+        let scene = Scene::default();
+        let mut target = PlainTarget {
+            region: region(&destination, [3, 5], [8, 4]),
+            viewport: [80., 40.],
+            clear: wgpu::Color::TRANSPARENT,
+            initial: Some(region(&initial, [17, 23], [8, 4])),
+        };
+        assert!(validate(&device, &mut resources, &scene, &target).is_ok());
+
+        target.initial = Some(region(&initial, [17, 23], [7, 4]));
+        assert!(validate(&device, &mut resources, &scene, &target).is_err());
+
+        // Even disjoint rectangles of one texture are conservatively rejected.
+        target.initial = Some(region(&destination, [16, 0], [8, 4]));
+        assert!(validate(&device, &mut resources, &scene, &target).is_err());
+    }
 
     #[test]
     fn output_view_formats_allow_srgb_reinterpretation_but_not_other_families() {

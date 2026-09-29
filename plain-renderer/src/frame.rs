@@ -176,6 +176,8 @@ fn record_operations(
     stats: &mut RenderStats,
     frame: &mut DrawFrame,
 ) -> Result<(), PlainError> {
+    let color_region = s.color.target().region;
+    let mask_regions = s.masks.each_ref().map(|mask| mask.target().region);
     clear(&mut frame.encoder, &s.color.view, target.clear);
     let full = Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(
         target.viewport[0],
@@ -185,7 +187,7 @@ fn record_operations(
     if let Some(initial) = target.initial {
         compositor.draw(
             frame,
-            &s.color.view,
+            color_region,
             &compositor.color_pipeline,
             &compositor.quad,
             initial.into(),
@@ -209,8 +211,7 @@ fn record_operations(
         // those reads; no full-viewport snapshot copy is necessary. Source
         // output textures are separate from this input and cannot mutate it.
         let snapshot = RenderSnapshot {
-            color: TextureRegion::whole(&s.color.view, COLOR)
-                .expect("the accumulation image is a full colour texture"),
+            color: color_region,
         };
         // Prepare all resources before drawing any object of this phase.
         for id in &preparation.meshes {
@@ -227,7 +228,7 @@ fn record_operations(
                 DrawOp::ClearMask { slot, scissor } => {
                     compositor.draw(
                         frame,
-                        &s.masks[slot].view,
+                        mask_regions[slot],
                         &compositor.clear_pipeline,
                         &compositor.quad,
                         (&compositor.white).into(),
@@ -253,7 +254,7 @@ fn record_operations(
                         parent.map_or(&compositor.white.view, |slot| &s.masks[slot].view);
                     compositor.draw(
                         frame,
-                        &s.masks[slot].view,
+                        mask_regions[slot],
                         &compositor.mask_pipeline,
                         &resources.meshes[&node.mesh].value,
                         (&resources.masks[&node.texture].value).into(),
@@ -283,7 +284,7 @@ fn record_operations(
                         screen_mask.map_or(&compositor.white.view, |slot| &s.masks[slot].view);
                     compositor.draw(
                         frame,
-                        &s.color.view,
+                        color_region,
                         &compositor.color_pipeline,
                         &resources.meshes[&object.mesh].value,
                         (&resources.textures[&object.texture].value).into(),
@@ -303,7 +304,7 @@ fn record_operations(
             }
         }
     }
-    let format = target.format;
+    let format = target.region.view_format();
     let output = compositor
         .outputs
         .entry(format)
@@ -318,13 +319,13 @@ fn record_operations(
             )
         })
         .clone();
-    // No Load of uninitialized destination content: output covers the whole
-    // attachment and replaces it; clear also makes empty scenes defined.
+    // The cleared accumulation image defines every pixel, even for an empty
+    // scene. Replace exactly the destination region and Load the attachment to
+    // preserve its other pixels; an attachment-wide clear would destroy them.
     flush(frame);
-    clear(&mut frame.encoder, target.view, wgpu::Color::TRANSPARENT);
     compositor.draw(
         frame,
-        target.view,
+        target.region,
         &output,
         &compositor.quad,
         (&s.color).into(),

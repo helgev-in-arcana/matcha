@@ -267,8 +267,9 @@ impl AnyWindowWidgetInstance for WindowWidgetInstance {
                     renderer.render(
                         &self.frame.scene,
                         PlainTarget {
-                            view: &view,
-                            format,
+                            region: render_interface::TextureRegion::whole(&view, format).map_err(
+                                |error| plain_renderer::PlainError::Invalid(error.to_string()),
+                            )?,
                             viewport: size,
                             clear: wgpu::Color {
                                 r: 0.1,

@@ -243,13 +243,19 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
     let view = surface_texture
         .texture
         .create_view(&wgpu::TextureViewDescriptor::default());
+    let region = match render_interface::TextureRegion::whole(&view, format) {
+        Ok(region) => region,
+        Err(error) => {
+            log::error!("Invalid render target for window {window_id:?}: {error}");
+            return;
+        }
+    };
 
     if let Err(e) = renderer.render_extracted(
         &items,
         &clips,
         PlainTarget {
-            view: &view,
-            format,
+            region,
             viewport: viewport_size,
             clear: load_color,
             initial: None,

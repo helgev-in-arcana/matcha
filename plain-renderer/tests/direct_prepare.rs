@@ -132,8 +132,11 @@ fn render(renderer: &mut PlainRenderer, scene: &Scene, texture: &wgpu::Texture) 
         .render(
             scene,
             PlainTarget {
-                view: &texture.create_view(&Default::default()),
-                format: texture.format(),
+                region: render_interface::TextureRegion::whole(
+                    &texture.create_view(&Default::default()),
+                    texture.format(),
+                )
+                .expect("whole output region"),
                 viewport: [16., 8.],
                 clear: wgpu::Color::BLACK,
                 initial: None,

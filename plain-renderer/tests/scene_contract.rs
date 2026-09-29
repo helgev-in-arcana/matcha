@@ -132,8 +132,11 @@ fn render(
         .render(
             scene,
             PlainTarget {
-                view: &texture.create_view(&Default::default()),
-                format: texture.format(),
+                region: render_interface::TextureRegion::whole(
+                    &texture.create_view(&Default::default()),
+                    texture.format(),
+                )
+                .expect("whole output region"),
                 viewport,
                 clear: wgpu::Color::BLACK,
                 initial: None,
@@ -317,8 +320,11 @@ fn real_gpu_scene_contract() {
             .render(
                 &scene,
                 PlainTarget {
-                    view: &target.create_view(&Default::default()),
-                    format: target.format(),
+                    region: render_interface::TextureRegion::whole(
+                        &target.create_view(&Default::default()),
+                        target.format()
+                    )
+                    .expect("whole output region"),
                     viewport: [64., 64.],
                     clear: wgpu::Color::BLACK,
                     initial: None
@@ -356,8 +362,11 @@ fn real_gpu_scene_contract() {
             .render(
                 &failing,
                 PlainTarget {
-                    view: &target.create_view(&Default::default()),
-                    format: target.format(),
+                    region: render_interface::TextureRegion::whole(
+                        &target.create_view(&Default::default()),
+                        target.format()
+                    )
+                    .expect("whole output region"),
                     viewport: [64., 64.],
                     clear: wgpu::Color::BLACK,
                     initial: None
@@ -579,11 +588,17 @@ fn real_gpu_scene_contract() {
         .render(
             &Scene::default(),
             PlainTarget {
-                view: &initial_target.create_view(&Default::default()),
-                format: initial_target.format(),
+                region: render_interface::TextureRegion::whole(
+                    &initial_target.create_view(&Default::default()),
+                    initial_target.format(),
+                )
+                .expect("whole output region"),
                 viewport: [64., 64.],
                 clear: wgpu::Color::BLACK,
-                initial: Some(&target.create_view(&Default::default())),
+                initial: Some(
+                    TextureRegion::whole(&target.create_view(&Default::default()), target.format())
+                        .expect("whole initial image"),
+                ),
             },
         )
         .expect("explicit initial image");
@@ -599,8 +614,11 @@ fn real_gpu_scene_contract() {
             .render(
                 &projected,
                 PlainTarget {
-                    view: &target.create_view(&Default::default()),
-                    format: target.format(),
+                    region: render_interface::TextureRegion::whole(
+                        &target.create_view(&Default::default()),
+                        target.format()
+                    )
+                    .expect("whole output region"),
                     viewport: [64., 64.],
                     clear: wgpu::Color::BLACK,
                     initial: None
@@ -950,8 +968,11 @@ fn diagnostic_gpu_validation_is_distinct_from_prepare_result() {
     let cpu_result = backend.render(
         &scene,
         PlainTarget {
-            view: &target.create_view(&Default::default()),
-            format: target.format(),
+            region: render_interface::TextureRegion::whole(
+                &target.create_view(&Default::default()),
+                target.format(),
+            )
+            .expect("whole output region"),
             viewport: [64., 64.],
             clear: wgpu::Color::BLACK,
             initial: None,
