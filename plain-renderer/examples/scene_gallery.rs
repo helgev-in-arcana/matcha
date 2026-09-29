@@ -215,7 +215,7 @@ fn main() {
                 PlainTarget {
                     region: render_interface::TextureRegion::whole(&view, target.format())
                         .expect("whole output region"),
-                    viewport: [256., 256.],
+                    logical_size: [256., 256.],
                     clear: wgpu::Color::BLACK,
                     initial: None,
                 },

@@ -58,7 +58,7 @@ pub(crate) fn encode(
     // Taking only the reusable CPU plan avoids borrowing the compositor through
     // its own draw calls. Both success and every ordinary error restore it.
     let mut draw_plan = std::mem::take(&mut compositor.draw_plan);
-    let result = match draw_plan.rebuild(scene, target.viewport, s.size) {
+    let result = match draw_plan.rebuild(scene, target.logical_size, s.size) {
         Ok(()) => encode_planned(
             device, compositor, resources, scene, plan, &draw_plan, target, s, stats,
         ),
@@ -180,8 +180,8 @@ fn record_operations(
     let mask_regions = s.masks.each_ref().map(|mask| mask.target().region);
     clear(&mut frame.encoder, &s.color.view, target.clear);
     let full = Matrix4::new_nonuniform_scaling(&nalgebra::Vector3::new(
-        target.viewport[0],
-        target.viewport[1],
+        target.logical_size[0],
+        target.logical_size[1],
         1.,
     ));
     if let Some(initial) = target.initial {
@@ -194,7 +194,7 @@ fn record_operations(
             &compositor.white.view,
             Params {
                 transform: full,
-                viewport: target.viewport,
+                viewport: target.logical_size,
                 opacity: 1.,
                 masked: 0,
             },
@@ -235,7 +235,7 @@ fn record_operations(
                         &compositor.white.view,
                         Params {
                             transform: full,
-                            viewport: target.viewport,
+                            viewport: target.logical_size,
                             opacity: 0.,
                             masked: 0,
                         },
@@ -261,7 +261,7 @@ fn record_operations(
                         parent_view,
                         Params {
                             transform: node.transform,
-                            viewport: target.viewport,
+                            viewport: target.logical_size,
                             opacity: 1.,
                             masked: u32::from(parent.is_some()),
                         },
@@ -291,7 +291,7 @@ fn record_operations(
                         coverage,
                         Params {
                             transform: object.transform,
-                            viewport: target.viewport,
+                            viewport: target.logical_size,
                             opacity: object.opacity,
                             masked: u32::from(screen_mask.is_some())
                                 | if local_mask.is_some() { 2 } else { 0 },
@@ -332,7 +332,7 @@ fn record_operations(
         &compositor.white.view,
         Params {
             transform: full,
-            viewport: target.viewport,
+            viewport: target.logical_size,
             opacity: 1.,
             masked: 0,
         },

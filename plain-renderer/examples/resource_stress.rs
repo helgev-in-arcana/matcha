@@ -118,7 +118,7 @@ fn render(
                     wgpu::TextureFormat::Rgba8UnormSrgb,
                 )
                 .expect("whole output region"),
-                viewport: [SIZE[0] as f32, SIZE[1] as f32],
+                logical_size: [SIZE[0] as f32, SIZE[1] as f32],
                 clear: wgpu::Color::BLACK,
                 initial: None,
             },

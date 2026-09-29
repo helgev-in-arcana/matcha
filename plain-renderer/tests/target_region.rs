@@ -250,7 +250,7 @@ fn moving_resizing_masked_targets_and_failed_preparations_preserve_neighbors() {
                 &scene,
                 PlainTarget {
                     region: region(&view, origin, [8, 6]),
-                    viewport: [4., 3.],
+                    logical_size: [4., 3.],
                     clear: wgpu::Color::TRANSPARENT,
                     initial: None,
                 },
@@ -280,7 +280,7 @@ fn moving_resizing_masked_targets_and_failed_preparations_preserve_neighbors() {
             &Scene::default(),
             PlainTarget {
                 region: region(&view, [2, 3], [8, 6]),
-                viewport: [4., 3.],
+                logical_size: [4., 3.],
                 clear: wgpu::Color::TRANSPARENT,
                 initial: None,
             },
@@ -295,7 +295,7 @@ fn moving_resizing_masked_targets_and_failed_preparations_preserve_neighbors() {
             &Scene::default(),
             PlainTarget {
                 region: small,
-                viewport: [6., 4.],
+                logical_size: [6., 4.],
                 clear: wgpu::Color {
                     r: 0.125,
                     g: 0.25,
@@ -341,7 +341,7 @@ fn moving_resizing_masked_targets_and_failed_preparations_preserve_neighbors() {
         &fallible,
         PlainTarget {
             region: small,
-            viewport: [6., 4.],
+            logical_size: [6., 4.],
             clear: wgpu::Color::WHITE,
             initial: None,
         },
@@ -357,7 +357,7 @@ fn moving_resizing_masked_targets_and_failed_preparations_preserve_neighbors() {
             &fallible,
             PlainTarget {
                 region: small,
-                viewport: [6., 4.],
+                logical_size: [6., 4.],
                 clear: wgpu::Color::WHITE,
                 initial: None,
             },
@@ -413,7 +413,7 @@ fn initial_regions_have_independent_parent_sizes_and_uvs_and_validate_before_pre
                 &Scene::default(),
                 PlainTarget {
                     region: destination,
-                    viewport: [16., 12.],
+                    logical_size: [16., 12.],
                     clear: wgpu::Color::BLUE,
                     initial: Some(region(&initial_view, origin, [8, 6])),
                 },
@@ -460,7 +460,7 @@ fn initial_regions_have_independent_parent_sizes_and_uvs_and_validate_before_pre
             &scene,
             PlainTarget {
                 region: destination,
-                viewport: [8., 6.],
+                logical_size: [8., 6.],
                 clear: wgpu::Color::WHITE,
                 initial: Some(bad_initial),
             },
@@ -500,7 +500,7 @@ fn regional_output_and_initial_sampling_preserve_srgb_view_semantics() {
             &Scene::default(),
             PlainTarget {
                 region: destination,
-                viewport: [7., 5.],
+                logical_size: [7., 5.],
                 clear: wgpu::Color {
                     r: 0.125,
                     g: 0.25,
@@ -529,7 +529,7 @@ fn regional_output_and_initial_sampling_preserve_srgb_view_semantics() {
             &Scene::default(),
             PlainTarget {
                 region: destination,
-                viewport: [7., 5.],
+                logical_size: [7., 5.],
                 clear: wgpu::Color::TRANSPARENT,
                 initial: Some(
                     TextureRegion::new(

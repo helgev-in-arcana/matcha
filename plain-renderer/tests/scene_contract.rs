@@ -137,7 +137,7 @@ fn render(
                     texture.format(),
                 )
                 .expect("whole output region"),
-                viewport,
+                logical_size: viewport,
                 clear: wgpu::Color::BLACK,
                 initial: None,
             },
@@ -325,7 +325,7 @@ fn real_gpu_scene_contract() {
                         target.format()
                     )
                     .expect("whole output region"),
-                    viewport: [64., 64.],
+                    logical_size: [64., 64.],
                     clear: wgpu::Color::BLACK,
                     initial: None
                 }
@@ -367,7 +367,7 @@ fn real_gpu_scene_contract() {
                         target.format()
                     )
                     .expect("whole output region"),
-                    viewport: [64., 64.],
+                    logical_size: [64., 64.],
                     clear: wgpu::Color::BLACK,
                     initial: None
                 }
@@ -593,7 +593,7 @@ fn real_gpu_scene_contract() {
                     initial_target.format(),
                 )
                 .expect("whole output region"),
-                viewport: [64., 64.],
+                logical_size: [64., 64.],
                 clear: wgpu::Color::BLACK,
                 initial: Some(
                     TextureRegion::whole(&target.create_view(&Default::default()), target.format())
@@ -619,7 +619,7 @@ fn real_gpu_scene_contract() {
                         target.format()
                     )
                     .expect("whole output region"),
-                    viewport: [64., 64.],
+                    logical_size: [64., 64.],
                     clear: wgpu::Color::BLACK,
                     initial: None
                 }
@@ -973,7 +973,7 @@ fn diagnostic_gpu_validation_is_distinct_from_prepare_result() {
                 target.format(),
             )
             .expect("whole output region"),
-            viewport: [64., 64.],
+            logical_size: [64., 64.],
             clear: wgpu::Color::BLACK,
             initial: None,
         },

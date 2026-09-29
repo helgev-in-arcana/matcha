@@ -214,7 +214,7 @@ impl Harness {
                         self.output.format(),
                     )
                     .expect("whole output region"),
-                    viewport: [EDGE as f32; 2],
+                    logical_size: [EDGE as f32; 2],
                     clear: wgpu::Color::TRANSPARENT,
                     initial: None,
                 },

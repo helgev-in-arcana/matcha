@@ -137,7 +137,7 @@ fn render(renderer: &mut PlainRenderer, scene: &Scene, texture: &wgpu::Texture) 
                     texture.format(),
                 )
                 .expect("whole output region"),
-                viewport: [16., 8.],
+                logical_size: [16., 8.],
                 clear: wgpu::Color::BLACK,
                 initial: None,
             },

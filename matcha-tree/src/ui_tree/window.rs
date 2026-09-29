@@ -270,7 +270,7 @@ impl AnyWindowWidgetInstance for WindowWidgetInstance {
                             region: render_interface::TextureRegion::whole(&view, format).map_err(
                                 |error| plain_renderer::PlainError::Invalid(error.to_string()),
                             )?,
-                            viewport: size,
+                            logical_size: size,
                             clear: wgpu::Color {
                                 r: 0.1,
                                 g: 0.1,

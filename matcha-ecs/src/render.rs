@@ -121,7 +121,7 @@ impl GuiRenderer {
         clips: &ClipArena,
         target: PlainTarget<'_>,
     ) -> Result<(), PlainError> {
-        self.assemble(items, clips, target.viewport)?;
+        self.assemble(items, clips, target.logical_size)?;
         self.backend.render(&self.frame.scene, target)
     }
     /// Write Objects directly into one complete interface submission.
@@ -256,7 +256,7 @@ pub fn build_and_present(snapshot: RenderSnapshot) {
         &clips,
         PlainTarget {
             region,
-            viewport: viewport_size,
+            logical_size: viewport_size,
             clear: load_color,
             initial: None,
         },

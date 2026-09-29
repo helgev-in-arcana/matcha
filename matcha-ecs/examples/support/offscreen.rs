@@ -64,7 +64,7 @@ pub fn capture(view: impl FnOnce(&mut Scope), path: &str, size: [u32; 2]) {
                 plain_renderer::PlainTarget {
                     region: render_interface::TextureRegion::whole(&target_view, target.format())
                         .expect("whole output region"),
-                    viewport: size.map(|v| v as f32),
+                    logical_size: size.map(|v| v as f32),
                     clear: wgpu::Color {
                         r: 0.025,
                         g: 0.03,

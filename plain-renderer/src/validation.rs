@@ -56,8 +56,12 @@ pub(crate) fn validate(
             return Err(invalid("unsupported initial image format"));
         }
     }
-    if target.viewport.iter().any(|v| !v.is_finite() || *v <= 0.) {
-        return Err(invalid("viewport must be finite and positive"));
+    if target
+        .logical_size
+        .iter()
+        .any(|v| !v.is_finite() || *v <= 0.)
+    {
+        return Err(invalid("logical scene size must be finite and positive"));
     }
     if !destination
         .usage()
@@ -310,7 +314,7 @@ mod tests {
         let scene = Scene::default();
         let mut target = PlainTarget {
             region: region(&destination, [3, 5], [8, 4]),
-            viewport: [80., 40.],
+            logical_size: [80., 40.],
             clear: wgpu::Color::TRANSPARENT,
             initial: Some(region(&initial, [17, 23], [8, 4])),
         };

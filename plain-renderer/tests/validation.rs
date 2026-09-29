@@ -90,7 +90,7 @@ fn render(
                 texture.format(),
             )
             .expect("whole output region"),
-            viewport: [64., 64.],
+            logical_size: [64., 64.],
             clear: wgpu::Color::BLACK,
             initial: None,
         },
@@ -481,7 +481,7 @@ fn srgb_reinterpretation_uses_declared_view_format_and_rejects_incompatible_base
                     wgpu::TextureFormat::Rgba8UnormSrgb,
                 )
                 .expect("whole output region"),
-                viewport: [64., 64.],
+                logical_size: [64., 64.],
                 clear: wgpu::Color::BLACK,
                 initial: None,
             },

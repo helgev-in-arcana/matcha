@@ -165,7 +165,7 @@ fn clean_widgets_emit_each_frame_while_the_backend_reuses_source_content() {
                             wgpu::TextureFormat::Rgba8Unorm,
                         )
                         .expect("whole output region"),
-                        viewport: [32., 32.],
+                        logical_size: [32., 32.],
                         clear: wgpu::Color::TRANSPARENT,
                         initial: None,
                     },

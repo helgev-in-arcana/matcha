@@ -62,9 +62,11 @@ pub struct PlainTarget<'a> {
     /// Destination rectangle and declared attachment view format. Rendering
     /// replaces only this region, preserving pixels elsewhere in the texture.
     pub region: TextureRegion<'a>,
-    /// Logical scene dimensions, mapped onto the destination region's pixel size.
-    /// Object transforms and snapshots are independent of its physical origin.
-    pub viewport: [f32; 2],
+    /// Scene coordinate extent from `(0, 0)` to `logical_size`, mapped onto the
+    /// destination region's pixel size. Both dimensions must be finite and
+    /// positive. The physical viewport is determined by `region.origin()` and
+    /// `region.size()` independently of this logical extent.
+    pub logical_size: [f32; 2],
     /// Initial premultiplied linear-light RGBA, independent of output view format.
     pub clear: wgpu::Color,
     /// Optional sampled initial region, composited over clear before phase zero.

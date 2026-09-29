@@ -44,7 +44,7 @@ fn render(renderer: &mut PlainRenderer, scene: &Scene, target: &wgpu::Texture) {
                     target.format(),
                 )
                 .expect("whole output region"),
-                viewport: [4., 4.],
+                logical_size: [4., 4.],
                 clear: wgpu::Color::BLACK,
                 initial: None,
             },

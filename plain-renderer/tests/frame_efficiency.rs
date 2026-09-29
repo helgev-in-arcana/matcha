@@ -100,7 +100,7 @@ fn render(
                 target.format(),
             )
             .expect("whole output region"),
-            viewport: [16., 16.],
+            logical_size: [16., 16.],
             clear: wgpu::Color::BLACK,
             initial: None,
         },

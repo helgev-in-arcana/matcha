@@ -286,7 +286,7 @@ fn verify_framework_order(device: &wgpu::Device, queue: &wgpu::Queue, directory:
                 PlainTarget {
                     region: render_interface::TextureRegion::whole(&view, view.texture().format())
                         .expect("whole output region"),
-                    viewport: [32., 16.],
+                    logical_size: [32., 16.],
                     clear: wgpu::Color::BLACK,
                     initial: None,
                 },
@@ -346,7 +346,7 @@ fn verify_framework_order(device: &wgpu::Device, queue: &wgpu::Queue, directory:
                 PlainTarget {
                     region: render_interface::TextureRegion::whole(&view, view.texture().format())
                         .expect("whole output region"),
-                    viewport: [32., 16.],
+                    logical_size: [32., 16.],
                     clear: wgpu::Color::BLACK,
                     initial: None,
                 },
@@ -468,7 +468,7 @@ fn main() {
                         output.format(),
                     )
                     .expect("whole output region"),
-                    viewport: ctx.size,
+                    logical_size: ctx.size,
                     clear: wgpu::Color::BLACK,
                     initial: None,
                 },
@@ -560,7 +560,7 @@ fn main() {
                         output_view.texture().format(),
                     )
                     .expect("whole output region"),
-                    viewport: [512., 176.],
+                    logical_size: [512., 176.],
                     clear,
                     initial: None,
                 },
@@ -612,7 +612,7 @@ fn main() {
                     output_view.texture().format(),
                 )
                 .expect("whole output region"),
-                viewport: [512., 176.],
+                logical_size: [512., 176.],
                 clear,
                 initial: None,
             },
@@ -659,7 +659,7 @@ fn main() {
                     output_view.texture().format(),
                 )
                 .expect("whole output region"),
-                viewport: [512., 176.],
+                logical_size: [512., 176.],
                 clear,
                 initial: None,
             },
@@ -717,7 +717,7 @@ fn main() {
                     output_view.texture().format(),
                 )
                 .expect("whole output region"),
-                viewport: [512., 176.],
+                logical_size: [512., 176.],
                 clear,
                 initial: None,
             },
