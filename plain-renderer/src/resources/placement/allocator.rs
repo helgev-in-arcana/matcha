@@ -5,10 +5,9 @@
 //! reuse. Tokens belong to one allocator and are never reused, so stale tokens
 //! cannot accidentally release a later allocation. They are not GPU lifetimes.
 //!
-//! Range allocation uses first fit in a sorted, coalesced free list. This keeps
-//! the initial implementation inspectable and permits a different search policy
-//! without changing allocation handles. Rectangle packing delegates to
-//! guillotiere; its allocation IDs remain private to this adapter.
+//! Range allocation uses first fit in a sorted free list with adjacent spans
+//! coalesced. Allocation handles do not expose the search policy. Rectangle
+//! packing delegates to guillotiere; its allocation IDs remain private to this adapter.
 
 use std::{
     collections::HashMap,

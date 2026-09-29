@@ -1,7 +1,5 @@
-//! Headless verification of `Panel` (Tier-1 HTML/CSS widgets batch): fixed
-//! own size (unlike `Padding`, which auto-sizes to its child), single-child
-//! inset-by-`border_width` arrangement, and `RenderItem` revision-
-//! on-patch. Same GPU-free style as `tests/layout.rs`/`tests/render_item_reuse.rs`.
+//! Headless verification of Panel's fixed size, child placement inside its
+//! border, and RenderItem revisions after property changes.
 
 use bevy_ecs::{entity::Entity, world::World};
 

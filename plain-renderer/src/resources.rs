@@ -30,7 +30,7 @@ pub(crate) struct ResourceStats {
     pub(crate) preparation_buffer_copies: usize,
 }
 
-/// Reused CPU validation sets, cleared for every submitted Scene. Membership is
+/// Reused CPU validation sets, cleared for each Scene validation. Membership is
 /// not persistent validation: the same immutable ID is checked again next frame.
 #[derive(Default)]
 pub(crate) struct ValidationScratch {
@@ -238,7 +238,7 @@ impl ResourceStore {
         )
     }
     pub(crate) fn commit_relocation(&mut self, plan: relocation::RelocationPlan) {
-        // All old leases stay owned until the facade has submitted every copy.
+        // Source leases stay owned until the facade has submitted every copy.
         // Replace values and the complete registry together. Last-use metadata,
         // content IDs and source definitions are unaffected by physical movement.
         for (id, mesh) in plan.meshes {

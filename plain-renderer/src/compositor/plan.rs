@@ -8,8 +8,8 @@
 //!
 //! Mask bounds are accumulated once in parent order. Consecutive objects sharing
 //! a mask do not rebuild its ancestry or repeat its matrix projections. The first
-//! four intermediate masks survive branch changes; deeper masks use the existing
-//! two-slot ping-pong policy. Planning state survives phase boundaries, but never
+//! four intermediate masks retain reusable ancestor coverage; deeper masks use
+//! two-slot ping-pong storage. Planning state survives phase boundaries, but never
 //! frame boundaries. Vector capacity survives rebuilds, including phase shrinkage.
 
 use render_interface::{MeshDescriptor, MeshId, Scene};
@@ -87,8 +87,8 @@ impl DrawPlan {
         self.mask_bounds.clear();
         let result = self.rebuild_inner(scene, viewport, size);
         if result.is_err() {
-            // A caller must never observe a partial/new mix after rejecting a
-            // frame. Capacity still remains available to the next valid frame.
+            // A failed rebuild exposes no operations from either the rejected
+            // frame or the preceding plan. Vector capacity remains reusable.
             for phase in &mut self.phases {
                 phase.clear();
             }
@@ -381,8 +381,8 @@ mod tests {
             })
             .collect();
         assert_eq!(masks, [0, 1, 2, 3]);
-        // Four initial clear/draw pairs, then five objects. Previously the
-        // shorter chains caused four unnecessary mask redraws: 21 operations.
+        // Four clear/draw pairs populate the cached prefix. Five object draws
+        // reuse those slots; selecting an ancestor requires no mask redraw.
         assert_eq!(plan.uniform_count, 13);
         let slots: Vec<_> = plan.phases[0]
             .iter()

@@ -1,7 +1,7 @@
 //! GUI scene composition and renderer-owned GPU residency.
 //!
-//! This crate depends on the upstream render-interface contract, not on either
-//! UI framework or the widget drawing helpers in the `renderer` crate.
+//! Scene input and source preparation use the render-interface contract. The
+//! renderer does not depend on a UI framework or widget implementation.
 //! Scene definitions are borrowed only during render. Internal planning, residency,
 //! placement and composition types are deliberately not part of the public API.
 //! CPU errors discard an unsubmitted recording. GPU errors remain on wgpu's error
@@ -92,7 +92,7 @@ pub struct RenderStats {
     pub prepared: usize,
     pub cache_hits: usize,
     pub draw_calls: usize,
-    /// Render passes containing draws (excludes initial/final clears).
+    /// Render passes containing compositor draws; attachment-only clears are excluded.
     pub draw_batches: usize,
     pub mask_passes: usize,
     /// Backend snapshot materializations; zero for this ordered eager backend.
@@ -172,14 +172,14 @@ impl PlainRenderer {
         self.refresh_resource_stats();
     }
     /// Repack resident content using GPU copies, without source callbacks or
-    /// readback. Old and replacement capacity coexist while copies are in flight.
+    /// readback. Source and replacement capacity coexist while copies are in flight.
     /// This heuristic need not reduce capacity for every distribution of sizes.
     /// Dedicated storage has no shared-page fragmentation and is left unchanged.
     pub fn compact_resources(&mut self) -> Result<RelocationStats, PlainError> {
         self.compact_resources_with_budget(u64::MAX)
     }
     /// Declines the complete relocation before allocation/recording if its
-    /// logical copy volume exceeds the limit. The old placement remains usable.
+    /// logical copy volume exceeds the limit. Resident placement remains usable.
     pub fn compact_resources_with_budget(
         &mut self,
         max_copy_bytes: u64,
@@ -214,10 +214,10 @@ impl PlainRenderer {
         self.refresh_resource_stats();
     }
     /// On a provider panic with unwinding enabled, discards unsubmitted work and
-    /// new residents, restores reusable workspace, then resumes the original panic.
-    /// A caller catching it can render again without clearing previously valid
-    /// residents. Provider-owned side effects are not rolled back; panic=abort
-    /// terminates the process and cannot run this cleanup.
+    /// residents prepared by that recording, restores reusable workspace, then
+    /// resumes the original panic. A caller catching it can render again without
+    /// clearing residents from submitted frames. Provider-owned side effects are
+    /// not rolled back; panic=abort terminates the process and cannot run this cleanup.
     pub fn render(&mut self, scene: &Scene, target: PlainTarget<'_>) -> Result<(), PlainError> {
         self.stats = RenderStats::default();
         self.resources.begin()?;

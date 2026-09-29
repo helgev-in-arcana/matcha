@@ -263,10 +263,8 @@ fn popup_clip_reset_agrees_between_rendering_and_picking() {
 // ---------------------------------------------------------------------------
 // The clip model itself
 //
-// Picking used to carry a running rectangle intersection while drawing carried
-// this arena: two models of the same thing, agreeing only for as long as every
-// transform stayed a translation. These pin the arena's own containment rule,
-// which both now use.
+// Drawing and picking share the clip arena. These tests check containment
+// through the complete transform and parent chain, including rotated clips.
 // ---------------------------------------------------------------------------
 
 /// A unit-quad transform for the axis-aligned box at `origin` of `size`.
@@ -311,10 +309,8 @@ fn a_chain_requires_every_clip_in_it() {
 
 #[test]
 fn a_rotated_clip_cuts_along_its_own_edges_not_its_bounding_box() {
-    // This is the case a rectangle intersection cannot express, and the reason
-    // picking now reads the same arena the renderer does. A 100x100 box rotated
-    // 45 degrees about its centre still has a 100x100 axis-aligned bounding
-    // box, but its corners are no longer inside it.
+    // Rotating a box changes which points it contains. Test the transformed
+    // unit square itself, not an axis-aligned approximation of its bounds.
     let centre = nalgebra::Vector3::new(50.0, 50.0, 0.0);
     let transform = nalgebra::Matrix4::new_translation(&centre)
         * nalgebra::Matrix4::from_euler_angles(0.0, 0.0, std::f32::consts::FRAC_PI_4)

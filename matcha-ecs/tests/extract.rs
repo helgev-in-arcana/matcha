@@ -1,7 +1,7 @@
-//! Headless verification of the M4 render extract step: build a view, run
+//! Headless verification of render extraction: build a view, run
 //! layout, then call `extract_items` directly (no window/GPU) and assert paint
 //! order, per-item transforms, and that revisions and deferred writers match
-//! the source entity's `RenderItem`. Same style as `tests/layout.rs`.
+//! the source entity's `RenderItem`.
 
 use bevy_ecs::{entity::Entity, world::World};
 

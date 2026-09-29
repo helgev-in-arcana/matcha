@@ -1,4 +1,4 @@
-//! GPU-generator examples using only the public upstream contract.
+//! GPU-generator examples using the public `render_interface` contract.
 use render_interface::*;
 
 /// A compute-generated unit triangle; proves mesh outputs can be storage buffers.
@@ -58,7 +58,7 @@ pub fn compute_triangle() -> MeshSource {
 }
 
 /// Mode 0: 9x9 box blur; 1: wave refraction; 2: Mandelbrot coverage;
-/// 3: whole-image invert (deferred-style final processing).
+/// 3: whole-image color inversion preserving alpha.
 pub fn compute_image(
     gpu: &mut GpuPrepareContext<'_>,
     target: &TextureTarget<'_>,

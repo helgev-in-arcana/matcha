@@ -1,6 +1,6 @@
 //! Box masks are GPU-generated directly through MaskPrepareContext. The CPU
 //! rasterizer in shape.rs is an independent oracle for numerical stress tests.
-//! Separable blur preserves the old three-box filter including its quantization.
+//! Separable blur uses three box-filter rounds with quantized intermediate coverage.
 use crate::shape::CoverageKey;
 use render_interface::*;
 use wgpu::util::DeviceExt;

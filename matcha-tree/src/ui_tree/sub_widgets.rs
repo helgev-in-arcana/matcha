@@ -41,7 +41,8 @@ impl<T> SubWidgetsVec<T> {
 impl<T: PartialEq> SubWidgetsVec<T> {
     /// Apply the ID-based diff update algorithm.
     ///
-    /// For each entry in `new_children` 窶・a tuple of `(id_hash, view, setting)` 窶・    /// the algorithm tries to match an existing [`WidgetPod`] by `id_hash`.
+    /// Each `(id_hash, view, setting)` entry is matched to an existing
+    /// [`WidgetPod`] by `id_hash`.
     /// If a match is found and the view type is compatible the pod is updated in
     /// place; otherwise a new pod is built from the view.
     ///
@@ -69,9 +70,7 @@ impl<T: PartialEq> SubWidgetsVec<T> {
 
         // --- Step 2: process new children -------------------------------------
 
-        // Collect once so we can record new_ids for reorder detection.
-        // Prefixed with underscore to silence warnings (matches the design
-        // note in src-old: reserved for a future O(n) LCS/move-detection pass).
+        // Collect the child input once before reconciling pods.
         let new_children: Vec<(usize, &dyn View, T)> = new_children.into_iter().collect();
         let _new_ids: Vec<usize> = new_children.iter().map(|(id, _, _)| *id).collect();
 
@@ -91,8 +90,8 @@ impl<T: PartialEq> SubWidgetsVec<T> {
                 }
             }
 
-            // Any setting change is treated as layout-affecting (conservative
-            // strategy; see design note in src-old about SettingImpact).
+            // This generic container treats every setting change as affecting
+            // layout because it cannot identify paint-only settings.
             if let Some((_, old_setting)) = &old_entry {
                 if *old_setting != new_setting {
                     need_rearrange = true;

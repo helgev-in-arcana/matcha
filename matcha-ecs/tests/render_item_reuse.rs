@@ -1,4 +1,4 @@
-//! Headless verification of the `RenderItem` invalidation contract (M2-3):
+//! Headless verification of the `RenderItem` invalidation contract:
 //! re-running the view with unchanged draw-relevant props must leave the
 //! draw revision untouched, and changing a prop must invalidate it.
 //! No GPU/window is needed — `RenderItem::revision` is compared by value,

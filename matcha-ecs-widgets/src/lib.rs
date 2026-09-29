@@ -76,8 +76,8 @@ pub use text_box::{TextBox, TextBoxStyle, TextEditor};
 /// Every system this crate's widgets need, ready for
 /// [`UiEcs::with_pre_layout_systems`](matcha_ecs::ui_ecs::UiEcs::with_pre_layout_systems).
 ///
-/// One registration instead of three. Each module still exposes its own
-/// `default_systems()` for an app that wants only part of it.
+/// Registers animation, interaction and text-box systems together. Each module
+/// also exposes `default_systems()` for applications using only that subset.
 ///
 /// ```ignore
 /// UiEcs::new(model, view, reduce)

@@ -2,7 +2,7 @@
 //!
 //! The noop adapter reports every feature (including `IMMEDIATES` and
 //! `VERTEX_WRITABLE_STORAGE`), so pipeline creation must succeed without any
-//! real GPU. This independently checks the retained CoreRenderer implementation.
+//! real GPU. The test checks CoreRenderer pipeline creation without hardware.
 
 use gpu_utils::gpu::{Gpu, GpuDescriptor};
 use renderer::CoreRenderer;

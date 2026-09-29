@@ -1,7 +1,7 @@
 //! Shared GPU context with optional texture and buffer atlases.
 //!
 //! GPU initialization is always available. Enable `atlas` for the independent
-//! atlas APIs. Current tree/ECS rendering uses plain-renderer-owned placement.
+//! atlas allocation and resource-management APIs.
 
 #[cfg(feature = "atlas")]
 pub mod buffer_atlas;

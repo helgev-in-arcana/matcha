@@ -1,15 +1,10 @@
-//! Headless verification of `Button` (Tier-1 HTML/CSS widgets batch): the
-//! `RenderItem` revision-on-patch contract, in the same style as
-//! `tests/render_item_reuse.rs`/`tests/text.rs`. No GPU/window is needed —
-//! `RenderItem::builder` is never invoked, only its draw revision is
-//! asserted. Actual label shaping/rasterisation needs a real `wgpu::Device`
-//! and is left to manual/demo verification, matching this suite's
-//! established GPU-free approach.
+//! Headless verification of Button properties and RenderItem revisions.
+//! Writers are not invoked; these tests check whether patching draw-relevant
+//! properties advances the revision without requiring a GPU or window.
 //!
 //! `Button`'s `RenderItem` is built in `after_spawn` (it needs the `FontCtx`
-//! resource for the label), not `bundle()` like `ColorRect` — `run_view`
-//! already runs `after_spawn` right after `bundle()` on first spawn (`Text`'s
-//! tests rely on the same thing), so this needs no special setup here.
+//! resource for the label). `run_view` invokes that hook after `bundle()` when
+//! spawning the entity.
 
 use bevy_ecs::{entity::Entity, world::World};
 
@@ -87,9 +82,7 @@ fn changed_label_invalidates_cache() {
 
 #[test]
 fn changed_color_only_invalidates_cache() {
-    // Regression test: `Button` previously did not carry `RectColor`, so a
-    // colour-only `.color()` change went undetected by `patch` and never
-    // rebuilt the cached render item.
+    // A colour-only change must update RectColor and advance the draw revision.
     let (mut world, root) = setup();
     matcha_ecs::view::run_view(&mut world, root, |s| {
         s.leaf(

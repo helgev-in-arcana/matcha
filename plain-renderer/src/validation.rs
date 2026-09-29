@@ -16,7 +16,7 @@ pub(crate) fn validate(
     target: &PlainTarget<'_>,
 ) -> Result<(), PlainError> {
     let invalid = |msg: &str| PlainError::Invalid(msg.into());
-    // TextureRegion construction already checked subresource metadata, format
+    // TextureRegion's constructor validates subresource metadata, format
     // compatibility and nonempty in-bounds extents. Usage is role-specific here.
     let destination = target.region.texture();
     validate_target_format(destination.format(), target.region.view_format())?;
@@ -82,7 +82,7 @@ pub(crate) fn validate(
 
 /// Descriptor checks depend on resource identity, while transform/opacity and
 /// mask topology belong to individual occurrences. Keep the latter checks even
-/// when an ID was seen already. Scratch membership lasts for this call only.
+/// for repeated occurrences of one ID. Scratch membership lasts for this call only.
 fn validate_scene(
     scene: &Scene,
     limits: &wgpu::Limits,

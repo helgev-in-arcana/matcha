@@ -1,10 +1,9 @@
-//! Clipping: turning [`Clip`] markers into the renderer's clip arena.
+//! Clipping: turning [`Clip`] markers into frame-local clip geometry.
 //!
 //! A [`Clip`] confines an entity and its descendants to that entity's own box.
-//! Because the extract stage flattens the tree into a list of per-entity render
-//! nodes, the nesting between clips cannot be carried by the nodes themselves —
-//! it is carried here instead, as an arena of rectangles each naming its parent.
-//! The renderer turns a chain of those into a product of coverage masks.
+//! Extraction flattens drawable entities into items that refer to this arena.
+//! Each clip names its enclosing clip. Scene assembly converts the chain to
+//! PixelMasks, whose coverage the renderer combines by multiplication.
 //!
 //! Everything in this module is GPU-free. A [`ClipRect`] is pure geometry; the
 //! coverage image is a shared CPU definition registered by GuiRenderer. This is
@@ -160,11 +159,11 @@ pub fn descend(
 /// The planar homography of a unit-quad transform: the restriction of `m` to
 /// rows and columns `{0, 1, 3}`.
 ///
-/// A mask's local coordinates are `(u, v, 0, 1)`, so only those rows and
-/// columns ever contribute. Inverting this 3x3 is exact for any affine *or*
-/// projective transform, where inverting the full 4x4 would presuppose that
-/// the point lies on the mask's plane. `renderer` computes the same matrix for
-/// the GPU; this is the CPU side of the identical question.
+/// A clip quad's local coordinates are `(u, v, 0, 1)`, so its projected x/y
+/// position depends only on these rows and columns. Inverting this 3x3 maps
+/// a window-space point back to the quad for CPU containment checks, including
+/// projective transforms. A full 4x4 inverse would also require the point's
+/// transformed depth, which a 2D pointer position does not provide.
 #[rustfmt::skip]
 fn planar_homography(m: &Matrix4<f32>) -> Matrix3<f32> {
     Matrix3::new(

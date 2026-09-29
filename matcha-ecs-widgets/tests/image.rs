@@ -1,11 +1,11 @@
-//! Headless verification of `Image` (Tier-1 HTML/CSS widgets batch):
+//! Headless verification of `Image`:
 //! mandatory-size geometry and `RenderItem` revision-on-patch,
 //! keyed on *source identity* (path equality / `Arc` pointer identity), never
-//! a deep byte compare — same GPU-free style as `tests/render_item_reuse.rs`.
+//! a deep byte comparison.
 //! `Image`'s `RenderItem` is built in `after_spawn` (it needs the `ImageCtx`
-//! resource), which `run_view` already runs on first spawn; the builder
-//! closure itself (decode/resize/upload) is never invoked here, so no real
-//! image bytes or `wgpu::Device` are needed.
+//! resource), which `run_view` invokes on first spawn. The writer and source
+//! callbacks are never invoked here, so no real image bytes or `wgpu::Device`
+//! are needed.
 
 use std::sync::Arc;
 

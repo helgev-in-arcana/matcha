@@ -22,12 +22,11 @@ pub struct RendererResource {
     pub core: Arc<Mutex<GuiRenderer>>,
 }
 
-/// The single UI-root window entity and its id. M1 supports one window; this is
-/// how the render stage finds the entity whose `ViewChildren` to walk.
+/// The UI-root window entity and its id. The application manages one root;
+/// the render stage walks that entity's `ViewChildren`.
 ///
-/// Prefer [`ui_root`] and [`ui_root_window`] over reading this directly: the
-/// singleton is temporary, and every site that spells out the lookup is a site
-/// that has to change when it stops being one.
+/// [`ui_root`] and [`ui_root_window`] centralize root lookup for layout, input
+/// and rendering.
 #[derive(Resource)]
 pub struct RenderWindowRoot {
     pub entity: Entity,
@@ -37,8 +36,7 @@ pub struct RenderWindowRoot {
 /// The entity whose view tree is the UI, or `None` before the window exists.
 ///
 /// Layout, picking, focus validation and tab order all need exactly this and
-/// nothing else. Going through one function keeps "which root?" answerable in
-/// one place — which is the whole preparation for there being more than one.
+/// nothing else. This helper centralizes the root-selection policy.
 pub fn ui_root(world: &World) -> Option<Entity> {
     world.get_resource::<RenderWindowRoot>().map(|r| r.entity)
 }

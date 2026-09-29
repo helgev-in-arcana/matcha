@@ -11,12 +11,12 @@
 //!
 //! That is also exactly CSS's rule — `:hover` matches an element **and all its
 //! ancestors** — so there is deliberately only one marker,
-//! [`Hovered`](crate::components::input::Hovered), and no `:hover-within`
+//! [`Hovered`], and no `:hover-within`
 //! counterpart to focus's [`FocusWithin`](crate::components::focus::FocusWithin).
 //! Focus needed the distinction because keyboard delivery targets the vertex
 //! alone; nothing about hovering is vertex-specific.
 //!
-//! [`Active`](crate::components::input::Active) is the intersection of the
+//! [`Active`] is the intersection of the
 //! press chain with the current hover chain. Holding the button and dragging
 //! off a button therefore releases its pressed look, and dragging back on
 //! restores it — what every platform's buttons do.
@@ -170,8 +170,8 @@ pub fn set_pressed(world: &mut World, pressed: Option<Entity>) -> bool {
 /// Invalidation happens here rather than in a `Changed<Hovered>` system for the
 /// same reason [`crate::focus::sync_focus_components`] does it inline:
 /// `Changed<T>` never fires on component **removal**, so an entity *losing*
-/// hover would keep painting its hover appearance forever. This pass already
-/// knows the exact transition set in both directions.
+/// hover would otherwise miss its draw-revision update. This pass knows the
+/// exact transition set in both directions.
 pub fn sync_pointer_components(world: &mut World) {
     resolve(world);
 
@@ -216,7 +216,7 @@ pub fn sync_cursor(world: &mut World) {
 }
 
 /// Add `M` to everything in `wanted`, remove it from everything else, and
-/// invalidate the render node of each entity that moved either way.
+/// advance the draw revision of each entity that changed either way.
 fn sync_marker<M: bevy_ecs::component::Component + Clone>(
     world: &mut World,
     wanted: &[Entity],

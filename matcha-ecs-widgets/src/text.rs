@@ -1,4 +1,4 @@
-//! `Text` — a leaf widget rendering a shaped, word-wrapped string (M6).
+//! `Text` — a leaf widget rendering a shaped, word-wrapped string.
 //!
 //! Text shaping/rasterisation is powered by the sibling `suzuri` crate. Only
 //! its CPU-facing pieces are used: `FontSystem::layout_text` (pure geometry —
@@ -9,15 +9,14 @@
 //! single call, which doesn't fit the per-glyph, cross-frame, cross-widget
 //! resource sharing this widget needs.
 //!
-//! Rendering writes Objects and PixelMasks directly into a native Scene.
+//! Rendering writes Objects and PixelMasks into a Scene.
 //! Fontdue glyph bounds are queried during Scene construction; rasterization
 //! runs inside MaskSource::prepare only when the renderer needs the content.
-//! Colours are GPU-generated TextureSources. No RenderNode or Bitmap bridge.
+//! Colours are GPU-generated TextureSources.
 //!
 //! The render writer retains a shaped layout keyed by resolved wrap width and a
 //! stable tint source. Changing declared content/style replaces the writer.
-//! Layout measurement still shapes separately; sharing that result across the
-//! layout/render thread boundary is a separate optimization.
+//! Layout measurement shapes independently of the render writer.
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -55,8 +54,8 @@ struct TextStyle {
 }
 
 /// Shares the most recently resolved wrap width between `TextStyle::arrange`
-/// (writer, every layout pass) and the `RenderItem` builder (reader, every
-/// rebuild). Deliberately not part of `TextStyle`'s `PartialEq`/`Clone`-based
+/// (writer, every layout pass) and the `RenderItem` writer (reader, every
+/// redraw). Deliberately not part of `TextStyle`'s `PartialEq`/`Clone`-based
 /// change comparison in `patch` — `LiveF32` has no meaningful `PartialEq`,
 /// and this cell must survive being read from a system that never replaces
 /// it, only the entity's `TextStyle`/`RenderItem` are replaced on patch.
@@ -87,8 +86,7 @@ struct FontCtxInner {
 
 /// World resource wrapping the shared `suzuri::FontSystem` plus the glyph
 /// stencil cache. Lazily inserted on first use (`world_scope` +
-/// `get_resource_or_insert_with`) so core (`UiEcs`) never has to know about it
-/// — matches `ECS_IMPLEMENTATION_PLAN.md`'s pre-existing plan for `FontCtx`.
+/// `get_resource_or_insert_with`), keeping font machinery outside the core.
 /// Cheap to `Clone` (an `Arc` handle), so it can be captured directly into a
 /// `RenderItem`'s `Send + Sync` builder closure.
 #[derive(Resource, Clone)]
@@ -104,7 +102,7 @@ impl FontCtx {
         }))
     }
 
-    /// Look up the native MaskSource defining
+    /// Look up the MaskSource defining
     /// `glyph_id`'s coverage bitmap, plus its pixel size. Returns `None` for
     /// glyphs with no visible bitmap (e.g. space) or a missing font.
     pub(crate) fn glyph_source(&self, glyph_id: suzuri::GlyphId) -> Option<(MaskSource, [f32; 2])> {
@@ -238,10 +236,8 @@ impl Layout for TextStyle {
         // Reports no width range, unlike `RichText`. parley hands that widget
         // its min/max-content widths off the layout it already built, whereas
         // suzuri/fontdue has no such API: deriving the pair here would mean
-        // two extra full shaping passes per measure, on the widget that has
-        // no layout-stage shape cache and is kept as the reference/fallback
-        // implementation. A `Text` in a shrinking row therefore will not go
-        // below the width it wrapped to; `RichText` will.
+        // two extra full shaping passes per measure. A `Text` in a shrinking
+        // row therefore will not go below the width it wrapped to; `RichText` will.
         let shaped = [layout.total_width, layout.total_height];
         sizing.measured(constraints, Measured::exact(shaped))
     }
@@ -262,7 +258,7 @@ pub struct Text {
     content: String,
     font_size: f32,
     color: [f32; 4],
-    /// See `ColorRect`'s identical fields for the M7 fade design.
+    /// Enter and exit fades use the same opacity transitions as `ColorRect`.
     enter_fade: Option<(Duration, Easing)>,
     exit_fade: Option<(Duration, Easing)>,
 }
@@ -342,10 +338,8 @@ impl Widget for Text {
     }
 
     fn bundle(&self) -> impl Bundle {
-        // Unlike `ColorRect`, the `RenderItem` can't be built here: it needs
-        // the `FontCtx` resource, and `bundle()` has no world access at all
-        // (it just returns a plain `Bundle` value). Built in `after_spawn`
-        // instead, which does get `&mut EntityWorldMut`.
+        // `after_spawn` builds the RenderItem because it can access FontCtx
+        // in the world; bundle() only supplies the entity's initial components.
         let initial_opacity = if self.enter_fade.is_some() { 0.0 } else { 1.0 };
         (
             TextContent(self.content.clone()),
@@ -411,7 +405,7 @@ impl Widget for Text {
 mod tests {
     //! `TextWrapWidth` is a private implementation detail (the sole value
     //! threaded from layout to render, per the module docs), so unlike the
-    //! public-API integration tests in `matcha-ecs/tests/text.rs`, its
+    //! public-API integration tests in `tests/text.rs`, its
     //! write-through from `TextStyle::arrange` can only be checked from
     //! inside this crate.
     use bevy_ecs::world::World;

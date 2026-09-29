@@ -8,12 +8,6 @@
 //! deliberately not part of this widget; compose one externally (e.g.
 //! `Row > (Checkbox, Text)`), matching HTML where `<input type=checkbox>` and
 //! its `<label>` are siblings, not one element.
-//!
-//! (A formerly-documented "known issue" here — intermittent corruption of
-//! unrelated widgets while this widget rebuilt per toggle — was root-caused
-//! and fixed on 2026-07-10: it was never atlas churn, but nondeterministic
-//! instance ordering in `renderer`'s culling compute shader. See
-//! `renderer/src/core_renderer/renderer_cull.wgsl` and CLAUDE.md.)
 
 use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, world::EntityWorldMut,

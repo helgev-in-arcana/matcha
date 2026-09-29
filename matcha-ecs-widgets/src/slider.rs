@@ -7,19 +7,17 @@
 //!
 //! # What it reuses
 //!
-//! Almost everything. The drag is `PointerDispatch` plus the pointer capture a
+//! The drag uses `PointerDispatch` plus the pointer capture a
 //! press establishes (`matcha_ecs::input::PointerCapture`), which is what makes
-//! a drag keep working once the cursor leaves the track — the same mechanism
-//! that fixed the scrollbar thumb. Painting is three [`paint_box`] calls, so a
-//! rounded track and a round knob cost nothing this crate did not already have.
+//! drag continue after the cursor leaves the track. [`paint_box`] draws the
+//! track, fill, knob and optional focus ring using shared shape definitions.
 //! Keyboard support is `KeyDispatch` on a `FocusPolicy::Normal` entity, so
 //! arrows work as soon as it is tabbed to.
 //!
 //! # Not supported
 //!
-//! Vertical orientation (nothing wants it yet; it would be an `Axis` field and
-//! a swap in three places), tick marks, and a two-handle range. The value is a
-//! plain `f32` — a discrete slider is `step`, which *is* here.
+//! Vertical orientation, tick marks and two-handle ranges are not supported.
+//! The value is a plain `f32`; `step` configures discrete increments.
 
 use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, world::EntityWorldMut,

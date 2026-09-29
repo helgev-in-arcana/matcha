@@ -10,7 +10,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-// IDs
+// Immutable resource content identifiers.
 
 // An ID identifies immutable logical content, independently of GPU placement.
 // Relocation and eviction preserve it; reuse promises identical content.
@@ -34,15 +34,16 @@ macro_rules! content_id {
 
 content_id!(MeshId, TextureId, MaskId);
 
-// Render Interface
+// Renderer entry point and ordered scene data.
 
 /// A render call's destination is backend-defined; implementations may accept a
 /// surface attachment or an offscreen target without putting surfaces in Scene.
 ///
 /// CPU preparation callbacks complete before this call returns, but GPU work
 /// need not. A [`crate::PrepareError`] aborts submission of that frame's recorded
-/// work and publication of its new cache entries. Existing resident content is
-/// preserved. A renderer cannot undo external CPU side effects of a callback.
+/// work and publication of its new cache entries. Content from successfully
+/// submitted frames is preserved. External CPU side effects of callbacks cannot
+/// be rolled back by the renderer.
 /// `Ok(())` does not assert GPU completion or absence of errors delivered through
 /// wgpu's validation/device notification mechanism.
 pub trait Renderer {
@@ -79,7 +80,8 @@ pub struct Phase {
 /// and source-over. Opacity scales its channels, not an isolated group image.
 ///
 /// Transforms must contain finite values. For `p = transform * [x, y, z, 1]`,
-/// the projected position is `[p.x / p.w, p.y / p.w]` in Y-down viewport pixels.
+/// the projected position is `[p.x / p.w, p.y / p.w]` in Y-down logical Scene
+/// coordinates. The renderer's logical Scene extent is `[width, height]`.
 /// Homogeneous `w` is preserved for clipping and perspective interpolation;
 /// transformed `z` does not participate in depth testing or depth clipping.
 /// Clip coordinates are `[2*p.x/width-p.w, p.w-2*p.y/height, 0, p.w]`.
@@ -178,12 +180,11 @@ impl ResourcePool {
     }
 
     /// Merge definitions contributed by independent resource pools under the
-    /// immutable-content-ID contract. Descriptor or output-layout conflicts fail; closure semantic
-    /// equivalence remains the producer's responsibility, not pointer identity.
-    /// Public insert_* still rejects duplicates within one pool. This explicit
-    /// composition operation materializes one definition per ID. No source
-    /// clones/allocations occur on an existing entry.
-    /// A closure uses one Arc allocation (replacing Box), not Arc<Source> + Box.
+    /// immutable-content-ID contract. Descriptor or output-layout conflicts fail;
+    /// the producer guarantees that equal IDs generate equal contents.
+    /// This operation deduplicates matching definitions by ID, while insert_*
+    /// methods reject duplicate IDs. A matching destination entry is reused
+    /// without cloning its Source or allocating another generator.
     pub fn import(&mut self, other: &Self) -> Result<(), DuplicateResource> {
         macro_rules! check {
             ($map:ident) => {
@@ -460,8 +461,9 @@ pub type PrepareResult = Result<(), PrepareError>;
 /// wgpu exposes its texture but not its descriptor, so the provider guarantees
 /// the view dimension, aspect and declared format. `new` checks everything
 /// observable. A view does not isolate a pixel rectangle: raw render/compute
-/// commands must honor this region explicitly. Sampling helpers below clamp
-/// to texel centers inside the region; sampler ClampToEdge alone is insufficient.
+/// commands must honor this region explicitly. [`TextureRegion::uv_clamp`]
+/// limits sampling to texel centers inside the region; sampler ClampToEdge alone
+/// addresses the entire texture rather than this rectangle.
 #[derive(Debug, Clone, Copy)]
 pub struct TextureRegion<'a> {
     view: &'a wgpu::TextureView,
@@ -691,8 +693,9 @@ pub struct GpuPrepareContext<'a> {
     pub render_pass_cache: &'a mut RegionRenderPassCache,
 }
 
-/// Pass handle returned by the region helper. Keep helper-dependent code using
-/// this name so a future checked wrapper need not change its construction API.
+/// Render pass returned by [`TextureRegion::begin_render_pass`]. This alias
+/// exposes wgpu's pass methods; callers must preserve the region's viewport and
+/// scissor when limiting writes to that region.
 pub type RegionRenderPass<'a> = wgpu::RenderPass<'a>;
 
 /// One colour attachment with automatic region viewport/scissor. Partial
@@ -1067,7 +1070,7 @@ fn texture_upload_layout(
     }
     // Vec allocations cannot exceed isize::MAX even on a 64-bit host. Check
     // before narrowing to usize; padded rows can overflow a 32-bit allocation
-    // even when the original tightly packed byte slice fits that address space.
+    // even when the tightly packed input byte slice fits that address space.
     let staging_size = usize::try_from(staging_size)
         .ok()
         .filter(|size| *size <= isize::MAX as usize)
@@ -1251,7 +1254,7 @@ mod tests {
         let padding = TextureDescriptor::new([u32::MAX, 1], wgpu::TextureFormat::R8Unorm);
         assert!(texture_upload_layout(&padding, 0, u64::MAX).is_err());
         let tiny = TextureDescriptor::new([1, 2], wgpu::TextureFormat::R8Unorm);
-        // Two source bytes still require two 256-byte staging rows.
+        // Two one-byte source rows require two 256-byte staging rows.
         assert!(texture_upload_layout(&tiny, 2, 511).is_err());
         assert!(texture_upload_layout(&tiny, 2, 512).is_ok());
     }

@@ -1,6 +1,6 @@
-//! Provider-owned logical decoration output. No Scene, RenderNode, GPU atlas
-//! allocation or Queue is cached here. Clears and overwrites stay within the
-//! assigned output region and cannot erase neighboring widget images.
+//! Provider-owned logical decoration sources. The final renderer owns GPU
+//! placement and submission. Clears and overwrites stay within the assigned
+//! output region and preserve neighboring widget images.
 //!
 //! Natural buffers follow the union of their styles' required regions. Clipped
 //! widget decorations intersect that union with the widget's allocation explicitly.

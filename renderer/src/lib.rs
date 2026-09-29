@@ -1,7 +1,4 @@
-//! Rendering primitives and CoreRenderer retained for standalone use.
-//!
-//! No other workspace crate depends on this crate. Current tree/ECS rendering
-//! uses `plain-renderer`; these implementations remain available without a feature gate.
+//! Render-node composition, GPU pipeline caching, and widget drawing primitives.
 
 pub mod core_renderer;
 pub use core_renderer::{CoreRenderer, FlatItem, MaskNode};

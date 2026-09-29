@@ -1,16 +1,16 @@
 //! `UiEcs`: the ECS-backed [`Application`] driver.
 //!
-//! Owns the ECS `World` and the frame schedules (no async runtime of its own —
-//! T-1 removed the `tokio` dependency; GPU init blocks via
-//! `futures::executor::block_on` and the `bevy_tasks` pools are initialised
-//! explicitly up front). A single window is created as the UI root on `resumed`,
-//! and rendering runs synchronously on the main thread. From M2 on, the model
-//! lives in the world as a resource and [`ModelHandle::update`] calls queue
-//! mutations that are drained and re-viewed on `ui_command`. From M5 on,
-//! `device_event` resolves a pointer press through [`crate::pick`] and applies
-//! the matched `Msg` to the model via a user-supplied `reducer`, reusing the
-//! same Phase B (re-view) + redraw path as the model queue; keyboard and IME
-//! events go to the focus path instead (see [`crate::keyboard`]).
+//! Owns the ECS `World`, model and frame schedules. GPU initialization blocks via
+//! `futures::executor::block_on`; background work uses explicitly initialized
+//! `bevy_tasks` pools. A single window is created as the UI root on `resumed`.
+//! The main thread performs layout and extraction; the default render driver
+//! records GPU commands and presents on a worker thread.
+//!
+//! [`ModelHandle::update`] queues model mutations, applied on `ui_command`
+//! before rebuilding the view. Pointer presses resolve through [`crate::pick`]
+//! and send matching messages through the reducer. Both paths rebuild the view
+//! and request a redraw. Keyboard and IME events follow the focus path through
+//! [`crate::keyboard`].
 
 use std::sync::{Arc, OnceLock, atomic::AtomicBool, mpsc};
 
@@ -101,7 +101,7 @@ pub enum UiCommand {
 
 /// The ECS application driver, parameterised over the model type `M`, the
 /// click-message type `Msg`, the view function `F`, and the reducer `R` that
-/// applies a dispatched `Msg` to the model (`ECS_IMPLEMENTATION_PLAN.md` §6.2).
+/// applies a dispatched `Msg` to the model.
 pub struct UiEcs<M, Msg, F, R>
 where
     M: Send + Sync + 'static,
@@ -113,10 +113,9 @@ where
     view_fn: F,
     reducer: R,
 
-    /// Phase A + B hook (model drain, re-run view). Empty for now; a future
-    /// milestone may add systems here that must run before the drain.
+    /// Schedule run before queued model mutations are drained. Empty by default.
     model_update_schedule: Schedule,
-    /// Phase C (animation, layout, flush, extract).
+    /// Per-frame schedule for animation, layout and extraction preparation.
     render_schedule: Schedule,
 
     /// Receiver half of the model mutation queue. `mpsc::Receiver` is not
@@ -156,9 +155,8 @@ where
     /// [`Self::new`] with an explicit GPU descriptor. Headless tests pass
     /// [`GpuDescriptor::noop`] to run the full driver without any GPU.
     pub fn new_with_gpu(model: M, view_fn: F, reducer: R, gpu_desc: GpuDescriptor) -> Self {
-        // First-wins statics (T-1): initialise explicitly before any bevy_ecs
-        // system (e.g. a future `par_iter`) has a chance to lazily default-init
-        // `ComputeTaskPool` to an all-cores pool of its own choosing.
+        // The task pools initialize once process-wide. Set their sizes before
+        // an ECS system can trigger lazy initialization with default settings.
         ComputeTaskPool::get_or_init(|| {
             TaskPoolBuilder::new()
                 .num_threads(2)
@@ -308,8 +306,7 @@ where
         self.world.resource::<ModelHandle<M>>().clone()
     }
 
-    /// Phase A (drain queued mutations into the model) + Phase B (re-run the
-    /// view against the updated model) + request a redraw on every window.
+    /// Drain queued mutations into the model, rebuild the view and request redraw.
     fn process_model_update(&mut self) {
         self.model_update_schedule.run(&mut self.world);
 
@@ -326,7 +323,7 @@ where
         self.rerun_view_and_redraw();
     }
 
-    /// Phase B (re-run the view against the current model) + request a
+    /// Rebuild the view against the current model and request a
     /// redraw on every window. Shared by [`Self::process_model_update`] (model
     /// queue drain) and [`Self::dispatch_click`] (click -> reducer).
     fn rerun_view_and_redraw(&mut self) {
@@ -443,7 +440,7 @@ where
     R: Fn(&mut M, Msg) + Send + Sync + 'static,
 {
     /// Build a [`RenderSnapshot`] for `window_id`: acquire the surface texture,
-    /// extract the drawable items, and clone the GPU resources. Returns `None`
+    /// extract the drawable items, and share the locked renderer state. Returns `None`
     /// if the frame should be skipped (wrong window, no GPU/root, or the
     /// surface has no texture to give this frame).
     fn build_snapshot(&mut self, window_id: WindowId) -> Option<RenderSnapshot> {
@@ -687,8 +684,7 @@ where
 
                 // Render synchronously instead of just requesting a redraw, so
                 // the resized frame is presented before this handler returns.
-                // Blocks the event loop (all windows) for one frame; accepted
-                // tradeoff for now.
+                // This blocks the event loop until the resized frame is presented.
                 self.render_sync(window_id);
             }
             _ => {}
@@ -696,7 +692,7 @@ where
     }
 
     fn window_destroyed(&mut self, _event_loop: &impl EventLoop, _window_id: WindowId) {
-        // Per-window resource teardown is not needed for the single window M1/M2 support.
+        // Renderer and world resources live with this single-window application.
     }
 
     fn device_event(

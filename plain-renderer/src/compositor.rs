@@ -47,7 +47,7 @@ impl<'a> From<TextureRegion<'a>> for ImageRef<'a> {
         let [scale_x, scale_y, bias_x, bias_y] = region.uv_scale_bias();
         Self {
             view: region.view(),
-            // The compositor's existing atlas sampler clamps this rectangle to
+            // The compositor's atlas sampler clamps this rectangle to
             // texel centers, so initial images cannot sample adjacent regions.
             uv: [bias_x, bias_y, scale_x, scale_y],
         }

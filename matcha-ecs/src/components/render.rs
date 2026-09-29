@@ -54,10 +54,9 @@ pub struct RenderCtx {
 
 /// A widget's current opacity, `0.0` (invisible) to `1.0` (fully visible).
 ///
-/// One of the two components the extract stage reads off a drawable entity
-/// (the other being `GlobalTransform`). The core only ever *reads* it: whoever
-/// wants to animate opacity writes it from a registered PreLayout system. An
-/// entity without this component renders at full opacity.
+/// Extraction reads this value alongside the drawable entity's placement and
+/// interaction state. Opacity animations can write it from a registered
+/// PreLayout system. An entity without this component renders at full opacity.
 ///
 /// Applied at draw time, so changing it costs nothing beyond a redraw — a fade
 /// does not re-rasterise anything, and a builder never sees it.

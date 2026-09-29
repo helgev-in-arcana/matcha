@@ -1,11 +1,6 @@
-//! Headless verification of `Text` (M6): layout/wrap behaviour via
-//! `layout_root` and `RenderItem` revision-on-patch, in the same
-//! style as `tests/layout.rs`/`tests/render_item_reuse.rs`. No GPU/window is
-//! needed for any of these — like `tests/extract.rs`, `RenderItem::builder`
-//! is never invoked, only its draw revision is asserted. Actual
-//! glyph source preparation (`FontCtx::glyph_source`) needs a real
-//! `wgpu::Device` and is therefore left to manual/demo verification, matching
-//! the rest of this test suite's established GPU-free approach.
+//! Headless verification of Text layout, wrapping and RenderItem revisions
+//! after property changes. `layout_root` runs layout; draw writers and GPU
+//! resource generators are not invoked.
 
 use bevy_ecs::{entity::Entity, world::World};
 

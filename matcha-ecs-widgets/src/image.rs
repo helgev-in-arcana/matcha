@@ -1,5 +1,5 @@
 //! `Image` — a fixed-size leaf widget displaying a decoded raster image,
-//! fit within its box preserving aspect ratio (CSS `object-fit: contain`).
+//! fitted within its box according to [`ObjectFit`].
 //!
 //! `(w, h)` are mandatory constructor arguments, not an optional `.size()`
 //! with a natural-size default — deliberately, so `measure()` never needs
@@ -8,21 +8,15 @@
 //! `RectGeometry`/`LayoutDispatch::of::<RectGeometry>()` verbatim, same as
 //! `ColorRect`/`Checkbox`.
 //!
-//! Decode+resize happens synchronously inside the `RenderItem`
-//! builder (matching `Text`'s existing "shape on first render-item build, no
-//! async" precedent) but is cached by `(source identity, display size)` in a
-//! lazily-inserted `ImageCtx` resource — mirroring `Text`'s `FontCtx`
-//! stencil cache. This matters because `matcha-ecs/src/systems.rs`'s
-//! `invalidate_on_layout_change` invalidates *every* `RenderItem` on any
-//! `LayoutOutput` change, including a pure reposition with unchanged size;
-//! without this cache, any reflow near an `Image` would force a full
-//! re-decode. The cached result is a native TextureSource owning decoded pixels; it
-//! records a lazy upload and the renderer owns its GPU lifetime.
+//! Decode and resize run synchronously inside the `RenderItem` writer. The
+//! writer retains decoded pixels, and `ImageCtx` shares fitted TextureSource
+//! definitions by source identity, display size and fit mode. Moving an image
+//! therefore reuses its definition. The source records a lazy upload when the
+//! renderer needs its content; the renderer owns GPU residency.
 //! Fitting before upload also avoids retaining unnecessarily large textures.
 //!
-//! Object-fit: v1 supports exactly `contain` — this is
-//! `image::DynamicImage::resize`'s documented behaviour verbatim, so no
-//! custom fit math is needed. `fill`/`cover` are not implemented.
+//! Fit modes are `contain`, `fill`, `cover` and `scale-down`, implemented with
+//! the `image` crate's resize operations.
 //!
 //! **`ImageSource::Bytes`'s cache/change-detection identity is the `Arc<[u8]>`'s
 //! pointer, not its byte content** (`ImageSource`'s `PartialEq` uses
@@ -37,10 +31,8 @@
 //! decode cache *and* `patch`'s change-detection on every single re-render,
 //! not just real content changes.
 //!
-//! Async decode (e.g. via `matcha_ecs::task::spawn_task`) is explicitly
-//! deferred: reporting completion back into the ECS world needs the *app's*
-//! own `ModelHandle::update`/`Msg` routing, a bigger cross-cutting design
-//! than this widget alone.
+//! Decode is synchronous. Applications loading images asynchronously can
+//! publish the resulting encoded bytes through their model update path.
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
@@ -165,11 +157,9 @@ impl ObjectFit {
     }
 }
 
-/// World resource caching decoded-and-fitted images by `(source, display
-/// size)`, keyed via [`ImageCacheKey`]. Lazily inserted on first use, exactly
-/// like `text.rs`'s `FontCtx`. Unbounded, same accepted tradeoff as
-/// `FontCtx`'s glyph stencil cache — fine for v1, revisit only if a real app
-/// displays many distinct large images over a long session.
+/// World resource sharing fitted image definitions via [`ImageCacheKey`].
+/// Entries for byte inputs expire with their input owner; path entries have no
+/// capacity limit. Dead byte inputs are reclaimed on a cache miss.
 #[derive(Resource, Clone)]
 struct ImageCtx(Arc<Mutex<HashMap<ImageCacheKey, CachedImage, fxhash::FxBuildHasher>>>);
 
@@ -231,8 +221,8 @@ fn decode(source: &ImageSource) -> Option<image::DynamicImage> {
 
 /// Build a `RenderItem` fitting `source` within the layout-allocated box
 /// (`ctx.size` — which a parent layout may have stretched beyond the declared
-/// `w`×`h`; CSS `object-fit: contain`), decoding/resizing/uploading at most
-/// once per distinct `(source, box size)` pair via `image_ctx`.
+/// `w`×`h`). Decoding is retained by the writer; fitted definitions are shared
+/// by `(source, box size, fit)`. GPU uploads run when residency is missing.
 fn image_render_item(image_ctx: ImageCtx, source: ImageSource, fit: ObjectFit) -> RenderItem {
     // Retain decoding independently of fitted texture definitions. Failed input
     // is remembered for this writer too, avoiding repeated IO/errors each frame.
@@ -429,9 +419,8 @@ impl Widget for Image {
     }
 
     fn bundle(&self) -> impl Bundle {
-        // Unlike `ColorRect`, the `RenderItem` can't be built here: `ImageCtx`
-        // is a world resource and `bundle()` has no world access. Built in
-        // `after_spawn` instead, mirroring `Text`/`Button`.
+        // `after_spawn` builds the RenderItem because it can access ImageCtx
+        // in the world; bundle() only supplies the entity's initial components.
         (
             ImageContent(self.source.clone()),
             ImageFit(self.fit),

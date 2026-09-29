@@ -19,9 +19,9 @@ mod private_3d;
 #[allow(dead_code)] // Shared fixtures include constructors used only by other examples/tests.
 mod sources;
 
-// Multiple adapter/device creations in parallel have caused native driver
-// flakes on development machines. Keep GPU proofs serial even under cargo's
-// default test runner; independent CPU unit tests remain parallel.
+// Serialize this module's GPU tests to avoid native driver instability from
+// concurrent adapter and device creation. Independent CPU unit tests remain
+// parallel under cargo's default test runner.
 fn gpu_test_lock() -> MutexGuard<'static, ()> {
     static GPU_TEST_LOCK: Mutex<()> = Mutex::new(());
     GPU_TEST_LOCK
@@ -888,9 +888,9 @@ fn diagnostic_snapshot_content_identity_must_be_updated_by_the_caller() {
 
 #[test]
 fn diagnostic_gpu_validation_at_finish_does_not_wait_for_execution() {
-    // Native wgpu 29 records this copy first, then validates its formats at finish.
-    // Observe the handler synchronously: a Future-returning scope API alone would
-    // not tell us when validation happened. No queue submission/poll is needed.
+    // Native wgpu 29 validates the copy formats at CommandEncoder::finish.
+    // The uncaptured-error handler records synchronous validation without queue
+    // submission or polling; awaiting an error scope cannot establish that timing.
     let _serial = gpu_test_lock();
     let gpu = futures::executor::block_on(Gpu::new(gpu_descriptor())).expect("real GPU");
     let (device, _queue) = gpu.context().expect("GPU");
@@ -1187,9 +1187,8 @@ fn diagnostic_pixel_art_needs_extra_geometry_with_the_fixed_linear_sampler() {
         boundary[0] > 100 && boundary[2] > 100,
         "linear interpolation blends the two texels"
     );
-    // Existing ABI can express nearest-looking pixels using constant UV per
-    // texel quad, but that scales to six vertices per texel instead of a sampler
-    // choice. This is an explicit design-feedback experiment, not a new policy.
+    // With the fixed linear sampler, UVs fixed at each texel center preserve
+    // discrete texel colors on each quad at a cost of six vertices per texel.
     let mesh = scene
         .resources
         .insert_mesh(MeshSource::new(

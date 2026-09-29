@@ -1,40 +1,31 @@
 //! The CSS box decoration model: background, border, corner radius, shadow —
 //! one description and one painter, shared by every widget that draws a box.
 //!
-//! Before this, `Panel`, `Button`, `Checkbox` and `TextBox` each open-coded the
-//! same "border-coloured box with an inset fill on top" trick against
-//! `solid_rect_node`, and the scrollbar had a rounded-rect path of its own that
-//! none of them could reach. [`paint_box`] replaces all of it, and adds the
-//! decorations none of them could express.
+//! [`paint_box`] emits the decoration used by `Panel`, `Button`, `Checkbox`,
+//! `TextBox` and scrollbar widgets in a consistent back-to-front order.
 //!
 //! # How each layer is drawn, and why it differs
 //!
 //! Everything paints a 1x1 tint texel stretched over a quad ([`ShapeCtx::tint_source`]);
 //! what changes is the mask over it.
 //!
-//! - **Square, unbordered background** — no mask at all. This is the common
-//!   case and it costs *nothing*: no rasterisation, no per-size atlas region.
-//!   (The `solid_rect_node` it replaces allocated a full-size region and ran a
-//!   render pass to fill it with one colour.)
+//! - **Square, unbordered background** — one shared colour texel, with no mask
+//!   or per-size coverage image.
 //! - **Square border** — up to four plain quads, one per side. A coverage
-//!   bitmap would work, but a 220x180 ring costs a 39 KB upload to say
-//!   something four quads say exactly.
+//!   image would require per-size generation and storage for geometry that
+//!   four quads represent exactly.
 //! - **Anything rounded, and every shadow** — a GPU-generated MaskSource, cached by
-//!   shape alone, referenced by native Scene PixelMasks. See
+//!   shape alone, referenced by Scene PixelMasks. See
 //!   [`crate::shape`] for why coverage rather than an RGBA image.
 //!
-//! So a widget only pays for a rasterisation when it actually asks for a curve
-//! or a shadow. Corollary worth keeping in mind: `radius` is not free the way
-//! the other properties are.
+//! Curves and shadows require a coverage image for each distinct shape;
+//! changing a colour reuses that coverage.
 //!
 //! # Deliberately not supported
 //!
-//! Per-*side* border colours (four separate rings; rare enough not to earn the
-//! API), `inset` shadows, multiple shadows, gradients and background images
-//! (each needs a painted region rather than a 1x1 tint, which would defeat the
-//! colour-independent coverage cache — a real addition, not an oversight), and
-//! `background-clip`/`background-origin` (the background always fills the
-//! border box, CSS's default).
+//! Per-side border colours, `inset` shadows, multiple shadows, gradients and
+//! background images are not exposed by this model. The background fills the
+//! border box; `background-clip` and `background-origin` are not configurable.
 
 use matcha_ecs::scene::Draw;
 use nalgebra::{Matrix4, Vector3};
@@ -362,7 +353,7 @@ fn border_node(
     ))
 }
 
-/// The shadow, as `(node, offset)`.
+/// The shadow quad and its placement offset.
 ///
 /// Rasterised larger than the box by the spread plus room for the blur to fade
 /// out in, then drawn shifted back by that margin so the shape stays centred on

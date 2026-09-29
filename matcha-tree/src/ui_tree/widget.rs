@@ -16,7 +16,7 @@ use matcha_window::event::device_event::DeviceEvent;
 
 /// Represents an error that can occur when updating a `Widget` tree.
 pub enum WidgetUpdateError {
-    /// Occurs when the type of the new `Dom` node does not match the existing `Widget`.
+    /// The supplied View type differs from the existing Widget's associated View.
     TypeMismatch,
 }
 

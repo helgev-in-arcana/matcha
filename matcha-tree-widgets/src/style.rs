@@ -4,7 +4,7 @@ pub mod image;
 pub mod polygon;
 pub mod solid_box;
 pub mod viewport_clear;
-// Existing disabled text modules remain outside this migration.
+// Text styles are disabled because suzuri requires an incompatible wgpu version.
 use matcha_tree::ui_tree::{
     context::UiContext,
     metrics::{Constraints, QRect},
@@ -21,8 +21,8 @@ pub struct PreparedStyle {
     output_layout: PrepareOutputLayout,
 }
 impl PreparedStyle {
-    /// Custom painters initially require a whole logical texture. Opt into
-    /// `AnyRegion` only after using region-relative upload/render operations.
+    /// Custom painters require a whole logical texture by default. Painters that
+    /// honor the assigned region may opt into `AnyRegion`.
     pub fn new(
         paint: impl for<'a> Fn(TexturePrepareContext<'a>) -> PrepareResult + Send + Sync + 'static,
     ) -> Self {

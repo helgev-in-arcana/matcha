@@ -20,7 +20,7 @@ resolver = "3"
 version = "0.0.6"
 
 [workspace.dependencies]
-# self
+# Local workspace crates.
 render-interface = { path = "render-interface" }
 plain-renderer = { path = "plain-renderer" }
 matcha = { path = "matcha" }
@@ -50,8 +50,7 @@ parking_lot = { version = "0.12.3" }
 
 # window
 winit = "0.30"
-# The W3C UI Events keyboard vocabulary. Not a windowing library: enums only,
-# bitflags its sole dependency. Both backends already speak it.
+# W3C UI Events key names shared by the window event APIs.
 keyboard-types = "0.8"
 baseview = { git = "https://github.com/RustAudio/baseview.git" }
 
@@ -69,11 +68,7 @@ nalgebra = { version = "0.34", features = ["bytemuck"] }
 # image
 image = "0.25"
 
-# font
-# Disabled: crates.io suzuri 0.2.1 pins wgpu ^27, blocking the workspace's wgpu 29
-# upgrade. Only the legacy matcha-tree stack used this (with the `wgpu` feature);
-# matcha-ecs-widgets uses the sibling path dependency (CPU shaping only, no wgpu).
-# suzuri = { version = "0.2.1", features = ["wgpu"] }
+# Font shaping and glyph rasterization.
 parley = { version = "0.11.0", features = ["complex-scripts"] }
 swash = "0.2.6"
 
@@ -86,7 +81,6 @@ dashmap = "6.1"
 smallvec = "1.14"
 
 # cache
-# lru = "0.14.0"
 moka = { version = "0.12", features = ["sync"] }
 
 # error handling
@@ -107,10 +101,6 @@ console_error_panic_hook = "0.1"
 # in its build.rs via `cfg_aliases::cfg_aliases!`. The alias expansion is
 # kept in sync with the `[target.'cfg(...)']` sections in each Cargo.toml.
 cfg_aliases = "0.2"
-
-# interpolation crate
-# todo: maybe useful.
-# interpolation = "0.3.0"
 
 
 [workspace.lints.clippy]

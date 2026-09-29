@@ -1,4 +1,4 @@
-//! Reproducible visual PoC: `cargo run -p plain-renderer --example scene_gallery -- target`.
+//! Reproducible visual gallery: `cargo run -p plain-renderer --example scene_gallery -- target`.
 //! All images come from the public Scene API on a real GPU, not CPU mockups.
 //! Set `MATCHA_TEST_BACKEND=vulkan` or `dx12` to compare native backends.
 #[path = "support/effects.rs"]

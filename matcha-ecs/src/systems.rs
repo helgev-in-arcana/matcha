@@ -6,15 +6,12 @@ use crate::components::{layout::LayoutOutput, render::RenderItem};
 
 /// Advance the draw revision of every entity whose [`LayoutOutput`] changed
 /// this frame (new placement/size), so observers see a new draw-property revision.
-/// Registered in `MatchaSet::PreExtract`, after layout and before extract
-/// (`ECS_ARCHITECTURE.md` §8.5).
+/// Registered in `MatchaSet::PreExtract`, after layout and before extraction.
 pub fn invalidate_on_layout_change(mut query: Query<&mut RenderItem, Changed<LayoutOutput>>) {
     for mut item in query.iter_mut() {
         item.invalidate();
     }
 }
 
-// A companion `invalidate_on_opacity_change` used to live here. It is gone:
-// opacity is now applied per instance at draw time, so a fade no longer
-// invalidates anything and an animating widget is not re-rasterised every
-// frame.
+// Opacity is extracted and applied to each Object at draw time. Its changes
+// require a redraw, but no draw-revision invalidation or resource regeneration.

@@ -2,7 +2,8 @@
 //!
 //! A framework owns [`Frame`], calls [`Frame::begin`], invokes its producers with
 //! borrowed [`Draw`] writers, and calls [`Frame::finish`] before rendering. A writer
-//! emits Objects directly; it stores no child tree, local Scene or phase numbers.
+//! appends Objects to that Frame's Scene in call order, carrying its transform,
+//! mask and opacity scope without storing a UI hierarchy.
 //! [`Draw::backdrop`] starts a phase at its paint position so newly referenced
 //! sources see all preceding paint, including earlier producers. Sources retain
 //! the interface's immutable-content and first-reference rules: reusing an ID does
@@ -35,7 +36,7 @@
 //!         texture, [80.0, 40.0], Matrix4::identity(), None,
 //!     );
 //!     frame.finish()?;
-//!     Ok(frame) // The renderer can now borrow frame.scene.
+//!     Ok(frame) // The completed Scene is available as frame.scene.
 //! }
 //! ```
 use crate::interface::*;
@@ -151,8 +152,9 @@ impl Frame {
     }
 }
 
-/// A borrowed writer into the framework's final frame; no local Scene or phase API.
-/// Coordinates are widget-local. Scopes compose transforms and inherit clip/opacity.
+/// A borrowed writer into a framework-owned Frame. Coordinates are widget-local;
+/// scopes compose transforms and inherit clip/opacity. Phase boundaries are
+/// shared by every writer borrowing that Frame.
 pub struct Draw<'a> {
     frame: &'a mut Frame,
     transform: Matrix4<f32>,
@@ -161,7 +163,7 @@ pub struct Draw<'a> {
 }
 
 impl Draw<'_> {
-    /// Resolved local-to-viewport placement, including nested transformed scopes.
+    /// Resolved local-to-Scene placement, including nested transformed scopes.
     /// Backdrop generators capture this when mapping local pixels to the snapshot.
     pub fn transform(&self) -> Matrix4<f32> {
         self.transform
@@ -194,7 +196,8 @@ impl Draw<'_> {
         source.id()
     }
 
-    /// Emit an ordinary object using local geometry and scope opacity.
+    /// Append an Object to the active phase, composing its local placement and
+    /// opacity with this writer's scope.
     ///
     /// `None` inherits this writer's mask. An explicit mask index must belong to
     /// this frame and its ancestor chain must contain the inherited mask, if any.
@@ -255,8 +258,8 @@ impl Draw<'_> {
 
     /// Reborrow a child writer with composed local placement. Its lifetime is
     /// bounded by this borrow, so the parent becomes usable again after the
-    /// child's last use. Parent scope values are never modified; no restoration
-    /// or child Scene is needed. Objects and phase boundaries share this Frame.
+    /// child's last use. The child stores its own scope values and appends Objects
+    /// and phase boundaries to the shared Frame, leaving the parent scope intact.
     ///
     /// ```
     /// use render_interface::{Frame, Matrix4};
@@ -278,8 +281,10 @@ impl Draw<'_> {
         }
     }
 
-    /// Scope an arbitrary mesh/coverage mask. Only coverage inherits; geometry
-    /// stays in local coordinates and is resolved once when the mask is emitted.
+    /// Add a mesh/coverage mask to the inherited chain for the supplied closure.
+    /// `transform` places the mask in this writer's local coordinates; the child
+    /// keeps the writer's coordinate system. Mask transforms are stored as
+    /// absolute Scene transforms, while ancestor coverage is multiplied.
     pub fn masked(
         &mut self,
         mesh: &MeshSource,
@@ -462,8 +467,8 @@ mod tests {
             draw.mask(&outer);
             draw.mask(&inner);
         }
-        // Framework-owned registries can contribute definitions directly. No
-        // parallel builder bookkeeping is needed, even for an undrawn source.
+        // Direct ResourcePool registrations must survive finish even when no
+        // Object references them; they express the caller's retention intent.
         frame
             .scene
             .resources

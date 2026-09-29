@@ -31,10 +31,11 @@ impl<T: Any + utils::MaybeSend> AnyMessage for T {
 
 pub(super) type BoxedMessage = Box<dyn AnyMessage>;
 
-/// Type-erased sender for messages from Component background tasks back to TreeApp.
+/// Type-erased sender for messages from Component background tasks to UiTree.
 ///
 /// Clone-able; each clone sends to the same channel. Use `emit()` to post a
-/// message that TreeApp will downcast to `C::Message` in `buffer_updated()`.
+/// message that the application bridge downcasts to `C::Message` and forwards
+/// to the component's `update()` method.
 #[derive(Clone)]
 pub struct EventSender {
     sender: tokio::sync::mpsc::UnboundedSender<BoxedMessage>,
@@ -88,7 +89,7 @@ impl<'a> AppContext<'a> {
     }
 
     /// Returns a clone of the type-erased event sender.
-    /// Use `sender.emit(your_message)` in spawned tasks to wake up TreeApp.
+    /// Use `sender.emit(your_message)` in spawned tasks to wake up UiTree.
     pub fn event_sender(&self) -> EventSender {
         self.event_sender.clone()
     }
@@ -125,7 +126,7 @@ pub(super) struct SharedCtx<'a> {
 // WindowCtx
 // ----------------------------------------------------------------------------
 
-/// Per-window context set by [`WindowWidgetInstance::map_ui_context`].
+/// Per-window values supplied while measuring, drawing or dispatching input.
 ///
 /// Stored as `Option<WindowCtx>` inside [`UiContext`]; `None` outside a window pass.
 #[derive(Clone)]
@@ -142,9 +143,9 @@ pub(super) struct WindowCtx {
 
 /// Context passed to all Component and Widget methods.
 ///
-/// Internally holds a reference to [`SharedCtx`] (stable GPU + registry resources)
-/// plus a small optional [`WindowCtx`] for per-window values (DPI, format, config).
-/// The struct itself stays small regardless of how many resources are added to `SharedCtx`.
+/// Borrows shared GPU and registry resources, plus optional per-window values
+/// such as DPI, texture format and configuration. Resource storage lives outside
+/// this handle, keeping copies small as the shared resource set grows.
 #[derive(Copy)]
 pub struct UiContext<'a> {
     pub(super) event_loop: Option<&'a dyn EventLoop>,

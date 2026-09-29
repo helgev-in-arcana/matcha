@@ -1,21 +1,16 @@
-//! `RichText` — a parley-backed word-wrapped text leaf widget, developed
-//! alongside (not replacing) [`crate::Text`] (suzuri-backed).
+//! `RichText` — a parley-backed word-wrapped text leaf widget.
 //!
 //! `Text` uses suzuri (fontdb + fontdue): no real shaping (kerning only) and
 //! no font fallback, so mixed-script or ligature-heavy text can render
 //! incorrectly. `RichText` shapes via parley (HarfRust shaping + fontique
-//! font fallback) and rasterises glyphs via swash, but reuses the exact same
-//! native Scene contract as Text: shared GPU colour generators and glyph
-//! MaskSources. Swash produces bitmap bounds and pixels together; its pixels
-//! are retained inside the source closure for regeneration, without a Bitmap
-//! wrapper. Scene Objects/PixelMasks reference those definitions directly.
+//! font fallback) and rasterises glyphs via swash. Scene Objects and PixelMasks
+//! reference shared colour TextureSources and glyph MaskSources. Swash produces
+//! bounds and pixels together; the source retains pixels for GPU regeneration.
 //! Writers retain only glyph definitions used by their current layout, in
 //! addition to the shared bounded LRU. A visible layout larger than that LRU
 //! remains complete and keeps stable IDs on subsequent redraws.
 //!
-//! **CSS text-property coverage (added in a later pass, see `CLAUDE.md`'s
-//! dated entry for the full design writeup)**: `RichText` now reproduces most
-//! of CSS's text-styling surface that parley 0.11.0 can express, including
+//! CSS-style text properties include
 //! per-span (per-substring) style overrides via [`RichText::span`]/[`RichSpan`]
 //! — font-family (+ fallback lists), font-size, font-weight, font-style,
 //! font-stretch/width, font-variation-settings, font-feature-settings,
@@ -26,22 +21,15 @@
 //! widget-level only), and real underline/strikethrough rendering (colour,
 //! offset, thickness, all span-overridable).
 //!
-//! **Deliberately unsupported — not "not yet implemented", but not
-//! achievable without forking or wrapping parley 0.11.0** (do not file
-//! against this widget expecting these are just unwired): CSS `text-overflow`
+//! The widget does not expose CSS `text-overflow`
 //! (ellipsis), `tab-size`, `vertical-align`, `text-shadow`, `overline`
 //! decoration, forced `direction`/`unicode-bidi` override (bidi is fully
 //! automatic), and vertical writing-mode/`text-orientation` (horizontal only).
 //!
-//! Still deferred, but *technically* approachable in a future pass (unlike
-//! the list above): parley's synthetic bold/oblique font synthesis when no
-//! true bold/italic face exists in the fallback chain (would need a
-//! `GlyphKey` field to avoid a same-key-different-bitmap collision — see
-//! `GlyphKey`'s doc comment), colour glyphs (emoji — rasterisation only
-//! accepts `Content::Mask`, alpha coverage), sub-pixel glyph positioning
-//! (layout is quantized to whole pixels instead), and sharing shape results
-//! between layout and painting. The draw writer already caches its most recent
-//! shaped layout by wrap width; layout measurement shapes independently.
+//! Glyph rasterisation accepts alpha coverage (`Content::Mask`) only, so colour
+//! glyphs are skipped. Synthetic bold/oblique is not applied, and placement is
+//! quantized to whole pixels. The writer caches its most recent shaped layout
+//! by wrap width; layout measurement shapes independently.
 
 use std::{num::NonZeroUsize, ops::Range, sync::Arc, time::Duration};
 
@@ -415,9 +403,8 @@ struct RichTextStyle {
 
 /// Shares the most recently resolved wrap width between
 /// `RichTextStyle::arrange` (writer, every layout pass) and the `RenderItem`
-/// builder (reader, every rebuild). See `Text`'s identical `TextWrapWidth`
-/// for the full rationale (not shared with it directly, to keep the two
-/// widgets fully independent while both exist).
+/// writer (reader, every redraw). Each widget type owns its wrap-width cell,
+/// which survives replacement of its style and draw writer.
 #[derive(Component)]
 struct RichTextWrapWidth(Arc<LiveF32>);
 
@@ -433,10 +420,8 @@ impl RichTextWrapWidth {
 
 /// Identifies one rasterised glyph: font face + glyph index + quantized size
 /// + variation coordinates. `normalized_coords` is a variable-length slice,
-/// so it's folded into a hash rather than stored verbatim — a collision
-/// would only ever produce a cosmetically wrong glyph for variable fonts
-/// sharing a size, never a correctness issue, and is astronomically
-/// unlikely in practice.
+/// so the key stores its hash. A hash collision can reuse an incorrect glyph
+/// definition for matching font, glyph and size fields.
 ///
 /// Font-weight/style/width/features/variations differences are all already
 /// distinguished correctly by the fields below: a weight/style/width change
@@ -444,10 +429,9 @@ impl RichTextWrapWidth {
 /// `font_blob_id`/`font_index`; font-features affect which glyph id gets
 /// *chosen* during shaping, not how a given glyph id rasterises; and
 /// font-variations changes are captured by `coords_hash` (each run carries
-/// its own resolved `normalized_coords`). One real gap, deliberately not
-/// closed here: `fontique::Synthesis` (synthetic bold/oblique when the
-/// fallback chain has no true face for a requested weight/style) is never
-/// applied, specifically because doing so would need a new field here — the
+/// its own resolved `normalized_coords`). `fontique::Synthesis` (synthetic
+/// bold/oblique when the fallback chain has no true face) is not applied. Any
+/// implementation of synthesis must distinguish it in this key, since the
 /// same `font_blob_id` + `glyph_id` would otherwise need to represent two
 /// different bitmaps (plain vs. synthetically embellished) depending on
 /// which run asked for it.
@@ -549,7 +533,7 @@ impl ParleyFontCtx {
         self.0.stencil_cache.lock().new_batch();
     }
 
-    /// Look up the native MaskSource defining
+    /// Look up the MaskSource defining
     /// `key`'s coverage bitmap, plus its pixel size and its placement
     /// (offset of the bitmap's top-left corner from the pen position).
     /// Returns `None` only for genuinely invisible/unsupported glyphs. If every
@@ -611,7 +595,7 @@ fn rasterize_bitmap(
 
 /// Push every set field of `overrides` onto `builder` for `range` — the
 /// per-span counterpart to `shape()`'s widget-default `push_default` calls.
-/// `underline`/`strikethrough` overrides are not included here (RT4).
+/// Includes underline and strikethrough properties, resolved independently.
 fn push_span_overrides(
     builder: &mut parley::RangedBuilder<'_, RichTextBrush>,
     overrides: &SpanOverrides,
@@ -1375,7 +1359,7 @@ impl Widget for RichText {
 #[cfg(test)]
 mod tests {
     //! `RichTextWrapWidth` is a private implementation detail, so unlike the
-    //! public-API integration tests in `matcha-ecs/tests/rich_text.rs`, its
+    //! public-API integration tests in `tests/rich_text.rs`, its
     //! write-through from `RichTextStyle::arrange` can only be checked from
     //! inside this crate. Mirrors `text.rs`'s identical unit test.
     use bevy_ecs::world::World;

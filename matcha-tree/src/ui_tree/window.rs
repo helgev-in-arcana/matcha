@@ -19,9 +19,9 @@ use matcha_window::window::{Window as OsWindow, WindowConfig, WindowError, Windo
 
 /// Declares a window anywhere in the view tree.
 ///
-/// When built, creates a [`WindowWidgetInstance`] and registers it with
-/// [`UiContext::register_window_instance`] so that [`UiTree`](super::UiTree) can
-/// route events and rendering directly to this window.
+/// When built, creates a [`WindowWidgetInstance`] and registers it through the
+/// [`UiContext`] so that [`UiTree`](super::UiTree) can route events and rendering
+/// directly to this window.
 pub struct Window {
     pub window_id: String,
     pub config: WindowConfig,
@@ -74,7 +74,7 @@ impl Widget for WindowWidget {
         _event: &DeviceEvent,
         _ctx: &UiContext,
     ) -> WidgetInteractionResult {
-        // Input does not cross window boundaries; handled by UiArch per-window.
+        // UiTree dispatches input to the window registered for the event.
         WidgetInteractionResult::NoChange
     }
 
@@ -158,10 +158,10 @@ impl WindowWidgetInstance {
 /// Type-erased interface for [`WindowWidgetInstance`].
 ///
 /// [`UiTree`](super::UiTree) stores `Weak<Mutex<dyn AnyWindowWidgetInstance>>` in its
-/// registry keyed by [`WindowId`]. The strong [`Arc`] lives in the owning [`WindowWidget`];
-/// when the window is removed from the view tree the widget is dropped, the `Arc` count
-/// reaches zero, and `UiArch`'s `Weak` becomes dead (window is destroyed automatically
-/// via [`WindowHandle`]'s [`Drop`] impl).
+/// registry keyed by [`WindowId`]. The owning [`WindowWidget`] holds a strong
+/// [`Arc`]; removing it from the view tree releases that handle. Once all strong
+/// handles are dropped, the instance and its owned OS window are dropped and
+/// the registry's weak handle can no longer be upgraded.
 pub trait AnyWindowWidgetInstance: utils::MaybeSendSync {
     fn window_id(&self) -> WindowId;
     fn size(&self) -> [f32; 2];

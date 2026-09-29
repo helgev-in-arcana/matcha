@@ -1,4 +1,4 @@
-//! Native widget/renderer-interface stress proof. No matcha-paint adapter.
+//! Widget resource generation and renderer-interface stress checks.
 //! cargo run -p matcha-ecs --example interface_stress -- target
 //! Generates and verifies GPU box masks against the CPU oracle, then exercises
 //! retained/shared sources and per-redraw background-dependent widget writers.
@@ -209,7 +209,7 @@ fn descriptor(size: [u32; 2]) -> TextureDescriptor {
 }
 
 /// The second widget's invert must read the first widget's inverted output.
-/// Phase-index zipping would make both read red and leave cyan at x=8.
+/// The effect writers require separate ordered phases so their snapshots differ.
 fn verify_framework_order(device: &wgpu::Device, queue: &wgpu::Queue, directory: &str) {
     use matcha_ecs::{clip::ClipArena, render::RenderItemSnapshot};
     let color = |rgba: [u8; 4]| {

@@ -1,6 +1,5 @@
-//! **The** demo. One window exercising every feature `matcha-ecs` and
-//! `matcha-ecs-widgets` have, so a change can be eyeballed in one place instead
-//! of across ten programs.
+//! Interactive examples of matcha-ecs layout, input and widget rendering in one
+//! scrollable window.
 //!
 //! ```text
 //! cargo run --example showcase
@@ -561,9 +560,8 @@ fn images(s: &mut Scope) {
         // from "correct colour, lower alpha" by eye) and obvious over an
         // image, where a correct translucent glyph lets the picture through.
         //
-        // That bug shipped once and survived because nothing drew translucent
-        // text. This is the canary: if the two lines below ever stop differing
-        // in the same way, something has regressed in `widgets::color`.
+        // The opaque and translucent lines make the premultiplied-alpha
+        // behaviour visible over the same image.
         s.node(Column::new().gap(4.0), |s| {
             s.node(Panel::new(320.0, 140.0).radius(8.0).clip(true), |s| {
                 s.node(Column::new().align_items(AlignItems::Start), |s| {

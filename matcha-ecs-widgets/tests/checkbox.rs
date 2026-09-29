@@ -1,6 +1,5 @@
-//! Headless verification of `Checkbox` (Tier-1 HTML/CSS widgets batch):
-//! declarative `checked` state and `RenderItem` revision-on-patch,
-//! same GPU-free style as `tests/render_item_reuse.rs`.
+//! Headless verification of Checkbox's declarative checked state and
+//! RenderItem revisions when draw-relevant properties change.
 
 use bevy_ecs::{entity::Entity, world::World};
 

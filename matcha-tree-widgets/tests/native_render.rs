@@ -1,5 +1,5 @@
-//! Real GPU proofs through the public tree context, WidgetPod and shared builder.
-//! No OS window, legacy RenderNode, atlas bridge or GPU-less fallback is involved.
+//! GPU tests through the public tree context, WidgetPod and shared builder.
+//! Rendering uses offscreen targets on a real device without an OS window.
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::{
@@ -274,7 +274,7 @@ fn solid(color: Color, size: [f32; 2]) -> Plain {
         .style(SolidBox::new(color))
 }
 
-/// Optional visual proof output. Values are linear-premultiplied in readback;
+/// Optional images for visual inspection. Values are linear-premultiplied in readback;
 /// PNG presentation uses straight sRGB RGB with unchanged alpha. Assertions keep
 /// using the raw GPU bytes. Set MATCHA_TREE_PROOF_OUTPUT to a folder under target/.
 fn save_proof(name: &str, bytes: &[u8]) {

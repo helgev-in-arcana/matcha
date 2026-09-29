@@ -2,8 +2,8 @@
 //!
 //! Widgets use Draw from render-interface's optional `scene-builder` feature
 //! and may reuse owned immutable Sources. Each window owns its Frame and PlainRenderer;
-//! texture/mesh placement and GPU residency are private to the backend. Redraw
-//! requests do not retain a second widget-local rendering tree.
+//! texture/mesh placement and GPU residency are private to the backend. Each
+//! redraw assembles a complete Scene from the widgets' current drawing.
 
 pub mod color;
 pub mod ui_tree;

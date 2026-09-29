@@ -87,8 +87,7 @@ fn a_panel_insets_its_child_by_the_border_it_paints() {
 
 #[test]
 fn a_uniform_border_still_centres_its_child() {
-    // Regression guard for the per-side rewrite: the common case must not have
-    // shifted.
+    // Equal border widths leave the child centred in the remaining inner box.
     let (mut world, root) = setup();
     run_view(&mut world, root, |s| {
         s.node(Panel::new(100.0, 100.0).border_width(10.0), |s| {

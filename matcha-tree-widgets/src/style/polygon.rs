@@ -2,7 +2,7 @@
 //!
 //! Vertex colour is a private widget-painting feature: the common rendering ABI
 //! has position and UV only, so this painter rasterizes colour interpolation into
-//! the widget's logical texture. It retains no atlas region or legacy renderer.
+//! the widget's logical texture. The final renderer owns its GPU placement.
 use std::sync::Arc;
 
 use crate::{

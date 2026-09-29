@@ -25,7 +25,7 @@
 //! path names a text engine, so parley can be replaced here without touching
 //! `matcha-ecs` or `matcha-window`.
 //!
-//! # v1 limits
+//! # Supported editing behaviour
 //!
 //! - **Multi-line only.** The box wraps at its own width; Enter inserts a
 //!   newline by default and confirmation is bound to Ctrl+Enter — see
@@ -146,7 +146,7 @@ pub struct TextBoxStyle {
 /// The builder is a closure with no world access, so these travel through
 /// [`crate::live`] cells it holds a clone of — the same side-channel
 /// `Text`/`RichText` use for their wrap width. Written by [`default_systems`],
-/// read on every rebuild.
+/// read on every redraw.
 #[derive(Component, Clone, Default)]
 pub struct TextBoxLive {
     inner: Arc<TextBoxLiveInner>,
@@ -239,7 +239,7 @@ pub struct OnTextConfirm<Msg: Message>(pub Option<fn(&str) -> Msg>);
 #[derive(Component, Clone, Copy)]
 pub struct ConfirmKey(pub fn(&KeyInput) -> bool);
 
-/// Confirm on plain Enter. Enter no longer inserts a newline, which is what a
+/// Confirm on plain Enter. The event is consumed without inserting a newline, as a
 /// single-line-style field wants.
 pub fn confirm_on_enter(input: &KeyInput) -> bool {
     matches!(input.logical_key(), LogicalKey::Named(NamedKey::Enter))
@@ -615,9 +615,7 @@ fn handle_clipboard_key(entity: &mut EntityWorldMut, input: &KeyInput) -> Option
             Some(false)
         }
         Op::Paste => {
-            // Newlines are pasted verbatim: this widget is multi-line, so
-            // there is nothing to strip. A future single-line variant is where
-            // that decision would have to be made.
+            // This multi-line editor preserves pasted newlines verbatim.
             let Some(text) = clipboard.get_text().filter(|t| !t.is_empty()) else {
                 return Some(false);
             };
@@ -723,7 +721,7 @@ fn on_key<Msg: Message>(entity: &mut EntityWorldMut, input: &KeyInput) -> bool {
                 // the character `" "`, so it arrives in the `Character` arm
                 // below along with every other text-producing key.
                 //
-                // Left alone so a future focus-traversal binding can have it.
+                // Text editing does not consume Tab or insert a tab character.
                 NamedKey::Tab => return false,
                 _ => return false,
             },
@@ -897,7 +895,7 @@ impl Layout for TextBoxLayout {
     /// width while the box is painted at another. Same side-channel `Text` and
     /// `RichText` use to publish their wrap width from `arrange`.
     ///
-    /// A leaf otherwise: decorative children are not supported in v1.
+    /// A layout leaf: decorative children are not supported.
     fn arrange(&self, ctx: &mut LayoutCtx, me: Entity, size: [f32; 2]) {
         if let Some(live) = ctx.world().get::<TextBoxLive>(me) {
             live.set_allocated(size);
@@ -965,9 +963,8 @@ fn refresh_text_boxes(
             },
         ];
 
-        // Re-wrap if the parent gave us a different width than we last shaped
-        // at. One frame behind a resize (arrange runs after this stage), which
-        // converges immediately and matches `RichText`'s existing behaviour.
+        // Re-wrap at the last arranged width. Since arrange runs after this
+        // stage, a resized width is applied to text layout on the next frame.
         let wrap_width = (allocated[0] - inset * 2.0).max(0.0);
         if live.take_wrap_width_change(wrap_width) {
             editor.set_width(Some(wrap_width));

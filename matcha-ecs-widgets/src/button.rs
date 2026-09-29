@@ -1,24 +1,12 @@
 //! Button — a clickable leaf widget: a solid-colour rect with a centred,
 //! shaped text label, emitting an Elm-style message on click.
 //!
-//! `Message`/`OnClick<Msg>` now live in `matcha_ecs::components::input`
-//! (moved there in M5 so core hit-test dispatch can read `OnClick<Msg>`
-//! without knowing about `Button`); re-exported here for compatibility.
+//! `Message` and `OnClick<Msg>` are core input types re-exported here. Core
+//! hit-test dispatch reads `OnClick<Msg>` independently of the widget type.
 //!
-//! The label is baked directly into `Button`'s own `RenderItem` (box quad +
-//! shaped glyph quads composited into one node) rather than via a child
-//! entity: a real child slot would need a new `Layout` impl that actually
-//! arranges a child within the box (today's `RectGeometry::arrange` is a hard
-//! leaf) and would break every existing `Button::new(label)` call site's
-//! shape. Text shaping/rasterisation is reused from `crate::text` (the same
-//! `FontCtx` resource, `shape`, `solid_source`, `draw_glyph_run` helpers
-//! `Text` uses), so no shaping/stencil-cache logic is duplicated here.
-//!
-//! (A formerly-documented "known issue" here — intermittent corruption of
-//! unrelated widgets while this widget rebuilt per click — was root-caused
-//! and fixed on 2026-07-10: it was never atlas churn, but nondeterministic
-//! instance ordering in `renderer`'s culling compute shader. See
-//! `renderer/src/core_renderer/renderer_cull.wgsl` and CLAUDE.md.)
+//! The button is a layout leaf. Its `RenderItem` emits the decorated box and
+//! centred glyph quads, using `crate::text`'s `FontCtx`, shaping and glyph
+//! drawing helpers to share text resource definitions.
 
 use bevy_ecs::{
     bundle::Bundle, change_detection::DetectChangesMut, component::Component, world::EntityWorldMut,
@@ -212,8 +200,7 @@ impl<Msg: Message> Button<Msg> {
     /// Build a fresh `RenderItem` for `entity`, fetching (or lazily
     /// inserting) the shared `FontCtx` resource. Shared by `after_spawn` and
     /// `patch`, the two places a `Button` entity's `RenderItem` gets
-    /// (re)built (it needs world access for `FontCtx`, so unlike `ColorRect`
-    /// it cannot be built inside `bundle()`).
+    /// rebuilt. These hooks provide the world access needed for `FontCtx`.
     fn rebuild_render_item(&self, entity: &mut EntityWorldMut) -> RenderItem {
         let font_ctx =
             entity.world_scope(|world| world.get_resource_or_insert_with(FontCtx::new).clone());

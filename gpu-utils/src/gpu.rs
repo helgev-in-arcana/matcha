@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 /// Descriptor used to configure and create a [`Gpu`] instance.
 ///
-/// `Default` preserves the original platform-specific feature requirements.
-/// New renderers requiring only standard WebGPU features can use
-/// [`GpuDescriptor::standard`], independently of Cargo feature unification.
+/// `Default` requests the platform-specific features in `gpu_defaults`.
+/// [`GpuDescriptor::standard`] requests no optional GPU features; its feature
+/// selection is independent of Cargo feature unification.
 pub struct GpuDescriptor {
     /// Which wgpu backends to enable.
     pub backends: wgpu::Backends,
@@ -38,9 +38,9 @@ impl Default for GpuDescriptor {
 }
 
 impl GpuDescriptor {
-    /// Platform preset without optional GPU features, suitable for the Scene
-    /// renderer. Backend selection, limits and surface format match `Default`.
-    /// This does not depend on whether the atlas APIs are compiled in.
+    /// Request a device without optional GPU features. Backend selection, limits
+    /// and surface format use the platform defaults. Enabling the crate's `atlas`
+    /// feature does not change the GPU features requested by this preset.
     pub fn standard() -> Self {
         Self {
             required_features: wgpu::Features::empty(),
@@ -218,10 +218,8 @@ mod tests {
         );
     }
 
-    /// Gate for the whole headless-testing stack: `request_adapter` must find
-    /// the noop backend (it is selected via the same code path as real
-    /// backends, not `enumerate_adapters`), and the noop adapter must satisfy
-    /// the default `required_features`.
+    /// Verify that `Gpu::new` selects the noop adapter through `request_adapter`
+    /// and accepts the platform's default required features without GPU hardware.
     #[test]
     fn noop_gpu_initializes() {
         let gpu = futures::executor::block_on(Gpu::new(GpuDescriptor::noop()))

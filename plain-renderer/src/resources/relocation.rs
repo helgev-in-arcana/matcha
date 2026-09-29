@@ -2,17 +2,19 @@
 //! source callbacks. Copying logical contents changes placement, never IDs.
 //!
 //! A plan owns a fresh placement registry and replacement values; it only borrows
-//! the old residents. The caller submits the recorded copies on the same ordered
-//! Queue as earlier draws, then publishes all replacements together. New draws
-//! must follow that submission. A failed/discarded plan leaves the old store valid;
-//! discard its encoder too, since recorded commands retain GPU handles until drop.
+//! the source residents. The caller submits the recorded copies on the same
+//! ordered Queue as preceding draws, then publishes all replacements together.
+//! Draws using replacement residents must follow that submission. A failed or
+//! discarded plan leaves the source store valid; discard its encoder too, since
+//! recorded commands retain GPU handles until drop.
 //!
 //! Repacking uses descending logical sizes with ID tie-breaking rather than HashMap
-//! iteration order. This removes historical holes but is a heuristic, not a promise
-//! of fewer pages for every rectangle set. The caller decides when fragmentation
-//! merits relocation. The copy budget is checked before GPU allocation or recording.
-//! Peak statistics count old plus new managed resident capacity, not driver memory,
-//! scratch/working images, or resources retained by already submitted commands.
+//! iteration order. This repacks gaps left by released allocations but is a
+//! heuristic, not a promise of fewer pages for every rectangle set. The caller
+//! decides when fragmentation merits relocation. The copy budget is checked
+//! before GPU allocation or recording. Peak statistics count source plus
+//! replacement managed resident capacity, not driver memory, scratch/working
+//! images, or resources retained by already submitted commands.
 
 use std::{
     cmp::Reverse,
@@ -35,7 +37,7 @@ pub struct RelocationStats {
     pub meshes: usize,
     /// Logical image bytes and mesh ranges actually copied, excluding page slack.
     pub copied_bytes: u64,
-    /// Old plus replacement resident capacity while both sets coexist.
+    /// Source plus replacement resident capacity while both sets coexist.
     /// This excludes scratch/working buffers and opaque driver allocations.
     /// For a Dedicated no-op this is just the current resident capacity.
     pub peak_managed_bytes: u64,

@@ -1,4 +1,4 @@
-//! Reproducible native GPU visual verification using production extraction and
+//! Reproducible GPU visual verification using production extraction and
 //! GuiRenderer. Run `showcase --offscreen target/showcase.png` without a window.
 #[path = "allocations.rs"]
 mod allocations;

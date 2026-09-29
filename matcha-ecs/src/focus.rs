@@ -289,9 +289,9 @@ pub fn run_validate_focus(world: &mut World) {
 /// Invalidation happens *here*, rather than in a separate `Changed<Focused>`
 /// system alongside [`crate::systems::invalidate_on_layout_change`], for a
 /// specific reason: `Changed<T>` does not fire when a component is **removed**,
-/// so an entity *losing* focus would never rebuild and would keep painting its
-/// focus ring forever. This system already knows the exact set of entities that
-/// transitioned in either direction, so it does the invalidation itself.
+/// so an entity *losing* focus would otherwise miss its draw-revision update.
+/// This system knows the entities that transitioned in either direction, so
+/// it does the invalidation itself.
 ///
 /// Widgets reading focus should therefore prefer `Has<Focused>` or the
 /// [`Focus`] resource over `Changed<Focused>`, for the same reason.

@@ -1,16 +1,16 @@
 //! Render dispatch: snapshot extraction and the [`RenderDriver`] that turns a
 //! per-frame [`RenderSnapshot`] into pixels.
 //!
-//! M4 moves encode/submit/present off the main thread. The main thread runs the
-//! render schedule, acquires the window's `SurfaceTexture`, extracts a flat list
-//! of `(RenderItem, transform)` into a [`RenderSnapshot`], and hands it to a
+//! The main thread runs the render schedule, acquires the window's
+//! `SurfaceTexture`, extracts a flat list of `(RenderItem, transform)` into a
+//! [`RenderSnapshot`], and hands it to a
 //! [`RenderDriver`]. The default [`ThreadDriver`] forwards each snapshot to a
 //! per-window worker thread that invokes lightweight draw writers, calls
 //! [`PlainRenderer::render`], and presents. The `RenderItem` builders run on
 //! that worker thread, not the main thread.
 //!
-//! [`InlineDriver`] runs the same `build_and_present` synchronously; it exists to
-//! isolate regressions between "the snapshot/extract split" and "the threading".
+//! [`InlineDriver`] runs the same `build_and_present` synchronously on the caller.
+//! Both drivers share the same scene assembly and GPU recording path.
 
 use std::{collections::HashMap, sync::Arc, sync::mpsc, thread::JoinHandle};
 
@@ -34,7 +34,7 @@ use crate::{
 };
 
 /// One drawable entity captured for a frame: its revision and shared deferred
-/// builder, its window-space transform (already composed by M3 layout), the size
+/// builder, its window-space transform composed by layout, the size
 /// layout allocated to it (`LayoutOutput::size` — what the builder must draw at),
 /// its current opacity (`1.0` if the entity has no `RenderOpacity`), and its
 /// focus and pointer state.
@@ -67,8 +67,9 @@ pub struct ExtractedFrame {
 }
 
 /// Everything a [`RenderDriver`] needs to draw one window's frame. Owns the
-/// acquired `SurfaceTexture` (moved from the main thread) and clones of the GPU
-/// resources so the worker thread is self-contained.
+/// acquired `SurfaceTexture` and a shared handle to the scene assembly state
+/// and backend. This CPU dispatch snapshot is distinct from the GPU phase-start
+/// image provided to resource generators by `render-interface`.
 pub struct RenderSnapshot {
     pub window_id: WindowId,
     pub surface_texture: wgpu::SurfaceTexture,
@@ -82,9 +83,9 @@ pub struct RenderSnapshot {
     pub core: Arc<Mutex<GuiRenderer>>,
 }
 
-/// The UI owns the reusable Scene; the backend owns GPU resources. Keeping the
-/// pair under one driver lock permits the existing threaded presentation path
-/// without moving Sources or sharing each Source through an Arc.
+/// The UI owns the reusable Scene; the backend owns GPU resources. Render
+/// workers share this pair under one lock, serializing assembly and submission
+/// while preserving the backend's resource cache across frames.
 pub struct GuiRenderer {
     pub frame: crate::scene::Frame,
     pub backend: PlainRenderer,
@@ -289,8 +290,8 @@ pub trait RenderDriver: Send {
     fn wait_idle(&self, window: WindowId);
 }
 
-/// Synchronous driver: builds and presents on the calling (main) thread. Never
-/// busy. Retained to isolate render-threading regressions from the M4 refactor.
+/// Synchronous driver: builds and presents on the calling thread. Dispatch
+/// returns after presentation, so there is no queued frame and it is never busy.
 #[derive(Default)]
 pub struct InlineDriver;
 
@@ -306,7 +307,7 @@ impl RenderDriver for InlineDriver {
     fn wait_idle(&self, _window: WindowId) {}
 }
 
-/// Per-window worker-thread driver (the M4 default). Each window gets one thread
+/// Default worker-thread driver. Each window gets one thread
 /// that owns nothing but the receiving end of a snapshot channel plus a shared
 /// busy flag.
 #[derive(Default)]

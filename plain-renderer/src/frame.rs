@@ -4,9 +4,9 @@ use crate::compositor::plan::{DrawOp, DrawPlan};
 use crate::{PlainError, PlainTarget, RenderStats, compositor::*, plan::FramePlan, resources::*};
 use render_interface::*;
 
-/// An unwind is transported to the submission owner only after the encoder and
-/// compositor workspace have been recovered. It is resumed there, never changed
-/// into a successful render or a provider's ordinary PrepareError.
+/// An unwind is transported to the submission owner only after the encoder is
+/// discarded and compositor workspace is recovered. It is resumed there, never
+/// changed into a successful render or a provider's ordinary PrepareError.
 pub(crate) enum FrameFailure {
     Recording(PlainError),
     Unwind(Box<dyn std::any::Any + Send>),
@@ -130,9 +130,9 @@ fn encode_planned(
         destination: None,
         batches: 0,
     };
-    // This is the only region that calls provider code. AssertUnwindSafe is
-    // justified by discarding the encoder, rolling back provisional residents,
-    // and restoring the taken workspace before the panic leaves the renderer.
+    // record_operations invokes source callbacks. AssertUnwindSafe is justified
+    // by discarding the encoder, rolling back provisional residents, and restoring
+    // the taken workspace before the panic leaves the renderer.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         record_operations(
             device, compositor, resources, scene, plan, draw_plan, target, s, stats, &mut frame,
@@ -208,7 +208,7 @@ fn record_operations(
         flush(frame);
         // Every generator records its reads before any draw in this phase.
         // Therefore queue/encoder order freezes the accumulated image for
-        // those reads; no full-viewport snapshot copy is necessary. Source
+        // those reads; no full-image snapshot copy is necessary. Source
         // output textures are separate from this input and cannot mutate it.
         let snapshot = RenderSnapshot {
             color: color_region,

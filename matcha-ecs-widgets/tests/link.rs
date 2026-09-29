@@ -1,11 +1,7 @@
-//! Headless verification of `Link` (Tier-1 HTML/CSS widgets batch): it
-//! delegates `Widget::bundle`/`patch`/`after_spawn` to a wrapped `RichText`
-//! while also carrying `OnClick`/`Pickable` — confirm both halves
-//! (click dispatch membership and text-cache invalidation) actually work
-//! through the delegation, not just compile. Same GPU-free style as
-//! `tests/render_item_reuse.rs`; `Link`'s `RenderItem` is built in
-//! `after_spawn` (inherited from `RichText`), which `run_view` already runs
-//! on first spawn.
+//! Headless verification of Link's delegation to RichText and its
+//! OnClick/Pickable components. Checks click-dispatch membership and draw
+//! revisions after patching. `run_view` invokes RichText's `after_spawn` hook
+//! to create the RenderItem; the writer does not run in these tests.
 
 use bevy_ecs::{entity::Entity, world::World};
 

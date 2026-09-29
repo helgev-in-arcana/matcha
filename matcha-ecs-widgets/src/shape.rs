@@ -1,11 +1,11 @@
-//! Native GPU generation and sharing of box MaskSources and colour TextureSources.
+//! GPU generation and sharing of box MaskSources and colour TextureSources.
 //!
 //! ShapeCtx caches immutable source definitions keyed by geometry/colour. The
 //! renderer invokes their GPU generators only on a resident-content miss. Rounded
 //! fills, asymmetric rings and three-pass separable shadows are rendered directly
-//! through MaskPrepareContext; no paint tree or Bitmap layer is involved.
+//! through MaskPrepareContext into renderer-provided output regions.
 //!
-//! The pure CPU rasterizer below is retained as an independent numerical oracle.
+//! The pure CPU rasterizer below is an independent numerical oracle.
 //! Production coverage_source never calls it. Private shader programs are cached
 //! per current device, independently of renderer-owned output residency/atlases.
 
@@ -107,11 +107,9 @@ struct ShapeCtxInner {
 /// `Clone` (an `Arc` handle), so it can be captured straight into a
 /// `RenderItem`'s `Send + Sync` builder closure.
 ///
-/// Caching is what makes a decorated box affordable to redraw. A scrollbar thumb
-/// is rebuilt on every frame it moves (its `LayoutOutput` changes, so
-/// `invalidate_on_layout_change` fires), but its *shape* is constant for the
-/// whole drag. Writers reuse the immutable mask definition while emitting fresh
-/// Objects; GPU generation and storage reuse remain the renderer's decision.
+/// A scrollbar thumb can move without changing its shape. Each redraw emits
+/// fresh Objects while reusing the immutable mask definition; GPU generation
+/// and storage reuse remain the renderer's decision.
 #[derive(Resource, Clone, Default)]
 pub struct ShapeCtx(Arc<ShapeCtxInner>);
 
@@ -157,8 +155,8 @@ impl ShapeCtx {
     ///
     /// One texel is enough at any size: the shader clamps a sample into the
     /// source's own texel centre, so stretching it over a whole quad samples
-    /// that one texel everywhere. Same trick the core's `ClipMask` uses, and
-    /// it is why recolouring a box costs no rasterisation at all.
+    /// that one texel everywhere. Recolouring requires only a tint definition;
+    /// the geometry's coverage image can be reused.
     pub fn tint_source(&self, color: [f32; 4], ctx: &RenderCtx) -> Option<TextureSource> {
         // Keyed on the encoded output bytes, so two colours that encode
         // identically share a texel.
@@ -461,7 +459,7 @@ mod tests {
         let half = premultiplied_srgb_bytes([1.0, 1.0, 1.0, 0.5]);
         assert_eq!(half[3], 128);
         assert_eq!(half[0], linear_to_srgb_u8(0.5));
-        // Straight alpha would have left this at 255 — the bug this avoids.
+        // Straight alpha would leave this at 255 instead of scaling linear colour.
         assert!(half[0] < 255);
     }
 }

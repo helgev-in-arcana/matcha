@@ -45,7 +45,7 @@ pub struct UiTree<C: Component> {
 
     root: ComponentPod<C>,
 
-    /// Built widget tree.  `None` until the first `create_window` / `buffer_updated`.
+    /// Built widget tree, populated by `run_update()`.
     widget_pod: Mutex<Option<WidgetPod>>,
 
     /// Weak registry keyed by [`WindowId`].
@@ -362,11 +362,11 @@ impl<C: Component> Application for UiTree<C> {
         _window_id: WindowId,
         _event: WindowEvent,
     ) {
-        // TODO
+        // Window events are not forwarded to the component or its widgets.
     }
 
     fn window_destroyed(&mut self, _event_loop: &impl EventLoop, _window_id: WindowId) {
-        // TODO
+        // Window-destruction notifications do not remove widgets or registry entries.
     }
 
     fn device_event(
@@ -410,7 +410,7 @@ impl<C: Component> Application for UiTree<C> {
         _raw_device_id: RawDeviceId,
         _raw_event: RawDeviceEvent,
     ) {
-        // TODO
+        // Raw device events are not dispatched to components or widgets.
     }
 
     // -------------------------------------------------------------------------

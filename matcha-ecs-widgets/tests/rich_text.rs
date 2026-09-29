@@ -1,9 +1,5 @@
-//! Headless verification of `RichText` (parley-backed), mirroring
-//! `tests/text.rs`'s coverage of the suzuri-backed `Text` widget. Same
-//! GPU-free approach: `RenderItem::builder` is never invoked, only its
-//! draw revision is asserted. GPU resource generation/upload needs a real
-//! `wgpu::Device` and is left to renderer integration/demo
-//! verification.
+//! Headless verification of RichText layout, style propagation and RenderItem
+//! revisions. Draw writers and GPU resource generators are not invoked.
 
 use bevy_ecs::{entity::Entity, world::World};
 

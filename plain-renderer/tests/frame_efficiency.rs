@@ -25,7 +25,7 @@ fn gpu() -> Gpu {
             _ => wgpu::Backends::PRIMARY,
         },
         required_features: wgpu::Features::empty(),
-        // Deliberately rule out the former hundreds-of-MiB conservative arena.
+        // Frame workspace buffers must fit within a 64 MiB device limit.
         required_limits: Some(wgpu::Limits {
             max_buffer_size: 64 * 1024 * 1024,
             max_storage_buffer_binding_size: 64 * 1024 * 1024,
