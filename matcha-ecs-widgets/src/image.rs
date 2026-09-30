@@ -252,7 +252,7 @@ fn image_render_item(image_ctx: ImageCtx, source: ImageSource, fit: ObjectFit) -
 
         // Decode sRGB to linear, premultiply, then encode for source-over.
         let mut bytes = rgba.into_raw();
-        for pixel in bytes.chunks_exact_mut(4) {
+        for pixel in bytes.as_chunks_mut::<4>().0 {
             let alpha = pixel[3] as f32 / 255.0;
             for channel in &mut pixel[..3] {
                 let encoded = *channel as f32 / 255.0;

@@ -16,9 +16,9 @@ use matcha_ecs::{
         view::ViewChildren,
     },
     input::resolve_click_at,
-    layout::{layout_root, Constraints},
+    layout::{Constraints, layout_root},
     pick::{PickQuery, Picker, RectPicker},
-    view::{run_view, Widget},
+    view::{Widget, run_view},
 };
 use matcha_ecs_widgets::{Button, ColorRect, Column, Container, Row};
 

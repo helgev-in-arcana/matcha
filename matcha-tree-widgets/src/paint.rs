@@ -26,7 +26,7 @@ pub(crate) struct ImageData {
 pub(crate) fn image_data(image: image::DynamicImage) -> ImageData {
     let mut image = image.to_rgba8();
     let size = [image.width(), image.height()];
-    for pixel in image.as_mut().chunks_exact_mut(4) {
+    for pixel in image.as_mut().as_chunks_mut::<4>().0 {
         let alpha = pixel[3] as f32 / 255.;
         for channel in &mut pixel[..3] {
             let s = *channel as f32 / 255.;

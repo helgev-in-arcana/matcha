@@ -152,8 +152,16 @@ fn click_state_machine_runs_through_adapter() {
         .id();
 
     adapter.device_event(&event_loop, window_id, mouse_moved([42.0, 24.0]));
-    adapter.device_event(&event_loop, window_id, left_button(ElementState::Pressed(0)));
-    adapter.device_event(&event_loop, window_id, left_button(ElementState::Released(0)));
+    adapter.device_event(
+        &event_loop,
+        window_id,
+        left_button(ElementState::Pressed(0)),
+    );
+    adapter.device_event(
+        &event_loop,
+        window_id,
+        left_button(ElementState::Released(0)),
+    );
 
     let recorder = adapter.app();
     // `on_click` fires on the press edge only: exactly one click, at the

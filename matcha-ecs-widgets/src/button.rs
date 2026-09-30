@@ -276,7 +276,7 @@ fn button_render_item(
             ((h - layout.total_height) / 2.0).max(0.0),
             0.0,
         ));
-        draw_glyph_run(draw, &font_ctx, &layout, &tint_source, offset);
+        draw_glyph_run(draw, &font_ctx, layout, tint_source, offset);
     })
 }
 

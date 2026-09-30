@@ -1443,17 +1443,17 @@ impl Widget for RichText {
 
         // Revival: see `Text::patch`/`ColorRect::patch` for the identical
         // reasoning.
-        if entity.get::<ManualDespawn>().is_some_and(|m| m.is_pruned()) {
-            if let Some(exit) = entity.get::<ExitFade>().copied() {
-                let current = entity.get::<RenderOpacity>().copied().unwrap_or_default();
-                entity.insert(OpacityTween {
-                    from: current.0,
-                    to: 1.0,
-                    start: web_time::Instant::now(),
-                    duration: exit.duration,
-                    easing: exit.easing,
-                });
-            }
+        if entity.get::<ManualDespawn>().is_some_and(|m| m.is_pruned())
+            && let Some(exit) = entity.get::<ExitFade>().copied()
+        {
+            let current = entity.get::<RenderOpacity>().copied().unwrap_or_default();
+            entity.insert(OpacityTween {
+                from: current.0,
+                to: 1.0,
+                start: web_time::Instant::now(),
+                duration: exit.duration,
+                easing: exit.easing,
+            });
         }
     }
 }

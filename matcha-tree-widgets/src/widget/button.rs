@@ -158,10 +158,8 @@ impl Widget for ButtonWidget {
         let state_changed = new_state != self.state;
         self.state = new_state;
 
-        if clicked {
-            if let Some(f) = &self.on_click {
-                f(ctx);
-            }
+        if clicked && let Some(f) = &self.on_click {
+            f(ctx);
         }
 
         let child_result = self

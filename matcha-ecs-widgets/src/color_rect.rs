@@ -194,17 +194,17 @@ impl Widget for ColorRect {
         // fade's own duration/easing. The reconciler clears the pruned flag
         // right after `patch` returns, which is what stops the animation
         // systems from despawning it.
-        if entity.get::<ManualDespawn>().is_some_and(|m| m.is_pruned()) {
-            if let Some(exit) = entity.get::<ExitFade>().copied() {
-                let current = entity.get::<RenderOpacity>().copied().unwrap_or_default();
-                entity.insert(OpacityTween {
-                    from: current.0,
-                    to: 1.0,
-                    start: web_time::Instant::now(),
-                    duration: exit.duration,
-                    easing: exit.easing,
-                });
-            }
+        if entity.get::<ManualDespawn>().is_some_and(|m| m.is_pruned())
+            && let Some(exit) = entity.get::<ExitFade>().copied()
+        {
+            let current = entity.get::<RenderOpacity>().copied().unwrap_or_default();
+            entity.insert(OpacityTween {
+                from: current.0,
+                to: 1.0,
+                start: web_time::Instant::now(),
+                duration: exit.duration,
+                easing: exit.easing,
+            });
         }
     }
 }

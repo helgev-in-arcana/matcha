@@ -19,11 +19,11 @@ use matcha_ecs::{
         view::{ManualDespawn, ViewChildren},
     },
     resources::{FrameTime, RedrawRequest},
-    view::{run_view, Scope},
+    view::{Scope, run_view},
 };
 use matcha_ecs_widgets::{
-    animation::{self, ExitFade, OpacityTween},
     ColorRect, Easing,
+    animation::{self, ExitFade, OpacityTween},
 };
 
 fn setup() -> (World, Entity) {
@@ -173,9 +173,16 @@ fn re_declaring_a_mid_exit_entity_reverses_the_fade_and_clears_the_pruned_flag()
 
     run_view(&mut world, root, |_s: &mut Scope| {}); // prune
     run_at(&mut world, &mut schedule, start); // fade begins
-    run_at(&mut world, &mut schedule, start + Duration::from_millis(150)); // halfway out
+    run_at(
+        &mut world,
+        &mut schedule,
+        start + Duration::from_millis(150),
+    ); // halfway out
     let mid = opacity(&world, rect);
-    assert!((mid - 0.5).abs() < 0.05, "expected ~0.5 mid-exit, got {mid}");
+    assert!(
+        (mid - 0.5).abs() < 0.05,
+        "expected ~0.5 mid-exit, got {mid}"
+    );
 
     run_view(&mut world, root, declare); // revive with the same key
 
@@ -247,17 +254,27 @@ fn advance_opacity_tweens_interpolates_linearly_and_snaps_on_completion() {
         ))
         .id();
 
-    run_at(&mut world, &mut schedule, start + Duration::from_millis(500));
+    run_at(
+        &mut world,
+        &mut schedule,
+        start + Duration::from_millis(500),
+    );
     let mid = opacity(&world, entity);
     assert!((mid - 0.5).abs() < 0.01, "expected ~0.5, got {mid}");
-    assert!(world.get::<OpacityTween>(entity).is_some(), "still in flight");
+    assert!(
+        world.get::<OpacityTween>(entity).is_some(),
+        "still in flight"
+    );
     assert!(
         world.resource::<RedrawRequest>().is_requested(),
         "an in-flight tween must keep asking for frames"
     );
 
     run_at(&mut world, &mut schedule, start + Duration::from_secs(2));
-    assert_eq!(world.get::<RenderOpacity>(entity), Some(&RenderOpacity(1.0)));
+    assert_eq!(
+        world.get::<RenderOpacity>(entity),
+        Some(&RenderOpacity(1.0))
+    );
     assert!(
         world.get::<OpacityTween>(entity).is_none(),
         "tween removed on completion"
@@ -292,5 +309,8 @@ fn a_completed_exit_fade_despawns_the_entity_and_its_parent_slot() {
         world.get_entity(rect).is_err(),
         "entity despawned once its exit fade completes"
     );
-    assert!(children(&world, root).is_empty(), "slot removed from parent");
+    assert!(
+        children(&world, root).is_empty(),
+        "slot removed from parent"
+    );
 }

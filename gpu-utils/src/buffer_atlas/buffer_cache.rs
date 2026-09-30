@@ -45,9 +45,9 @@ impl<K: Eq + Hash + Clone, const N: usize> BufferCache<K, N> {
 
     pub fn update<'a>(
         &'a mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        requests: Vec<(&K, impl FnOnce() -> [u8; N])>,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        _requests: Vec<(&K, impl FnOnce() -> [u8; N])>,
     ) -> (&'a wgpu::Buffer, Vec<usize>) {
         todo!()
     }
@@ -55,7 +55,7 @@ impl<K: Eq + Hash + Clone, const N: usize> BufferCache<K, N> {
 
 impl<K: Eq + Hash + Clone, const N: usize> BufferCache<K, N> {
     // resize and create buffer
-    fn resize(&mut self, new_size: usize) {
+    fn resize(&mut self, _new_size: usize) {
         todo!()
     }
 }

@@ -19,7 +19,7 @@ use std::{
 use bevy_ecs::world::World;
 use bevy_tasks::{AsyncComputeTaskPool, TaskPoolBuilder};
 
-use matcha_ecs::task::{spawn_task, TaskHandle};
+use matcha_ecs::task::{TaskHandle, spawn_task};
 
 /// `AsyncComputeTaskPool` is a first-wins global static; safe to call from
 /// every test in this file (only the first call actually initialises it).

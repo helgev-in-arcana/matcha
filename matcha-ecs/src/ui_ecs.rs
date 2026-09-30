@@ -740,10 +740,10 @@ where
         let _ = self.proxy_slot.set(proxy);
         // Self-heal: a `ModelHandle::update` call made before `init()` ran
         // could not reach a proxy yet, so replay the wake now if one is due.
-        if self.wake_pending.load(std::sync::atomic::Ordering::Acquire) {
-            if let Some(proxy) = self.proxy_slot.get() {
-                proxy.send_command(UiCommand::ModelUpdated);
-            }
+        if self.wake_pending.load(std::sync::atomic::Ordering::Acquire)
+            && let Some(proxy) = self.proxy_slot.get()
+        {
+            proxy.send_command(UiCommand::ModelUpdated);
         }
     }
 
@@ -812,7 +812,7 @@ where
                     .expect("GPU device must exist while create_surface runs");
 
                 for mut window in q.iter_mut() {
-                    if let Err(e) = window.window.create_surface(&gpu.gpu.instance(), &device) {
+                    if let Err(e) = window.window.create_surface(gpu.gpu.instance(), &device) {
                         log::error!("failed to create surface: {e}");
                     }
                 }

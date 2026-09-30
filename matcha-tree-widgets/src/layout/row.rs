@@ -25,6 +25,12 @@ pub struct Row {
     pub items: Vec<Box<dyn View>>,
 }
 
+impl Default for Row {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Row {
     pub fn new() -> Self {
         Self {

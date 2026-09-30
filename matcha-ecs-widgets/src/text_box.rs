@@ -1156,17 +1156,17 @@ fn text_box_render_item(entity: &mut EntityWorldMut, style: TextBoxStyle) -> Ren
             &mut glyphs.lock(),
         );
 
-        if ctx.focused && live.caret_visible() {
-            if let Some(caret) = editor.cursor_geometry(CARET_WIDTH)
-                && let Some(tint) = shape_ctx.tint_source(style.caret_color, ctx)
-            {
-                draw.quad(
-                    &tint,
-                    [caret.width() as f32, caret.height() as f32],
-                    place(caret.x0 as f32, caret.y0 as f32),
-                    None,
-                );
-            }
+        if ctx.focused
+            && live.caret_visible()
+            && let Some(caret) = editor.cursor_geometry(CARET_WIDTH)
+            && let Some(tint) = shape_ctx.tint_source(style.caret_color, ctx)
+        {
+            draw.quad(
+                &tint,
+                [caret.width() as f32, caret.height() as f32],
+                place(caret.x0 as f32, caret.y0 as f32),
+                None,
+            );
         }
     })
 }

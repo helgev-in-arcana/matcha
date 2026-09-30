@@ -225,15 +225,15 @@ pub fn paint_box(
     if size[0] < 0.5 || size[1] < 0.5 {
         return;
     }
-    if let Some(shadow) = style.shadow {
-        if let Some((quad, offset)) = shadow_node(ctx, shape, size, style, &shadow) {
-            quad.paint(draw, translation(offset));
-        }
+    if let Some(shadow) = style.shadow
+        && let Some((quad, offset)) = shadow_node(ctx, shape, size, style, &shadow)
+    {
+        quad.paint(draw, translation(offset));
     }
-    if style.background[3] > 0. {
-        if let Some(quad) = background_node(ctx, shape, size, style) {
-            quad.paint(draw, Matrix4::identity());
-        }
+    if style.background[3] > 0.
+        && let Some(quad) = background_node(ctx, shape, size, style)
+    {
+        quad.paint(draw, Matrix4::identity());
     }
     if !style.border.is_zero() && style.border_color[3] > 0. {
         if !style.radius.is_zero() {

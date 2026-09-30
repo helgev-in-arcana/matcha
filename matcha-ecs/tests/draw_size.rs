@@ -15,8 +15,8 @@
 use bevy_ecs::{entity::Entity, world::World};
 use matcha_ecs::{
     components::{layout::LayoutOutput, view::ViewChildren},
-    layout::{layout_root, Constraints},
-    render::{extract_items, RenderItemSnapshot},
+    layout::{Constraints, layout_root},
+    render::{RenderItemSnapshot, extract_items},
     view::run_view,
 };
 use matcha_ecs_widgets::{ColorRect, Panel, Row};
@@ -102,7 +102,10 @@ fn every_snapshot_size_equals_the_entitys_layout_output_size() {
     let items = extract_items(&world, root).items;
     assert_eq!(items.len(), layout_sizes.len());
     for (item, expected) in items.iter().zip(&layout_sizes) {
-        assert_eq!(&item.size, expected, "snapshot size must equal LayoutOutput::size");
+        assert_eq!(
+            &item.size, expected,
+            "snapshot size must equal LayoutOutput::size"
+        );
     }
 }
 
@@ -151,7 +154,10 @@ fn stretched_panel_draws_at_its_allocated_size_and_contains_its_centred_child() 
         let (p_min, p_max) = drawn_rect(panel);
         let (c_min, c_max) = drawn_rect(child);
         assert!(
-            c_min[0] >= p_min[0] && c_min[1] >= p_min[1] && c_max[0] <= p_max[0] && c_max[1] <= p_max[1],
+            c_min[0] >= p_min[0]
+                && c_min[1] >= p_min[1]
+                && c_max[0] <= p_max[0]
+                && c_max[1] <= p_max[1],
             "child rect {c_min:?}..{c_max:?} must be contained in panel rect {p_min:?}..{p_max:?}"
         );
     }

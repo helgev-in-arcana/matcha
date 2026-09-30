@@ -8,17 +8,21 @@
 //! No window, no GPU: the picker is built directly, `RenderItem` builders are
 //! never invoked.
 
-use bevy_ecs::{bundle::Bundle, entity::Entity, world::{EntityWorldMut, World}};
+use bevy_ecs::{
+    bundle::Bundle,
+    entity::Entity,
+    world::{EntityWorldMut, World},
+};
 
 use matcha_ecs::{
     components::{
         input::{Active, Hovered, Pickable},
         view::ViewChildren,
     },
-    layout::{layout_root, Constraints},
+    layout::{Constraints, layout_root},
     pick::{PickerResource, RectPicker},
-    pointer::{set_position, set_pressed, sync_pointer_components, PointerState},
-    view::{run_view, Widget},
+    pointer::{PointerState, set_position, set_pressed, sync_pointer_components},
+    view::{Widget, run_view},
 };
 use matcha_ecs_widgets::{AlignItems, ColorRect, Column, Container};
 

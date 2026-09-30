@@ -436,7 +436,10 @@ mod tests {
             height: Length::Fill,
             ..Default::default()
         };
-        assert_eq!(s.resolve(offered(800.0, 600.0), [50.0, 20.0]), [50.0, 600.0]);
+        assert_eq!(
+            s.resolve(offered(800.0, 600.0), [50.0, 20.0]),
+            [50.0, 600.0]
+        );
     }
 
     #[test]
@@ -474,7 +477,10 @@ mod tests {
             width: Length::Percent(25.0),
             ..Default::default()
         };
-        assert_eq!(s.resolve(offered(800.0, 600.0), [50.0, 20.0]), [200.0, 20.0]);
+        assert_eq!(
+            s.resolve(offered(800.0, 600.0), [50.0, 20.0]),
+            [200.0, 20.0]
+        );
     }
 
     #[test]
@@ -485,7 +491,10 @@ mod tests {
             width: Length::Px(500.0),
             ..Default::default()
         };
-        assert_eq!(s.resolve(offered(100.0, 600.0), [50.0, 20.0]), [500.0, 20.0]);
+        assert_eq!(
+            s.resolve(offered(100.0, 600.0), [50.0, 20.0]),
+            [500.0, 20.0]
+        );
     }
 
     #[test]
@@ -516,7 +525,10 @@ mod tests {
             aspect_ratio: Some(3.0 / 2.0),
             ..Default::default()
         };
-        assert_eq!(s.resolve(offered(800.0, 600.0), [50.0, 20.0]), [300.0, 200.0]);
+        assert_eq!(
+            s.resolve(offered(800.0, 600.0), [50.0, 20.0]),
+            [300.0, 200.0]
+        );
     }
 
     #[test]
@@ -527,7 +539,10 @@ mod tests {
             aspect_ratio: Some(3.0 / 2.0),
             ..Default::default()
         };
-        assert_eq!(s.resolve(offered(800.0, 600.0), [50.0, 20.0]), [300.0, 300.0]);
+        assert_eq!(
+            s.resolve(offered(800.0, 600.0), [50.0, 20.0]),
+            [300.0, 300.0]
+        );
     }
 
     #[test]

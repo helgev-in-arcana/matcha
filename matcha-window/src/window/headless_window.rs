@@ -34,9 +34,7 @@ impl WindowSurface {
         let inner_size = match config.inner_size {
             Some(Size::Physical { width, height }) => [width, height],
             // Headless DPI is fixed at 1.0, so logical == physical.
-            Some(Size::Logical { width, height }) => {
-                [width.round() as u32, height.round() as u32]
-            }
+            Some(Size::Logical { width, height }) => [width.round() as u32, height.round() as u32],
             None => [config.surface_config.width, config.surface_config.height],
         };
 

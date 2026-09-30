@@ -21,7 +21,10 @@
 use std::{any::TypeId, collections::HashMap};
 
 use bevy_ecs::{
-    bundle::Bundle, entity::Entity, hierarchy::ChildOf, world::{EntityWorldMut, World},
+    bundle::Bundle,
+    entity::Entity,
+    hierarchy::ChildOf,
+    world::{EntityWorldMut, World},
 };
 
 use crate::components::view::{Key, ManualDespawn, SlotKey, ViewChildren, WidgetType};
@@ -164,10 +167,10 @@ fn reconcile<W: Widget>(world: &mut World, cursor: &mut Cursor, parent: Entity, 
             // so a widget mid-exit can see it and reverse its exit animation
             // before core clears the flag below (a "revival").
             w.patch(&mut em);
-            if let Some(mut manual) = em.get_mut::<ManualDespawn>() {
-                if manual.is_pruned() {
-                    manual.set_pruned(false);
-                }
+            if let Some(mut manual) = em.get_mut::<ManualDespawn>()
+                && manual.is_pruned()
+            {
+                manual.set_pruned(false);
             }
             e
         }
@@ -228,10 +231,10 @@ pub fn despawn_ui_entity(world: &mut World, entity: Entity) {
     if world.get_entity(entity).is_err() {
         return;
     }
-    if let Some(child_of) = world.get::<ChildOf>(entity).cloned() {
-        if let Some(mut siblings) = world.get_mut::<ViewChildren>(child_of.parent()) {
-            siblings.slots.retain(|(_, e)| *e != entity);
-        }
+    if let Some(child_of) = world.get::<ChildOf>(entity).cloned()
+        && let Some(mut siblings) = world.get_mut::<ViewChildren>(child_of.parent())
+    {
+        siblings.slots.retain(|(_, e)| *e != entity);
     }
     despawn_recursive(world, entity);
 }

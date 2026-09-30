@@ -14,7 +14,7 @@ use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::{
     components::{layout::LayoutOutput, view::ViewChildren},
-    layout::{layout_root, Constraints},
+    layout::{Constraints, layout_root},
     view::run_view,
 };
 use matcha_ecs_widgets::{AlignItems, ColorRect, Column, Container, JustifyContent, Length, Row};
@@ -127,9 +127,8 @@ fn justify_content_space_between_pins_the_ends_and_inflates_the_gap() {
 #[test]
 fn an_explicit_width_sizes_the_column_and_stretch_carries_it_to_the_children() {
     let (mut world, root) = setup();
-    let (column, first, _) = column_of_two(&mut world, root, || {
-        Column::new().width(Length::Px(300.0))
-    });
+    let (column, first, _) =
+        column_of_two(&mut world, root, || Column::new().width(Length::Px(300.0)));
 
     assert_eq!(output(&world, column).size[0], 300.0);
     // Default `AlignItems::Stretch`, so the children take the column's width

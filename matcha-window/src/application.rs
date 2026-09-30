@@ -12,11 +12,7 @@ pub trait Application: utils::MaybeSendSync + 'static {
     type Command: utils::MaybeSend + 'static;
 
     // lifecycle methods
-    fn init(
-        &mut self,
-        proxy: Box<dyn EventLoopProxy<Self>>,
-        event_loop: &impl EventLoop,
-    );
+    fn init(&mut self, proxy: Box<dyn EventLoopProxy<Self>>, event_loop: &impl EventLoop);
     fn resumed(&mut self, event_loop: &impl EventLoop);
     fn create_surface(&mut self, event_loop: &impl EventLoop);
     fn destroy_surface(&mut self, event_loop: &impl EventLoop);
@@ -33,22 +29,14 @@ pub trait Application: utils::MaybeSendSync + 'static {
         window_id: WindowId,
         event: WindowEvent,
     );
-    fn window_destroyed(
-        &mut self,
-        event_loop: &impl EventLoop,
-        window_id: WindowId,
-    );
+    fn window_destroyed(&mut self, event_loop: &impl EventLoop, window_id: WindowId);
     fn device_event(
         &mut self,
         event_loop: &impl EventLoop,
         window_id: WindowId,
         event: DeviceEvent,
     );
-    fn ui_command(
-        &mut self,
-        event_loop: &impl EventLoop,
-        command: Self::Command,
-    );
+    fn ui_command(&mut self, event_loop: &impl EventLoop, command: Self::Command);
 
     // Default Methods
     fn raw_device_event(

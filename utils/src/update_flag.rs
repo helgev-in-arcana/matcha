@@ -9,6 +9,12 @@ pub struct UpdateFlag {
     flag: Arc<AtomicBool>,
 }
 
+impl Default for UpdateFlag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UpdateFlag {
     pub fn new() -> Self {
         Self {

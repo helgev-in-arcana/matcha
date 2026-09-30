@@ -187,7 +187,9 @@ impl<K: Copy + Eq + Hash, V> GlyphCache<K, V> {
             return;
         }
         self.detach(index);
-        let key = self.nodes[index].key.expect("an indexed, in-map node must carry its key");
+        let key = self.nodes[index]
+            .key
+            .expect("an indexed, in-map node must carry its key");
         self.attach_to_head(index, key);
     }
 }
@@ -204,8 +206,22 @@ mod tests {
     fn miss_then_hit_reuses_the_same_value() {
         let mut c = cache(4);
         let mut builds = 0;
-        assert_eq!(*c.get_or_insert_with(1, || { builds += 1; 100 }).unwrap(), 100);
-        assert_eq!(*c.get_or_insert_with(1, || { builds += 1; 999 }).unwrap(), 100);
+        assert_eq!(
+            *c.get_or_insert_with(1, || {
+                builds += 1;
+                100
+            })
+            .unwrap(),
+            100
+        );
+        assert_eq!(
+            *c.get_or_insert_with(1, || {
+                builds += 1;
+                999
+            })
+            .unwrap(),
+            100
+        );
         assert_eq!(builds, 1, "build must only run on the first (miss) lookup");
     }
 

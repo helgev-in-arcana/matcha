@@ -102,13 +102,11 @@ pub fn sync_ime_state(world: &mut World) {
     }
     // Publish the area whenever IME is on: a freshly-enabled IME has no
     // position yet, so re-sending an unchanged area after enabling is correct.
-    if wants_ime {
-        if let Some(ImeCursorArea([min_x, min_y, max_x, max_y])) = cursor_area {
-            window_comp.window.set_ime_cursor_area(
-                [min_x, min_y],
-                [(max_x - min_x).max(0.0), (max_y - min_y).max(0.0)],
-            );
-        }
+    if wants_ime && let Some(ImeCursorArea([min_x, min_y, max_x, max_y])) = cursor_area {
+        window_comp.window.set_ime_cursor_area(
+            [min_x, min_y],
+            [(max_x - min_x).max(0.0), (max_y - min_y).max(0.0)],
+        );
     }
 
     let mut state = world.resource_mut::<ImeWindowState>();

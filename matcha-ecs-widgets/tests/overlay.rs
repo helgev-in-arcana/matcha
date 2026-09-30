@@ -14,17 +14,15 @@
 use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::{
-    components::{layout::LayoutOutput, view::ViewChildren},
-    input::{dispatch_pointer, MessageQueue},
     components::input::{PointerInput, PointerPhase},
-    layout::{layout_root, Constraints},
+    components::{layout::LayoutOutput, view::ViewChildren},
+    input::{MessageQueue, dispatch_pointer},
+    layout::{Constraints, layout_root},
     pick::{PickQuery, Picker, RectPicker},
     render::extract_items,
     view::run_view,
 };
-use matcha_ecs_widgets::{
-    AlignItems, Anchor, Button, ColorRect, Column, Panel, Slider,
-};
+use matcha_ecs_widgets::{AlignItems, Anchor, Button, ColorRect, Column, Panel, Slider};
 
 const WINDOW: [f32; 2] = [800.0, 600.0];
 
@@ -81,7 +79,11 @@ fn an_anchor_takes_no_space_in_the_flow() {
 
     let column = children(&world, root)[0];
     let kids = children(&world, column);
-    assert_eq!(output(&world, kids[1]).size, [0.0, 0.0], "the anchor itself");
+    assert_eq!(
+        output(&world, kids[1]).size,
+        [0.0, 0.0],
+        "the anchor itself"
+    );
     assert_eq!(
         output(&world, kids[2]).origin[1],
         40.0,
@@ -124,7 +126,11 @@ fn an_overlay_covers_its_siblings_for_clicking_as_well_as_drawing() {
             // The anchor is declared *first*, so only `z_index` can put its
             // child in front.
             s.node(Anchor::at(0.0, 0.0).key(1u64), |s| {
-                s.leaf(Panel::new(200.0, 100.0).key(2u64).background_color([0.0, 0.0, 0.0, 1.0]));
+                s.leaf(
+                    Panel::new(200.0, 100.0)
+                        .key(2u64)
+                        .background_color([0.0, 0.0, 0.0, 1.0]),
+                );
             });
             s.leaf(Button::<Msg>::new("behind").key(3u64).size(200.0, 100.0));
         });
@@ -200,12 +206,7 @@ fn slider_world(value: f32, step: f32) -> (World, Entity, Entity) {
 }
 
 fn press_at(world: &mut World, slider: Entity, x: f32) -> bool {
-    dispatch_pointer(
-        world,
-        slider,
-        [x, 12.0],
-        PointerPhase::Press { count: 1 },
-    )
+    dispatch_pointer(world, slider, [x, 12.0], PointerPhase::Press { count: 1 })
 }
 
 fn queued(world: &mut World) -> Vec<Msg> {
@@ -302,7 +303,10 @@ fn a_scroll_over_a_slider_is_not_a_drag() {
         [10.0, 12.0],
         PointerPhase::Scroll { delta: [0.0, 40.0] },
     );
-    assert!(!consumed, "a wheel event must bubble past, not move the value");
+    assert!(
+        !consumed,
+        "a wheel event must bubble past, not move the value"
+    );
     assert!(queued(&mut world).is_empty());
 }
 

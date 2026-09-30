@@ -279,21 +279,20 @@ impl MouseState {
         let dragging_middle = self.dragging_from_middle;
 
         for (logical_button, button_state, dragging_from) in buttons {
-            if dragging_from.is_none() {
-                if let Some(click_state) =
+            if dragging_from.is_none()
+                && let Some(click_state) =
                     button_state.detect_long_press(now, self.long_press_duration)
-                {
-                    let event = Self::new_mouse_event(
-                        dragging_primary,
-                        dragging_secondary,
-                        dragging_middle,
-                        Some(MouseInput::Click {
-                            click_state,
-                            button: logical_button,
-                        }),
-                    );
-                    events.push(event);
-                }
+            {
+                let event = Self::new_mouse_event(
+                    dragging_primary,
+                    dragging_secondary,
+                    dragging_middle,
+                    Some(MouseInput::Click {
+                        click_state,
+                        button: logical_button,
+                    }),
+                );
+                events.push(event);
             }
         }
         events

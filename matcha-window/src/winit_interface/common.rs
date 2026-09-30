@@ -2,7 +2,7 @@ use crate::{
     adapter::{Adapter, ControlFlow, EventLoop, EventLoopCommand, EventLoopProxy},
     application::Application,
     event::device_event::{ElementState, KeyInput, KeyboardState},
-    window::{WindowConfig, WindowError, WindowSurface, WindowId},
+    window::{WindowConfig, WindowError, WindowId, WindowSurface},
 };
 
 // ---------------------------------------------------------------------------

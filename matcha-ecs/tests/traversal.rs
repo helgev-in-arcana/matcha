@@ -13,7 +13,7 @@ use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::{
     components::{render::ZIndex, view::ViewChildren},
-    layout::{layout_root, Constraints},
+    layout::{Constraints, layout_root},
     pick::{PickQuery, Picker, RectPicker},
     render::extract_items,
     view::run_view,

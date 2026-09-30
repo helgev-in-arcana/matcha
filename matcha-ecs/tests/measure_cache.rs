@@ -10,17 +10,17 @@
 //! Headless: a bare `World` driven through `layout_root`, no window or GPU.
 
 use std::sync::{
-    atomic::{AtomicU32, Ordering},
     Arc,
+    atomic::{AtomicU32, Ordering},
 };
 
-use bevy_ecs::{bundle::Bundle, component::Component, entity::Entity, world::EntityWorldMut};
 use bevy_ecs::world::World;
+use bevy_ecs::{bundle::Bundle, component::Component, entity::Entity, world::EntityWorldMut};
 
 use matcha_ecs::{
     components::view::{Key, ViewChildren},
-    layout::{layout_root, Constraints, Layout, LayoutCtx, LayoutDispatch, Measured},
-    view::{run_view, Widget},
+    layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, Measured, layout_root},
+    view::{Widget, run_view},
 };
 use matcha_ecs_widgets::{AlignItems, Column};
 

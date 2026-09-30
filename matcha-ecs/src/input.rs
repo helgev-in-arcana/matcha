@@ -132,9 +132,7 @@ impl PointerCapture {
 
 /// Record (or clear) the entity a drag should stay with.
 pub fn set_pointer_capture(world: &mut World, target: Option<Entity>) {
-    world
-        .get_resource_or_insert_with(PointerCapture::default)
-        .0 = target;
+    world.get_resource_or_insert_with(PointerCapture::default).0 = target;
 }
 
 /// The entity currently owning a drag, if it is still alive.

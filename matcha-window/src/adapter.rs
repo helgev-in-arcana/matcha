@@ -140,7 +140,8 @@ impl<App: Application> Adapter<App> {
         raw_device_id: RawDeviceId,
         raw_event: RawDeviceEvent,
     ) {
-        self.app.raw_device_event(event_loop, raw_device_id, raw_event);
+        self.app
+            .raw_device_event(event_loop, raw_device_id, raw_event);
     }
 }
 
@@ -163,7 +164,8 @@ impl<App: Application> Adapter<App> {
         start: web_time::Instant,
         requested_resume: web_time::Instant,
     ) {
-        self.app.resume_time_reached(event_loop, start, requested_resume);
+        self.app
+            .resume_time_reached(event_loop, start, requested_resume);
     }
 
     pub fn wait_cancelled(

@@ -22,16 +22,11 @@ pub struct WidgetType(pub TypeId);
 /// of appearance within the parent (the reconciler's per-pass occurrence
 /// counter acts as a positional key). List items opt into a stable identity
 /// with `Id`, which survives reordering.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum Key {
+    #[default]
     Auto,
     Id(u64),
-}
-
-impl Default for Key {
-    fn default() -> Self {
-        Key::Auto
-    }
 }
 
 impl From<u64> for Key {

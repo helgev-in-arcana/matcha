@@ -19,10 +19,10 @@ use matcha_ecs::{
         input::Pickable,
         view::ViewChildren,
     },
-    focus::{clear_focus, focus_from_pick, resolve_focus_path, validate_focus, Focus},
-    layout::{layout_root, Constraints},
+    focus::{Focus, clear_focus, focus_from_pick, resolve_focus_path, validate_focus},
+    layout::{Constraints, layout_root},
     pick::{PickQuery, Picker, RectPicker},
-    view::{despawn_ui_entity, run_view, Widget},
+    view::{Widget, despawn_ui_entity, run_view},
 };
 use matcha_ecs_widgets::{ColorRect, Column, Container};
 
@@ -331,7 +331,11 @@ fn restore_last_descends_into_the_remembered_child() {
     matcha_ecs::focus::request_focus(&mut world, container);
 
     let focus = world.resource::<Focus>();
-    assert_eq!(focus.top(), Some(child), "restored into the remembered child");
+    assert_eq!(
+        focus.top(),
+        Some(child),
+        "restored into the remembered child"
+    );
     assert_eq!(focus.path(), &[root, container, child]);
 }
 
