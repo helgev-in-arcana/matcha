@@ -92,10 +92,10 @@ impl<T: PartialEq> SubWidgetsVec<T> {
 
             // This generic container treats every setting change as affecting
             // layout because it cannot identify paint-only settings.
-            if let Some((_, old_setting)) = &old_entry {
-                if *old_setting != new_setting {
-                    need_rearrange = true;
-                }
+            if let Some((_, old_setting)) = &old_entry
+                && *old_setting != new_setting
+            {
+                need_rearrange = true;
             }
 
             // Reuse the existing pod or build a new one.

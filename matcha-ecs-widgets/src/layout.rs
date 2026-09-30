@@ -384,11 +384,17 @@ impl LayoutKind {
     }
 
     fn justify(&self, ctx: &LayoutCtx, me: Entity) -> JustifyContent {
-        ctx.world().get::<Justify>(me).map(|j| j.0).unwrap_or_default()
+        ctx.world()
+            .get::<Justify>(me)
+            .map(|j| j.0)
+            .unwrap_or_default()
     }
 
     fn align(&self, ctx: &LayoutCtx, me: Entity) -> AlignItems {
-        ctx.world().get::<Align>(me).map(|a| a.0).unwrap_or_default()
+        ctx.world()
+            .get::<Align>(me)
+            .map(|a| a.0)
+            .unwrap_or_default()
     }
 
     fn reverse(&self, ctx: &LayoutCtx, me: Entity) -> bool {
@@ -534,9 +540,14 @@ impl Layout for LayoutKind {
             if let Some(&child) = children.first() {
                 // A container has no main axis, so a child's `align_self`
                 // applies to both: it is placed within the container's box.
-                let align = Sizing::of(ctx, child).align_self.unwrap_or(AlignItems::Start);
+                let align = Sizing::of(ctx, child)
+                    .align_self
+                    .unwrap_or(AlignItems::Start);
                 let child_size = if align == AlignItems::Stretch {
-                    ctx.measure_child_size(child, Constraints::new([size[0], size[0]], [size[1], size[1]]))
+                    ctx.measure_child_size(
+                        child,
+                        Constraints::new([size[0], size[0]], [size[1], size[1]]),
+                    )
                 } else {
                     ctx.measure_child_size(child, child_c)
                 };
@@ -665,7 +676,10 @@ mod tests {
 
     #[test]
     fn justify_center_shifts_the_whole_block_by_half_the_extra() {
-        assert_eq!(justify_offsets(JustifyContent::Center, 40.0, 3), (20.0, 0.0));
+        assert_eq!(
+            justify_offsets(JustifyContent::Center, 40.0, 3),
+            (20.0, 0.0)
+        );
     }
 
     #[test]

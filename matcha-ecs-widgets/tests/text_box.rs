@@ -10,14 +10,11 @@
 use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::{
-    components::{
-        input::KeyDispatch,
-        view::ViewChildren,
-    },
-    focus::{request_focus, Focus},
+    components::{input::KeyDispatch, view::ViewChildren},
+    focus::{Focus, request_focus},
     input::MessageQueue,
     keyboard::{dispatch_ime, dispatch_key},
-    layout::{layout_root, Constraints},
+    layout::{Constraints, layout_root},
     view::run_view,
 };
 use matcha_ecs_widgets::{TextBox, TextEditor};
@@ -372,7 +369,8 @@ fn ctrl_enter_confirms_under_the_default_binding() {
 /// binding a single-line-style field wants.
 #[test]
 fn confirm_on_enter_makes_plain_enter_submit_without_inserting() {
-    let (mut world, text_box) = setup_with_confirm_key(matcha_ecs_widgets::text_box::confirm_on_enter);
+    let (mut world, text_box) =
+        setup_with_confirm_key(matcha_ecs_widgets::text_box::confirm_on_enter);
     dispatch_key(&mut world, &character("x"));
     let _ = queued(&mut world);
 
@@ -386,7 +384,8 @@ fn confirm_on_enter_makes_plain_enter_submit_without_inserting() {
 /// confirm, so it falls through to ordinary handling.
 #[test]
 fn a_chord_that_is_not_the_binding_does_not_confirm() {
-    let (mut world, _text_box) = setup_with_confirm_key(matcha_ecs_widgets::text_box::confirm_on_enter);
+    let (mut world, _text_box) =
+        setup_with_confirm_key(matcha_ecs_widgets::text_box::confirm_on_enter);
 
     dispatch_key(&mut world, &with_ctrl(named(NamedKey::Enter)));
 

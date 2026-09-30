@@ -281,7 +281,7 @@ fn text_render_item(
         let mut tint = tint.lock();
         let tint_source = tint.get_or_insert_with(|| solid_source(ctx, color).expect("solid tint"));
 
-        draw_glyph_run(draw, &font_ctx, &layout, &tint_source, Matrix4::identity());
+        draw_glyph_run(draw, &font_ctx, layout, tint_source, Matrix4::identity());
     })
 }
 
@@ -451,17 +451,17 @@ impl Widget for Text {
         }
 
         // Revival: see `ColorRect::patch` for the identical reasoning.
-        if entity.get::<ManualDespawn>().is_some_and(|m| m.is_pruned()) {
-            if let Some(exit) = entity.get::<ExitFade>().copied() {
-                let current = entity.get::<RenderOpacity>().copied().unwrap_or_default();
-                entity.insert(OpacityTween {
-                    from: current.0,
-                    to: 1.0,
-                    start: web_time::Instant::now(),
-                    duration: exit.duration,
-                    easing: exit.easing,
-                });
-            }
+        if entity.get::<ManualDespawn>().is_some_and(|m| m.is_pruned())
+            && let Some(exit) = entity.get::<ExitFade>().copied()
+        {
+            let current = entity.get::<RenderOpacity>().copied().unwrap_or_default();
+            entity.insert(OpacityTween {
+                from: current.0,
+                to: 1.0,
+                start: web_time::Instant::now(),
+                duration: exit.duration,
+                easing: exit.easing,
+            });
         }
     }
 }

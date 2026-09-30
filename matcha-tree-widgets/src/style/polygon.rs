@@ -238,7 +238,7 @@ impl Mesh {
                 }
             }
             Self::TriangleList { vertices } => {
-                for triangle in vertices.chunks_exact(3) {
+                for triangle in vertices.as_chunks::<3>().0 {
                     emit([&triangle[0], &triangle[1], &triangle[2]]);
                 }
             }
@@ -248,7 +248,7 @@ impl Mesh {
                 }
             }
             Self::TriangleIndexed { indices, vertices } => {
-                for triangle in indices.chunks_exact(3) {
+                for triangle in indices.as_chunks::<3>().0 {
                     let a = vertices
                         .get(triangle[0] as usize)
                         .ok_or("polygon index outside its vertices")?;

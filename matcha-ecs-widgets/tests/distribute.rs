@@ -11,8 +11,8 @@ use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::{
     components::{layout::LayoutOutput, view::ViewChildren},
-    layout::{layout_root, Constraints},
-    view::{run_view, Scope},
+    layout::{Constraints, layout_root},
+    view::{Scope, run_view},
 };
 use matcha_ecs_widgets::{AlignItems, ColorRect, Column, Container, Length, Row};
 
@@ -270,21 +270,25 @@ fn shrinking_a_text_leaf_stops_at_its_widest_word() {
     let (mut world, kids) = run(|s| {
         s.node(Row::new().width(Length::Px(120.0)), |s| {
             s.leaf(ColorRect::new(100.0, 20.0).key(1u64).shrink(0.0));
-            s.leaf(RichText::new("wrappable words here").key(2u64).font_size(16.0));
+            s.leaf(
+                RichText::new("wrappable words here")
+                    .key(2u64)
+                    .font_size(16.0),
+            );
         });
     });
 
     assert_eq!(output(&world, kids[0]).size[0], 100.0);
     let text = output(&world, kids[1]).size[0];
 
-    let min_content = matcha_ecs::layout::measure_entity(
-        &mut world,
-        kids[1],
-        Constraints::from_max_size(WINDOW),
-    )
-    .min[0];
+    let min_content =
+        matcha_ecs::layout::measure_entity(&mut world, kids[1], Constraints::from_max_size(WINDOW))
+            .min[0];
 
-    assert!(min_content > 20.0, "test premise: the widest word is wider than the 20px left over");
+    assert!(
+        min_content > 20.0,
+        "test premise: the widest word is wider than the 20px left over"
+    );
     assert!(
         (text - min_content).abs() < 0.5,
         "expected the text to stop at its min-content width {min_content}, got {text}"

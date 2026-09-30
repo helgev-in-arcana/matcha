@@ -76,10 +76,7 @@ pub fn distribute(items: &[Item], available: f32) -> Vec<f32> {
             }
         };
 
-        let total: f32 = (0..items.len())
-            .filter(|&i| !frozen[i])
-            .map(weight)
-            .sum();
+        let total: f32 = (0..items.len()).filter(|&i| !frozen[i]).map(weight).sum();
         if total <= 0.0 {
             break;
         }
@@ -173,7 +170,10 @@ mod tests {
     fn growers_split_the_leftover_in_proportion_to_their_weights() {
         let items = [flexible(0.0, 1.0, 1.0), flexible(0.0, 3.0, 1.0)];
         let sizes = distribute(&items, 400.0);
-        assert!(close(sizes[0], 100.0) && close(sizes[1], 300.0), "{sizes:?}");
+        assert!(
+            close(sizes[0], 100.0) && close(sizes[1], 300.0),
+            "{sizes:?}"
+        );
     }
 
     #[test]
@@ -187,7 +187,10 @@ mod tests {
         ];
         let sizes = distribute(&items, 400.0);
         assert!(close(sizes[0], 80.0), "{sizes:?}");
-        assert!(close(sizes[1], 320.0), "second takes what the first refused: {sizes:?}");
+        assert!(
+            close(sizes[1], 320.0),
+            "second takes what the first refused: {sizes:?}"
+        );
     }
 
     #[test]
@@ -203,7 +206,10 @@ mod tests {
     fn a_box_refusing_to_shrink_keeps_its_size_and_the_rest_absorb_it() {
         let items = [flexible(100.0, 0.0, 0.0), flexible(300.0, 0.0, 1.0)];
         let sizes = distribute(&items, 300.0);
-        assert!(close(sizes[0], 100.0) && close(sizes[1], 200.0), "{sizes:?}");
+        assert!(
+            close(sizes[0], 100.0) && close(sizes[1], 200.0),
+            "{sizes:?}"
+        );
     }
 
     #[test]
@@ -235,7 +241,10 @@ mod tests {
 
     #[test]
     fn a_line_breaks_before_the_item_that_would_not_fit() {
-        assert_eq!(split_lines(&[50.0, 50.0, 50.0], 0.0, 100.0), vec![0..2, 2..3]);
+        assert_eq!(
+            split_lines(&[50.0, 50.0, 50.0], 0.0, 100.0),
+            vec![0..2, 2..3]
+        );
     }
 
     #[test]
@@ -252,7 +261,10 @@ mod tests {
 
     #[test]
     fn no_items_means_no_lines() {
-        assert_eq!(split_lines(&[], 10.0, 100.0), Vec::<std::ops::Range<usize>>::new());
+        assert_eq!(
+            split_lines(&[], 10.0, 100.0),
+            Vec::<std::ops::Range<usize>>::new()
+        );
     }
 
     #[test]

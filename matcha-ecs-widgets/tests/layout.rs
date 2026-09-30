@@ -6,10 +6,10 @@ use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::{
     components::{layout::LayoutOutput, view::ViewChildren},
-    layout::{layout_root, Constraints},
+    layout::{Constraints, layout_root},
     view::run_view,
 };
-use matcha_ecs_widgets::{AlignItems, Column, ColorRect, Row};
+use matcha_ecs_widgets::{AlignItems, ColorRect, Column, Row};
 
 fn setup() -> (World, Entity) {
     let mut world = World::new();
@@ -40,10 +40,13 @@ fn column_stacks_children_with_gap() {
         // to the column's own (widest-child) width — see
         // `align_items_stretch_expands_narrower_children_to_container_width`
         // below for a test of that behaviour.
-        s.node(Column::new().gap(10.0).align_items(AlignItems::Start), |s| {
-            s.leaf(ColorRect::new(50.0, 20.0));
-            s.leaf(ColorRect::new(30.0, 40.0));
-        });
+        s.node(
+            Column::new().gap(10.0).align_items(AlignItems::Start),
+            |s| {
+                s.leaf(ColorRect::new(50.0, 20.0));
+                s.leaf(ColorRect::new(30.0, 40.0));
+            },
+        );
     });
     layout_root(&mut world, root, Constraints::from_max_size([800.0, 600.0]));
 
@@ -144,10 +147,13 @@ fn align_items_stretch_expands_narrower_children_to_container_width() {
 fn align_items_center_centres_narrower_children_on_the_cross_axis() {
     let (mut world, root) = setup();
     run_view(&mut world, root, |s| {
-        s.node(Column::new().gap(0.0).align_items(AlignItems::Center), |s| {
-            s.leaf(ColorRect::new(50.0, 20.0));
-            s.leaf(ColorRect::new(30.0, 40.0));
-        });
+        s.node(
+            Column::new().gap(0.0).align_items(AlignItems::Center),
+            |s| {
+                s.leaf(ColorRect::new(50.0, 20.0));
+                s.leaf(ColorRect::new(30.0, 40.0));
+            },
+        );
     });
     layout_root(&mut world, root, Constraints::from_max_size([800.0, 600.0]));
 

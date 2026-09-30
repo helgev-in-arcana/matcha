@@ -11,11 +11,8 @@
 use bevy_ecs::{entity::Entity, world::World};
 
 use matcha_ecs::{
-    components::{
-        layout::LayoutOutput,
-        view::ViewChildren,
-    },
-    layout::{layout_root, Constraints},
+    components::{layout::LayoutOutput, view::ViewChildren},
+    layout::{Constraints, layout_root},
     pick::{PickQuery, Picker, RectPicker},
     render::extract_items,
     view::run_view,
@@ -38,13 +35,16 @@ fn children(world: &World, e: Entity) -> Vec<Entity> {
 /// Three stacked rects with a gap, the middle one optionally hidden.
 fn stack(world: &mut World, root: Entity, middle_visible: bool) {
     run_view(world, root, move |s| {
-        s.node(Column::new().gap(10.0).align_items(AlignItems::Start), |s| {
-            s.leaf(ColorRect::new(50.0, 20.0).key(1u64));
-            s.node(Container::new().visible(middle_visible).key(2u64), |s| {
-                s.leaf(ColorRect::new(50.0, 30.0));
-            });
-            s.leaf(ColorRect::new(50.0, 40.0).key(3u64));
-        });
+        s.node(
+            Column::new().gap(10.0).align_items(AlignItems::Start),
+            |s| {
+                s.leaf(ColorRect::new(50.0, 20.0).key(1u64));
+                s.node(Container::new().visible(middle_visible).key(2u64), |s| {
+                    s.leaf(ColorRect::new(50.0, 30.0));
+                });
+                s.leaf(ColorRect::new(50.0, 40.0).key(3u64));
+            },
+        );
     });
     layout_root(world, root, Constraints::from_max_size([800.0, 600.0]));
 }

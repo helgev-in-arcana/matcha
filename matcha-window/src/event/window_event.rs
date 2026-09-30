@@ -126,10 +126,7 @@ impl WindowEvent {
             WindowEvent::Resized {
                 inner_size,
                 outer_size,
-            } => Some(f(
-                *inner_size,
-                *outer_size,
-            )),
+            } => Some(f(*inner_size, *outer_size)),
             _ => None,
         }
     }
@@ -142,10 +139,7 @@ impl WindowEvent {
             WindowEvent::Moved {
                 inner_position,
                 outer_position,
-            } => Some(f(
-                *inner_position,
-                *outer_position,
-            )),
+            } => Some(f(*inner_position, *outer_position)),
             _ => None,
         }
     }

@@ -197,10 +197,10 @@ fn commit_path(world: &mut World, path: Vec<Entity>) -> bool {
     // `Changed<LastFocusedChild>` stays meaningful.
     for pair in path.windows(2) {
         let (parent, child) = (pair[0], pair[1]);
-        if let Some(mut last) = world.get_mut::<LastFocusedChild>(parent) {
-            if last.0 != Some(child) {
-                last.0 = Some(child);
-            }
+        if let Some(mut last) = world.get_mut::<LastFocusedChild>(parent)
+            && last.0 != Some(child)
+        {
+            last.0 = Some(child);
         }
     }
 
@@ -336,14 +336,13 @@ pub fn sync_focus_components(world: &mut World) {
             invalidate_render_item(world, entity);
         }
     }
-    if let Some(top) = top {
-        if let Ok(mut e) = world.get_entity_mut(top) {
-            if !e.contains::<Focused>() {
-                e.insert(Focused);
-                notify_focus_dispatch(&mut e, true);
-                invalidate_render_item(world, top);
-            }
-        }
+    if let Some(top) = top
+        && let Ok(mut e) = world.get_entity_mut(top)
+        && !e.contains::<Focused>()
+    {
+        e.insert(Focused);
+        notify_focus_dispatch(&mut e, true);
+        invalidate_render_item(world, top);
     }
 }
 

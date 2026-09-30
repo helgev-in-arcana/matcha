@@ -16,19 +16,19 @@ use matcha_ecs::{
         layout::{GlobalTransform, LayoutOutput},
         view::ViewChildren,
     },
+    focus::{Focus, FocusConfig},
     input::{
         dispatch_pointer, dispatch_pointer_drag, pointer_capture, resolve_pointer_press,
         set_pointer_capture,
     },
-    layout::{layout_root, Constraints},
+    layout::{Constraints, layout_root},
     pick::{PickQuery, Picker, PickerResource, RectPicker},
-    focus::{Focus, FocusConfig},
     render::extract_items,
-    view::{run_view, Scope},
+    view::{Scope, run_view},
 };
 use matcha_ecs_widgets::{
-    scroll_view::{scroll_view, Overflow, ScrollState, ScrollView},
     ColorRect, Column,
+    scroll_view::{Overflow, ScrollState, ScrollView, scroll_view},
 };
 
 const WINDOW: [f32; 2] = [800.0, 600.0];
@@ -308,11 +308,17 @@ fn a_scroll_the_inner_view_cannot_act_on_chains_to_the_outer_one() {
         &mut world,
         hit,
         query.viewport_pos,
-        PointerPhase::Scroll { delta: [0.0, -40.0] },
+        PointerPhase::Scroll {
+            delta: [0.0, -40.0],
+        },
     );
     assert!(consumed);
     assert_eq!(inner_state.offset(), [0.0, 40.0]);
-    assert_eq!(outer_state.offset(), [0.0, 0.0], "the outer view stayed put");
+    assert_eq!(
+        outer_state.offset(),
+        [0.0, 0.0],
+        "the outer view stayed put"
+    );
 
     // Pin the inner view at its end; now it has nothing left to give.
     inner_state.set_offset([0.0, 600.0]);
@@ -320,7 +326,9 @@ fn a_scroll_the_inner_view_cannot_act_on_chains_to_the_outer_one() {
         &mut world,
         hit,
         query.viewport_pos,
-        PointerPhase::Scroll { delta: [0.0, -40.0] },
+        PointerPhase::Scroll {
+            delta: [0.0, -40.0],
+        },
     );
     assert!(consumed, "the outer view took over");
     assert_eq!(inner_state.offset(), [0.0, 600.0], "still at its end");
@@ -333,7 +341,9 @@ fn a_scroll_the_inner_view_cannot_act_on_chains_to_the_outer_one() {
         &mut world,
         hit,
         query.viewport_pos,
-        PointerPhase::Scroll { delta: [0.0, -40.0] },
+        PointerPhase::Scroll {
+            delta: [0.0, -40.0],
+        },
     );
     assert!(!consumed);
 }
@@ -391,8 +401,18 @@ fn dragging_the_thumb_scrolls_in_proportion_to_how_far_it_moved() {
 
     // A fresh press elsewhere ends the drag, so later drags do not keep
     // scrolling.
-    dispatch_pointer(&mut world, view, [20.0, 20.0], PointerPhase::Press { count: 1 });
-    assert!(!dispatch_pointer(&mut world, view, [20.0, 60.0], PointerPhase::Drag));
+    dispatch_pointer(
+        &mut world,
+        view,
+        [20.0, 20.0],
+        PointerPhase::Press { count: 1 },
+    );
+    assert!(!dispatch_pointer(
+        &mut world,
+        view,
+        [20.0, 60.0],
+        PointerPhase::Drag
+    ));
     assert_eq!(state.offset(), [0.0, 300.0]);
 }
 

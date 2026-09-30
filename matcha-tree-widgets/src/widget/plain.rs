@@ -22,6 +22,12 @@ pub struct Plain {
     pub size: [Size; 2],
 }
 
+impl Default for Plain {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Plain {
     pub fn new() -> Self {
         Self {

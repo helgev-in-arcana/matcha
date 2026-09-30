@@ -95,15 +95,12 @@ impl DeviceEventState {
                     self.mouse.mouse_wheel(pixels)
                 }
                 MouseInput::ButtonInput { state, button } => {
-                    if let Some(logical) = self.mouse.map_logical_button(button) {
-                        match state {
-                            ElementState::Pressed(_) => self.mouse.button_pressed(logical)?,
-                            ElementState::Released(_) | ElementState::LongPressed(_) => {
-                                self.mouse.button_released(logical)?
-                            }
+                    let logical = self.mouse.map_logical_button(button)?;
+                    match state {
+                        ElementState::Pressed(_) => self.mouse.button_pressed(logical)?,
+                        ElementState::Released(_) | ElementState::LongPressed(_) => {
+                            self.mouse.button_released(logical)?
                         }
-                    } else {
-                        return None;
                     }
                 }
                 _ => return None,

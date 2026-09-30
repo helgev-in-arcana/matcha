@@ -63,13 +63,12 @@ impl ButtonState {
         now: Instant,
         long_press_duration: Duration,
     ) -> Option<ElementState> {
-        if self.status == ClickStatus::Pressed {
-            if let Some(last_clicked_at) = self.last_clicked_at {
-                if now.duration_since(last_clicked_at) >= long_press_duration {
-                    self.status = ClickStatus::LongPressed;
-                    return Some(ElementState::LongPressed(self.click_combo));
-                }
-            }
+        if self.status == ClickStatus::Pressed
+            && let Some(last_clicked_at) = self.last_clicked_at
+            && now.duration_since(last_clicked_at) >= long_press_duration
+        {
+            self.status = ClickStatus::LongPressed;
+            return Some(ElementState::LongPressed(self.click_combo));
         }
         None
     }

@@ -22,10 +22,10 @@ use matcha_ecs::{
         input::{ImeDispatch, KeyDispatch, Pickable},
         view::ViewChildren,
     },
-    focus::{clear_focus, request_focus, sync_focus_components, Focus},
+    focus::{Focus, clear_focus, request_focus, sync_focus_components},
     keyboard::{dispatch_ime, dispatch_key},
-    layout::{layout_root, Constraints},
-    view::{run_view, Widget},
+    layout::{Constraints, layout_root},
+    view::{Widget, run_view},
 };
 use matcha_ecs_widgets::{ColorRect, Container};
 use matcha_window::event::device_event::{
@@ -80,7 +80,11 @@ fn on_ime(entity: &mut EntityWorldMut, event: &ImeEvent) -> bool {
 }
 
 fn on_focus(entity: &mut EntityWorldMut, gained: bool) {
-    let what = if gained { "focus(gained)" } else { "focus(lost)" };
+    let what = if gained {
+        "focus(gained)"
+    } else {
+        "focus(lost)"
+    };
     Sink::record(entity, what);
 }
 

@@ -6,17 +6,21 @@
 //! "default". `sync_cursor` itself needs a window to push to, so these tests
 //! call the resolution the way it does and inspect the answer.
 
-use bevy_ecs::{bundle::Bundle, entity::Entity, world::{EntityWorldMut, World}};
+use bevy_ecs::{
+    bundle::Bundle,
+    entity::Entity,
+    world::{EntityWorldMut, World},
+};
 
 use matcha_ecs::{
     components::{
         input::{Cursor, Pickable},
         view::ViewChildren,
     },
-    layout::{layout_root, Constraints},
+    layout::{Constraints, layout_root},
     pick::{PickerResource, RectPicker},
-    pointer::{set_position, PointerState},
-    view::{run_view, Widget},
+    pointer::{PointerState, set_position},
+    view::{Widget, run_view},
 };
 use matcha_ecs_widgets::{AlignItems, ColorRect, Column, CursorIcon};
 

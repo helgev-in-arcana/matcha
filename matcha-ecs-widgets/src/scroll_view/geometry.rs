@@ -217,7 +217,13 @@ pub fn metrics(
             r.cross_start,
             style.thickness,
         ),
-        thumb: rect(axis, thumb_start, r.thumb_len, r.cross_start, style.thickness),
+        thumb: rect(
+            axis,
+            thumb_start,
+            r.thumb_len,
+            r.cross_start,
+            style.thickness,
+        ),
     })
 }
 
@@ -396,8 +402,24 @@ mod tests {
         )
         .expect("bar");
 
-        assert_eq!(horizontal.track, [vertical.track[1], vertical.track[0], vertical.track[3], vertical.track[2]]);
-        assert_eq!(horizontal.thumb, [vertical.thumb[1], vertical.thumb[0], vertical.thumb[3], vertical.thumb[2]]);
+        assert_eq!(
+            horizontal.track,
+            [
+                vertical.track[1],
+                vertical.track[0],
+                vertical.track[3],
+                vertical.track[2]
+            ]
+        );
+        assert_eq!(
+            horizontal.thumb,
+            [
+                vertical.thumb[1],
+                vertical.thumb[0],
+                vertical.thumb[3],
+                vertical.thumb[2]
+            ]
+        );
     }
 
     #[test]
@@ -437,7 +459,10 @@ mod tests {
 
     #[test]
     fn a_viewport_too_small_for_a_track_gets_no_bar() {
-        let s = ScrollbarStyle { gap: 60.0, ..style() };
+        let s = ScrollbarStyle {
+            gap: 60.0,
+            ..style()
+        };
         assert!(metrics(Axis::Y, &tall(0.0), BOTH, &s).is_none());
     }
 

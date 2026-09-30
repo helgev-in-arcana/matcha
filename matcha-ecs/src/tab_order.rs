@@ -31,7 +31,7 @@ use matcha_window::event::device_event::{Key, KeyInput, NamedKey};
 
 use crate::{
     components::focus::FocusPolicy,
-    focus::{request_focus, Focus},
+    focus::{Focus, request_focus},
     resources::ui_root,
     traversal,
 };

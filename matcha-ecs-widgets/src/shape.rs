@@ -297,7 +297,7 @@ fn blur_rows(src: &[u8], dst: &mut [u8], w: usize, h: usize, radius: usize) {
         let at = |i: isize| row[i.clamp(0, w as isize - 1) as usize] as u32;
 
         let mut sum: u32 =
-            (0..=radius as isize).map(|i| at(i)).sum::<u32>() + row[0] as u32 * radius as u32;
+            (0..=radius as isize).map(&at).sum::<u32>() + row[0] as u32 * radius as u32;
 
         for x in 0..w {
             dst[y * w + x] = (sum / window) as u8;

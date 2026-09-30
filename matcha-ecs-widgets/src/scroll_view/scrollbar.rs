@@ -132,9 +132,10 @@ fn track_render_item(shape: ShapeCtx, style: ScrollbarStyle) -> RenderItem {
     let track = style
         .track_color
         .map(|color| BoxStyle::fill(color).radius(style.radius));
-    RenderItem::new(move |ctx: &RenderCtx, draw| match &track {
-        Some(track) => paint_box(draw, ctx, &shape, ctx.size, track),
-        None => {}
+    RenderItem::new(move |ctx: &RenderCtx, draw| {
+        if let Some(track) = &track {
+            paint_box(draw, ctx, &shape, ctx.size, track)
+        }
     })
 }
 

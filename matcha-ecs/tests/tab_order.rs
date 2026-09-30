@@ -5,17 +5,17 @@
 //! several, and that a hidden subtree drops out — all three of which come from
 //! reusing `traversal::walk` rather than from code here.
 
-use bevy_ecs::{bundle::Bundle, entity::Entity, world::{EntityWorldMut, World}};
+use bevy_ecs::{
+    bundle::Bundle,
+    entity::Entity,
+    world::{EntityWorldMut, World},
+};
 
 use matcha_ecs::{
-    components::{
-        focus::FocusPolicy,
-        layout::Hidden,
-        view::ViewChildren,
-    },
-    focus::{request_focus, Focus},
-    tab_order::{focusable_in_order, next_focusable, TabDirection},
-    view::{run_view, Widget},
+    components::{focus::FocusPolicy, layout::Hidden, view::ViewChildren},
+    focus::{Focus, request_focus},
+    tab_order::{TabDirection, focusable_in_order, next_focusable},
+    view::{Widget, run_view},
 };
 use matcha_ecs_widgets::{ColorRect, Column, Container};
 

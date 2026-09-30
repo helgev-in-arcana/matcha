@@ -1,9 +1,7 @@
 use super::common::{WinitInterface, WinitUserMessage};
 use crate::{adapter::Adapter, application::Application};
 
-pub(crate) fn run<App: Application>(
-    adapter: Adapter<App>,
-) -> Result<(), crate::error::RunError> {
+pub(crate) fn run<App: Application>(adapter: Adapter<App>) -> Result<(), crate::error::RunError> {
     let event_loop =
         winit::event_loop::EventLoop::<WinitUserMessage<App>>::with_user_event().build()?;
 

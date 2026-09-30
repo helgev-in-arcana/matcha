@@ -354,18 +354,18 @@ impl TextureAtlas {
 
 /// TextureAtlas allocation and deallocation
 impl TextureAtlas {
-    pub fn allocate(&self, size: [u32; 2]) -> Result<AtlasRegion, TextureAtlasError> {
+    pub fn allocate(&self, _size: [u32; 2]) -> Result<AtlasRegion, TextureAtlasError> {
         todo!()
     }
 
-    fn deallocate(&self, id: RegionId) -> Result<(), DeallocationErrorTextureNotFound> {
+    fn deallocate(&self, _id: RegionId) -> Result<(), DeallocationErrorTextureNotFound> {
         todo!()
     }
 }
 
 // for internal use only
 impl TextureAtlas {
-    fn get_location(&self, id: RegionId) -> Option<RegionLocation> {
+    fn get_location(&self, _id: RegionId) -> Option<RegionLocation> {
         todo!()
     }
 

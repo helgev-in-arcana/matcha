@@ -31,11 +31,7 @@ use bevy_ecs::{
 use nalgebra::Matrix4;
 
 use matcha_ecs::{
-    components::{
-        layout::GlobalTransform,
-        render::ZIndex,
-        view::Key,
-    },
+    components::{layout::GlobalTransform, render::ZIndex, view::Key},
     layout::{Constraints, Layout, LayoutCtx, LayoutDispatch, Measured},
     view::Widget,
 };

@@ -66,7 +66,7 @@ pub trait Component: utils::MaybeSendSync + 'static {
     // -----------------
 
     /// Window-event hook. The default implementation does nothing.
-    fn window_event(&self, window_id: WindowId, event: WindowEvent, ctx: &AppContext) {
+    fn window_event(&self, _window_id: WindowId, _event: WindowEvent, _ctx: &AppContext) {
         // The default handler does not close windows on a close request.
     }
 

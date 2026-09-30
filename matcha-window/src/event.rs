@@ -17,18 +17,10 @@ use device_event::MouseStateConfig;
 ///
 /// Build with [`EventStateConfig::default()`] and customise the fields you need,
 /// then pass to [`Application::with_event_config`] (or equivalent).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct EventStateConfig {
     /// Mouse gesture settings (combo timing, long-press, primary button, scroll speed).
     ///
     /// `None` means "use [`MouseStateConfig::default()`]".
     pub mouse: MouseStateConfig,
-}
-
-impl Default for EventStateConfig {
-    fn default() -> Self {
-        Self {
-            mouse: MouseStateConfig::default(),
-        }
-    }
 }

@@ -306,12 +306,12 @@ impl<C: Component> Application for UiTree<C> {
         // frame and return — the new frame will be triggered once this task finishes.
         {
             let mut tasks = self.rendering_tasks.lock();
-            if let Some(handle) = tasks.get(&window_id) {
-                if !handle.is_finished() {
-                    drop(tasks);
-                    self.request_window_redraw(window_id);
-                    return;
-                }
+            if let Some(handle) = tasks.get(&window_id)
+                && !handle.is_finished()
+            {
+                drop(tasks);
+                self.request_window_redraw(window_id);
+                return;
             }
 
             // Clone Arcs to move into the spawned task.

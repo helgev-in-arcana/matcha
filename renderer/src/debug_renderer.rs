@@ -118,7 +118,7 @@ impl DebugRenderer {
         queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
         destination_view: &wgpu::TextureView,
-        destination_size: [f32; 2],
+        _destination_size: [f32; 2],
         _objects: &RenderNode,
         load_color: wgpu::Color,
         texture_atlas: &wgpu::Texture,

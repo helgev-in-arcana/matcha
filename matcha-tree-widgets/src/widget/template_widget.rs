@@ -12,6 +12,12 @@ pub struct Template {
     pub label: Option<String>,
 }
 
+impl Default for Template {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Template {
     pub fn new() -> Self {
         Self { label: None }

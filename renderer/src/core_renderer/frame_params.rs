@@ -145,7 +145,7 @@ impl FrameParamsBinding {
         &'a self,
         base: &[Option<&'a wgpu::BindGroupLayout>],
     ) -> Vec<Option<&'a wgpu::BindGroupLayout>> {
-        let mut layouts = base.to_vec();
+        let layouts = base.to_vec();
         #[cfg(any(web, feature = "uniform-params"))]
         {
             // `base` covers groups 0..n; pad so this lands exactly on

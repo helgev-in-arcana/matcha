@@ -111,10 +111,10 @@ impl Widget for VisibilityWidget {
         event: &DeviceEvent,
         ctx: &UiContext,
     ) -> WidgetInteractionResult {
-        if self.visibility == VisibilityState::Visible {
-            if let Some(child) = &mut self.child {
-                return child.device_input(bounds, event, ctx);
-            }
+        if self.visibility == VisibilityState::Visible
+            && let Some(child) = &mut self.child
+        {
+            return child.device_input(bounds, event, ctx);
         }
         WidgetInteractionResult::NoChange
     }
@@ -131,10 +131,10 @@ impl Widget for VisibilityWidget {
     }
 
     fn render(&mut self, bounds: [f32; 2], ctx: &UiContext, draw: &mut Draw<'_>) {
-        if self.visibility == VisibilityState::Visible {
-            if let Some(child) = &mut self.child {
-                child.render(bounds, ctx, draw);
-            }
+        if self.visibility == VisibilityState::Visible
+            && let Some(child) = &mut self.child
+        {
+            child.render(bounds, ctx, draw);
         }
     }
 }
