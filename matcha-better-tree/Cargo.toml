@@ -1,0 +1,42 @@
+[package]
+name = "matcha-better-tree"
+edition = "2024"
+version.workspace = true
+
+[dependencies]
+# self
+render-interface = { workspace = true }
+plain-renderer = { workspace = true }
+utils = { workspace = true }
+gpu-utils = { workspace = true }
+shared-buffer = { workspace = true }
+matcha-window = { workspace = true }
+
+# async runtime, utility
+tokio = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+
+# graphics
+wgpu = { workspace = true }
+bytemuck = { features = ["derive"], workspace = true }
+
+# math
+nalgebra = { features = ["bytemuck"], workspace = true }
+
+# other
+bitflags = { workspace = true }
+num = { workspace = true }
+fxhash = { workspace = true }
+dashmap = { workspace = true }
+smallvec = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+[features]
+default = ["winit"]
+winit = ["matcha-window/winit"]
+baseview = ["matcha-window/baseview"]
+
+[lints]
+workspace = true
