@@ -34,10 +34,22 @@ impl Into<Bounds> for Point {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Position {
+    /// Size in the widget's local coordinate system.
     pub bounds: Bounds,
+    /// Affine mapping from this widget's local coordinates to its parent's local coordinates.
+    /// This is a relative transform, with homogeneous last row `[0, 0, 0, 1]`.
     pub affine: Matrix4<f32>,
+}
+
+impl Default for Position {
+    fn default() -> Self {
+        Self {
+            bounds: Bounds::default(),
+            affine: Matrix4::identity(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
