@@ -7,13 +7,16 @@ use matcha_window::event::device_event::{
 use nalgebra::Vector3;
 
 use super::*;
+use crate::metrics::Position;
 
+mod cache;
 mod input;
 mod updates;
 
 #[derive(Default)]
 struct Observations {
     events: Vec<DeviceEvent>,
+    measure_calls: usize,
     layout_calls: usize,
     layout_bounds: Vec<Bounds>,
 }
@@ -36,7 +39,7 @@ impl Widget for ProbeWidget {
 
     fn update<'a>(&mut self, view: &'a Self::V, _: &mut DeclContext<'a>) -> UpdateResult {
         self.0 = Arc::clone(&view.0);
-        UpdateResult::Unchanged
+        UpdateResult::empty()
     }
 
     fn input(&mut self, _: Bounds, event: &DeviceEvent, _: Context) -> InputResult {
@@ -46,8 +49,12 @@ impl Widget for ProbeWidget {
 
     // Use Widget's default Bounds-based hit test.
 
-    fn measure(&self, _: Constraints, _: Children<'_>, _: Context) -> Bounds {
-        bounds()
+    fn measure(&self, _: Constraints, _: Children<'_>, ctx: Context) -> Bounds {
+        self.0.lock().unwrap().measure_calls += 1;
+        Bounds {
+            x: bounds().x * ctx.scale_factor(),
+            ..bounds()
+        }
     }
 
     fn layout(&self, bounds: Bounds, _: Children<'_>, _: Context) {
@@ -97,9 +104,9 @@ impl<V: View> Widget for ContainerWidget<V> {
         self.child = ctx.child(&view.child);
         self.child_position = view.child_position;
         if changed {
-            UpdateResult::Changed
+            UpdateResult::LAYOUT
         } else {
-            UpdateResult::Unchanged
+            UpdateResult::empty()
         }
     }
 

@@ -52,7 +52,7 @@ impl Widget for NodeWidget {
     type V = NodeView;
     fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a>) -> UpdateResult {
         self.child = view.child.as_deref().map(|child| ctx.child(child));
-        UpdateResult::Unchanged
+        UpdateResult::empty()
     }
     fn input(&mut self, _: Bounds, _: &DeviceEvent, _: Context) -> InputResult {
         self.input_log.lock().unwrap().push(self.key);

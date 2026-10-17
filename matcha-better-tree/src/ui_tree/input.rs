@@ -57,8 +57,11 @@ impl UiTree {
             } else {
                 widget.input(*bounds, event, ctx.clone())
             };
-            if response.update == UpdateResult::Changed {
-                result.update = UpdateResult::Changed;
+            result.update |= response.update;
+            if response.update.contains(UpdateResult::RENDER) {
+                self.node_ref_mut(*id).unwrap().draw_cache = None;
+            }
+            if response.update.contains(UpdateResult::LAYOUT) {
                 deepest_changed = Some(deepest_changed.map_or(index, |old| old.max(index)));
             }
             if response.propagation == InputPropagation::Stop {

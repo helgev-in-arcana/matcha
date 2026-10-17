@@ -66,7 +66,7 @@ impl InputWidget {
         } else {
             self.view.input
         };
-        if result.update == UpdateResult::Changed {
+        if result.update.contains(UpdateResult::LAYOUT) {
             self.width += 1.0;
         }
         result
@@ -78,7 +78,7 @@ impl Widget for InputWidget {
     fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a>) -> UpdateResult {
         self.view = view.clone();
         self.children = view.children.iter().map(|child| ctx.child(child)).collect();
-        UpdateResult::Unchanged
+        UpdateResult::empty()
     }
     fn preview_input(&mut self, _: Bounds, event: &DeviceEvent, _: Context) -> InputResult {
         self.record(true, event)
@@ -213,7 +213,7 @@ fn preview_descends_and_normal_input_bubbles_on_one_path() {
 fn preview_stop_prevents_target_delivery_but_invalidates_ancestors() {
     let mut view = tree();
     view.children[0].preview = InputResult {
-        update: UpdateResult::Changed,
+        update: UpdateResult::LAYOUT,
         propagation: InputPropagation::Stop,
     };
     let mut tree = ready(&view);
@@ -229,7 +229,7 @@ fn preview_stop_prevents_target_delivery_but_invalidates_ancestors() {
 fn target_stop_does_not_stop_cache_invalidation_to_root() {
     let mut view = tree();
     view.children[0].children[0].input = InputResult {
-        update: UpdateResult::Changed,
+        update: UpdateResult::LAYOUT,
         propagation: InputPropagation::Stop,
     };
     let mut tree = ready(&view);
@@ -258,14 +258,14 @@ fn target_stop_does_not_stop_cache_invalidation_to_root() {
 #[test]
 fn changes_in_preview_survive_a_later_unchanged_stop() {
     let mut view = tree();
-    view.preview.update = UpdateResult::Changed;
+    view.preview.update = UpdateResult::LAYOUT;
     view.children[0].children[0].input.propagation = InputPropagation::Stop;
     let mut tree = ready(&view);
     let result = tree.input(&mouse_event(5.0, 5.0), Context::new());
     assert_eq!(
         result,
         InputResult {
-            update: UpdateResult::Changed,
+            update: UpdateResult::LAYOUT,
             propagation: InputPropagation::Stop
         }
     );
@@ -291,7 +291,7 @@ fn unchanged_stop_preserves_all_caches() {
 #[test]
 fn changed_continue_reaches_root_and_preserves_unvisited_sibling() {
     let mut view = tree();
-    view.children[0].children[0].input.update = UpdateResult::Changed;
+    view.children[0].children[0].input.update = UpdateResult::LAYOUT;
     let mut tree = ready(&view);
     let result = tree.input(&mouse_event(5.0, 5.0), Context::new());
     assert_eq!(result, view.children[0].children[0].input);
@@ -391,4 +391,33 @@ fn empty_unplaced_and_missed_trees_produce_no_callbacks() {
     tree.layout(bounds(), Context::new());
     assert_eq!(tree.input(&event, Context::new()), InputResult::default());
     assert!(view.log.lock().unwrap().is_empty());
+}
+
+#[test]
+fn preview_and_bubble_union_flags_without_cross_invalidating_drawing() {
+    let mut view = tree();
+    view.preview.update = UpdateResult::RENDER;
+    view.children[0].children[0].input = InputResult {
+        update: UpdateResult::LAYOUT,
+        propagation: InputPropagation::Stop,
+    };
+    let mut tree = ready(&view);
+    tree.render(Context::new()).unwrap();
+    assert_eq!(
+        tree.input(&mouse_event(5.0, 5.0), Context::new()),
+        InputResult {
+            update: UpdateResult::LAYOUT | UpdateResult::RENDER,
+            propagation: InputPropagation::Stop,
+        }
+    );
+    assert_invalidated(&tree, &[1, 2, 3]);
+    assert!(tree.node_ref(find(&tree, 1)).unwrap().draw_cache.is_none());
+    for key in [2, 3, 4] {
+        assert!(
+            tree.node_ref(find(&tree, key))
+                .unwrap()
+                .draw_cache
+                .is_some()
+        );
+    }
 }

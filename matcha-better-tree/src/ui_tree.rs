@@ -7,10 +7,17 @@ use smallvec::SmallVec;
 
 use crate::arena::{Arena, Id as UiId};
 use crate::context::Context;
-use crate::metrics::{Bounds, Constraints, Point, Position};
-use crate::widget::{ChildId, Draw, InputPropagation, InputResult, UpdateResult, View, Widget};
+use crate::metrics::{Bounds, Constraints, Point};
+use crate::widget::{
+    ChildId, Draw, InputPropagation, InputResult, UiError, UpdateResult, View, Widget,
+};
 
+mod cache;
 mod input;
+mod layout;
+mod render;
+
+use cache::CacheEpochs;
 
 const CHILDREN_SMALLVEC: usize = 4;
 
@@ -18,6 +25,7 @@ const CHILDREN_SMALLVEC: usize = 4;
 pub struct UiTree {
     nodes: Arena<UiNode>,
     root: Option<UiId>,
+    cache_epochs: CacheEpochs,
 }
 
 trait AnyView: Any {
@@ -54,6 +62,7 @@ trait AnyWidget: Any {
     fn is_inside(&self, b: Bounds, p: Point, ctx: Context) -> bool;
     fn measure(&self, constraints: Constraints, children: Children<'_>, ctx: Context) -> Bounds;
     fn layout(&self, bounds: Bounds, children: Children<'_>, ctx: Context);
+    fn uses_backdrop(&self) -> bool;
     fn render(&self, bounds: Bounds, ctx: Context) -> Draw;
 }
 
@@ -87,6 +96,9 @@ impl<W: Widget> AnyWidget for W {
     }
     fn render(&self, bounds: Bounds, ctx: Context) -> Draw {
         Widget::render(self, bounds, ctx)
+    }
+    fn uses_backdrop(&self) -> bool {
+        Widget::uses_backdrop(self)
     }
 }
 
@@ -123,6 +135,8 @@ struct UiNode {
 
     // draw cache
     draw_cache: Option<Draw>,
+    // Environment epochs last observed by each independent cache group.
+    cache_epochs: CacheEpochs,
 
     // widget main body
     widget: Option<Box<dyn AnyWidget>>,
@@ -152,6 +166,7 @@ impl UiTree {
         Self {
             nodes: Arena::new(),
             root: None,
+            cache_epochs: CacheEpochs::default(),
         }
     }
 
@@ -164,20 +179,6 @@ impl UiTree {
             self.nodes.clear();
             let id = self.build_new(None, view);
             self.root = Some(id);
-        }
-    }
-
-    /// Assign root-local bounds and lay out the tree.
-    pub fn layout(&mut self, bounds: Bounds, ctx: Context) {
-        if let Some(root) = self.root {
-            self.layout_node(
-                root,
-                Position {
-                    bounds,
-                    affine: Matrix4::identity(),
-                },
-                ctx,
-            );
         }
     }
 
@@ -198,44 +199,6 @@ impl UiTree {
             .insert_reserved(id, node)
             .unwrap_or_else(|_| panic!("new node must fill its current reservation"));
         id
-    }
-
-    fn layout_node(&mut self, id: UiId, position: Position, ctx: Context) {
-        let Some(node) = self.node_ref_mut(id) else {
-            return;
-        };
-        let affine_inverse = match node.placement {
-            Some(placement) if placement.affine == position.affine => placement.affine_inverse,
-            _ => position.affine.try_inverse(),
-        };
-        node.placement = Some(Placement {
-            bounds: position.bounds,
-            affine: position.affine,
-            affine_inverse,
-        });
-
-        // Movement changes placement but does not invalidate the children's local layout.
-        if node.layout_cache == Some(position.bounds) {
-            return;
-        }
-
-        let widget = node
-            .widget
-            .take()
-            .expect("writing back the widget into ui_node has been forgotten somewhere");
-        widget.layout(
-            position.bounds,
-            Children {
-                tree: self,
-                current: id,
-            },
-            ctx,
-        );
-        let node = self
-            .node_ref_mut(id)
-            .expect("tree cannot be changed during layout");
-        node.widget = Some(widget);
-        node.layout_cache = Some(position.bounds);
     }
 
     fn build_node(
@@ -267,6 +230,7 @@ impl UiTree {
             measure_cache: None,
             layout_cache: None,
             draw_cache: None,
+            cache_epochs: self.cache_epochs,
             widget: Some(widget),
         }
     }
@@ -302,7 +266,7 @@ impl UiTree {
         {
             Ok(result) => {
                 let (children, children_changed) = ctx.finish(self, id);
-                let changed = result == UpdateResult::Changed || children_changed;
+                let changed = result.contains(UpdateResult::LAYOUT) || children_changed;
                 let key = view.ui_key();
                 // re-get the node after finish to avoid borrow checker issues
                 let node = self.node_ref_mut(id).unwrap();
@@ -313,6 +277,9 @@ impl UiTree {
                 }
                 node.key = key;
                 node.children = children;
+                if result.contains(UpdateResult::RENDER) {
+                    node.draw_cache = None;
+                }
                 if changed {
                     node.measure_cache = None;
                     node.layout_cache = None;
@@ -504,46 +471,6 @@ impl Children<'_> {
                 .as_ref()?
                 .is_inside(placement.bounds, point, ctx),
         )
-    }
-
-    pub fn measure(
-        &mut self,
-        id: ChildId,
-        constraints: Constraints,
-        ctx: Context,
-    ) -> Option<Bounds> {
-        let (node, ui_id) = self.get(id)?;
-
-        if let Some((cached_constraints, cached_bounds)) = node.measure_cache
-            && cached_constraints == constraints
-        {
-            return Some(cached_bounds);
-        }
-
-        let widget = std::mem::take(&mut node.widget)
-            .expect("writing back the widget into ui_node has been forgotten somewhere");
-        let bounds = {
-            let children = Children {
-                tree: self.tree,
-                current: ui_id,
-            };
-            widget.measure(constraints, children, ctx)
-        };
-        let (node, _) = self
-            .get(id)
-            .expect("tree cannot be changed during this method");
-        node.widget = Some(widget);
-        node.measure_cache = Some((constraints, bounds));
-
-        Some(bounds)
-    }
-
-    /// Place a child using bounds in its own coordinates and an affine mapping to this parent.
-    pub fn layout(&mut self, id: ChildId, position: Position, ctx: Context) {
-        let Some((_, ui_id)) = self.get(id) else {
-            return;
-        };
-        self.tree.layout_node(ui_id, position, ctx);
     }
 }
 

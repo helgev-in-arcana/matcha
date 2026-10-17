@@ -162,6 +162,23 @@ impl<T> Arena<T> {
                 _ => None,
             })
     }
+
+    /// Mutably iterate live values, excluding free and reserved slots.
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (Id, &mut T)> {
+        self.slots
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, slot)| match slot {
+                Slot::Occupied { value, generation } => Some((
+                    Id {
+                        index,
+                        generation: *generation,
+                    },
+                    value,
+                )),
+                _ => None,
+            })
+    }
 }
 
 #[cfg(test)]

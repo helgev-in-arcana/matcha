@@ -57,9 +57,9 @@ impl Widget for NodeWidget {
         // Deliberately report only local changes: the framework must detect child changes.
         self.children = view.children.iter().map(|child| ctx.child(child)).collect();
         if changed {
-            UpdateResult::Changed
+            UpdateResult::LAYOUT
         } else {
-            UpdateResult::Unchanged
+            UpdateResult::empty()
         }
     }
     fn input(&mut self, _: Bounds, _: &DeviceEvent, _: Context) -> InputResult {
@@ -294,9 +294,9 @@ impl Widget for AlternateWidget {
         let changed = self.0 != view.width;
         self.0 = view.width;
         if changed {
-            UpdateResult::Changed
+            UpdateResult::LAYOUT
         } else {
-            UpdateResult::Unchanged
+            UpdateResult::empty()
         }
     }
     fn input(&mut self, _: Bounds, _: &DeviceEvent, _: Context) -> InputResult {
