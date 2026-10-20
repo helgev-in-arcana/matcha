@@ -87,6 +87,9 @@ impl UiTree {
     /// explicit render-mask/clip policy will need to be shared with rendering when it is added.
     pub(super) fn hit_test(&self, id: UiId, point: Point, ctx: &Context) -> Option<UiId> {
         let node = self.node_ref(id)?;
+        if node.window.is_some() {
+            return None;
+        }
         let placement = node.placement?;
         let local = placement.affine_inverse? * Vector4::new(point.x, point.y, point.z, 1.0);
         let point = Point {

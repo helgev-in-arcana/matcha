@@ -7,8 +7,10 @@ use matcha_window::clipboard::Clipboard;
 use matcha_window::window::{CursorIcon, Window, WindowConfig};
 use parking_lot::Mutex;
 
+use crate::window::WindowRegistry;
+
 #[derive(Default)]
-struct PlatformState {
+pub(crate) struct PlatformState {
     cursor_icon: CursorIcon,
     pushed_cursor_icon: CursorIcon,
 
@@ -20,7 +22,6 @@ struct PlatformState {
 }
 
 struct SharedContext {
-    platform: Mutex<PlatformState>,
     clipboard: OnceLock<Clipboard>,
     resources: DashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
@@ -28,7 +29,6 @@ struct SharedContext {
 impl Default for SharedContext {
     fn default() -> Self {
         Self {
-            platform: Mutex::new(PlatformState::default()),
             clipboard: OnceLock::new(),
             resources: DashMap::new(),
         }
@@ -36,27 +36,31 @@ impl Default for SharedContext {
 }
 
 #[derive(Clone)]
-pub struct Context {
+pub struct Context<'a> {
+    windows: Option<&'a WindowRegistry>,
     viewport_size: [f32; 2],
     dpi: f64,
     frame_time: Instant,
     window_config: Option<Arc<WindowConfig>>,
+    platform: Arc<Mutex<PlatformState>>,
     shared: Arc<SharedContext>,
 }
 
-impl Default for Context {
+impl Default for Context<'_> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Context {
+impl<'a> Context<'a> {
     pub fn new() -> Self {
         Self {
+            windows: None,
             viewport_size: [0.0, 0.0],
             dpi: 1.0,
             frame_time: Instant::now(),
             window_config: None,
+            platform: Arc::new(Mutex::new(PlatformState::default())),
             shared: Arc::new(SharedContext::default()),
         }
     }
@@ -64,6 +68,46 @@ impl Context {
     pub fn with_window_config(mut self, config: WindowConfig) -> Self {
         self.window_config = Some(Arc::new(config));
         self
+    }
+
+    /// Borrow the application's registry for the duration of a tree operation.
+    /// Context clones copy this reference; they do not share ownership of it.
+    ///
+    /// A borrowed context cannot outlive the application's registry:
+    /// ```compile_fail
+    /// use matcha_better_tree::{context::Context, window::WindowRegistry};
+    /// let context;
+    /// {
+    ///     let registry = WindowRegistry::default();
+    ///     context = Context::new().with_window_registry(&registry);
+    /// }
+    /// assert!(context.window_registry().is_some());
+    /// ```
+    pub fn with_window_registry<'b>(self, windows: &'b WindowRegistry) -> Context<'b> {
+        Context {
+            windows: Some(windows),
+            viewport_size: self.viewport_size,
+            dpi: self.dpi,
+            frame_time: self.frame_time,
+            window_config: self.window_config,
+            platform: self.platform,
+            shared: self.shared,
+        }
+    }
+
+    /// None for a standalone/offscreen context without application window services.
+    pub fn window_registry(&self) -> Option<&'a WindowRegistry> {
+        self.windows
+    }
+
+    pub(crate) fn for_window(&self, platform: Arc<Mutex<PlatformState>>) -> Self {
+        Self {
+            viewport_size: [0.0, 0.0],
+            dpi: 1.0,
+            window_config: None,
+            platform,
+            ..self.clone()
+        }
     }
 
     pub fn with_viewport_size(mut self, viewport_size: [f32; 2]) -> Self {
@@ -83,7 +127,7 @@ impl Context {
 
     /// Synchronize any changed cursor icon or IME state to the OS window.
     pub fn sync_to_window(&self, window: &Window) {
-        let mut state = self.shared.platform.lock();
+        let mut state = self.platform.lock();
 
         if state.cursor_icon != state.pushed_cursor_icon {
             window.set_cursor_icon(state.cursor_icon);
@@ -110,7 +154,7 @@ impl Context {
     }
 }
 
-impl Context {
+impl Context<'_> {
     // --- Window & Metrics ---
 
     pub fn viewport_size(&self) -> [f32; 2] {
@@ -136,29 +180,29 @@ impl Context {
     // --- Cursor ---
 
     pub fn set_cursor_icon(&self, icon: CursorIcon) {
-        self.shared.platform.lock().cursor_icon = icon;
+        self.platform.lock().cursor_icon = icon;
     }
 
     pub fn cursor_icon(&self) -> CursorIcon {
-        self.shared.platform.lock().cursor_icon
+        self.platform.lock().cursor_icon
     }
 
     // --- IME ---
 
     pub fn set_ime_allowed(&self, allowed: bool) {
-        self.shared.platform.lock().ime_allowed = allowed;
+        self.platform.lock().ime_allowed = allowed;
     }
 
     pub fn is_ime_allowed(&self) -> bool {
-        self.shared.platform.lock().ime_allowed
+        self.platform.lock().ime_allowed
     }
 
     pub fn set_ime_cursor_area(&self, position: [f32; 2], size: [f32; 2]) {
-        self.shared.platform.lock().ime_cursor_area = Some((position, size));
+        self.platform.lock().ime_cursor_area = Some((position, size));
     }
 
     pub fn ime_cursor_area(&self) -> Option<([f32; 2], [f32; 2])> {
-        self.shared.platform.lock().ime_cursor_area
+        self.platform.lock().ime_cursor_area
     }
 
     // --- Clipboard ---

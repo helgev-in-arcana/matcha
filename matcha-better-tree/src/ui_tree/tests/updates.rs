@@ -323,6 +323,9 @@ fn same_key_type_rebuild_is_reported_even_when_child_ids_do_not_change() {
     assert_eq!(warm(&mut tree, root, child).x, 10.0);
     let old_children = std::mem::take(&mut tree.node_ref_mut(root).unwrap().children);
     let mut ctx = DeclContext {
+        context: tree.context.clone(),
+        current: root,
+        window: None,
         old_children: old_children
             .iter()
             .map(|(child, id)| (tree.node_ref(*id).unwrap().key, *child, *id))
