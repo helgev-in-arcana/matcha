@@ -23,6 +23,9 @@ impl UiTree {
 
     fn check_render_layout(&self, id: UiId) -> Result<(), UiError> {
         let node = self.node_ref(id).expect("live render tree");
+        if node.window.is_some() {
+            return Ok(());
+        }
         if node.cache_epochs.layout != self.cache_epochs.layout
             || node
                 .placement
@@ -47,6 +50,9 @@ impl UiTree {
     ) -> Result<(), UiError> {
         let epoch = self.cache_epochs.render;
         let node = self.node_ref_mut(id).expect("live render tree");
+        if node.window.is_some() {
+            return Ok(());
+        }
         node.sync_render_epoch(epoch);
         let placement = node.placement.expect("layout validated before rendering");
         let widget = node.widget.as_ref().expect("widget restored after layout");

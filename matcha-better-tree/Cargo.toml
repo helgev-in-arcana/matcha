@@ -24,6 +24,9 @@ bytemuck = { features = ["derive"], workspace = true }
 # math
 nalgebra = { features = ["bytemuck"], workspace = true }
 
+# wasm support
+web-time = { workspace = true }
+
 # other
 bitflags = { workspace = true }
 num = { workspace = true }
@@ -32,6 +35,9 @@ dashmap = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+matcha-window = { workspace = true, features = ["headless"] }
 
 [features]
 default = ["winit"]

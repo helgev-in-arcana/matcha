@@ -11,6 +11,7 @@ use crate::metrics::{Bounds, Constraints, Point};
 use crate::widget::{
     ChildId, Draw, InputPropagation, InputResult, UiError, UpdateResult, View, Widget,
 };
+use crate::window::WindowInstanceId;
 
 mod cache;
 mod input;
@@ -26,6 +27,7 @@ pub struct UiTree {
     nodes: Arena<UiNode>,
     root: Option<UiId>,
     cache_epochs: CacheEpochs,
+    context: Context<'static>,
 }
 
 trait AnyView: Any {
@@ -120,6 +122,8 @@ struct UiNode {
     // identify
     label: Option<String>,
     key: UiKey,
+    // Declaration traversal crosses windows; parent drawing/input traversal does not.
+    window: Option<WindowInstanceId>,
 
     // tree
     parent: Option<UiId>,
@@ -167,50 +171,89 @@ impl UiTree {
             nodes: Arena::new(),
             root: None,
             cache_epochs: CacheEpochs::default(),
+            context: Context::new(),
         }
     }
 
+    /// Shared declaration resources. App borrows its registry into a clone when updating.
+    pub fn context(&self) -> &Context<'static> {
+        &self.context
+    }
+
     /// Reconcile the declared view tree and invalidate changed nodes and their ancestors.
+    /// For trees containing Window declarations, use update_with_context instead.
     pub fn update<V: View>(&mut self, view: &V) {
+        self.update_with_context(view, self.context.clone());
+    }
+
+    /// Reconcile using application services borrowed for this operation.
+    /// Window declarations require a registry supplied through Context. Use the
+    /// same registry for this tree's lifetime; a registry serves one application tree.
+    pub fn update_with_context<'a, V: View>(&mut self, view: &'a V, context: Context<'a>) {
+        self.require_window_context(&context);
         if let Some(id) = self.root {
-            self.update_node(id, view);
+            self.update_node(id, view, &context);
         } else {
             // Clear storage explicitly before starting a fresh tree, including abandoned reservations.
             self.nodes.clear();
-            let id = self.build_new(None, view);
+            let id = self.build_new(None, view, &context);
             self.root = Some(id);
         }
     }
 
     /// Remove the tree and any outstanding reservations while retaining tree capacity.
+    /// Window trees must use clear_with_context to release registry-owned resources.
     pub fn clear(&mut self) {
+        self.clear_with_context(self.context.clone());
+    }
+
+    /// Remove nodes and unregister their windows using borrowed application services.
+    pub fn clear_with_context(&mut self, context: Context<'_>) {
+        self.require_window_context(&context);
         if let Some(root) = self.root.take() {
-            self.remove_reverse_scan_order(root);
+            self.remove_reverse_scan_order(root, &context);
         }
         self.nodes.clear();
     }
 
-    fn build_new(&mut self, parent: Option<UiId>, view: &dyn AnyView) -> UiId {
+    fn require_window_context(&self, context: &Context<'_>) {
+        assert!(
+            context.window_registry().is_some()
+                || !self.nodes.iter().any(|(_, node)| node.window.is_some()),
+            "updating or clearing a Window tree requires its application WindowRegistry in Context"
+        );
+    }
+
+    fn build_new<'a>(
+        &mut self,
+        parent: Option<UiId>,
+        view: &'a dyn AnyView,
+        context: &Context<'a>,
+    ) -> UiId {
         let id = self.nodes.reserve();
         // Explicit two-phase allocation: the parent ID exists while children are built,
         // but a reserved node is not yet observable through get/get_mut.
-        let node = self.build_node(parent, id, view, None);
+        let node = self.build_node(parent, id, view, None, context);
         self.nodes
             .insert_reserved(id, node)
             .unwrap_or_else(|_| panic!("new node must fill its current reservation"));
         id
     }
 
-    fn build_node(
+    fn build_node<'a>(
         &mut self,
         parent: Option<UiId>,
         id: UiId,
-        view: &dyn AnyView,
+        view: &'a dyn AnyView,
         child_candidate: Option<Vec<(UiKey, ChildId, UiId)>>,
+        context: &Context<'a>,
     ) -> UiNode {
         let current_id = id;
 
         let mut ctx = DeclContext {
+            context: context.clone(),
+            current: id,
+            window: None,
             old_children: child_candidate.unwrap_or_default(),
             queued_widgets: Vec::new(),
             structure_changed: false,
@@ -219,11 +262,13 @@ impl UiTree {
         let label = view.label().map(|s| s.to_string());
         let key = view.ui_key();
         let widget = view.build(&mut ctx);
+        let window = ctx.window;
         let (children, _) = ctx.finish(self, current_id);
 
         UiNode {
             label,
             key,
+            window,
             parent,
             children,
             placement: None,
@@ -236,12 +281,15 @@ impl UiTree {
     }
 
     // Return whether this subtree changed so callers invalidate ancestors on the way back up.
-    fn update_node(&mut self, id: UiId, view: &dyn AnyView) -> bool {
+    fn update_node<'a>(&mut self, id: UiId, view: &'a dyn AnyView, context: &Context<'a>) -> bool {
         let node = self
             .node_ref_mut(id)
             .expect("`update_node` is only called with ids taken from the live tree.");
 
         let mut ctx = DeclContext {
+            context: context.clone(),
+            current: id,
+            window: node.window,
             old_children: std::mem::take(&mut node.children)
                 .into_iter()
                 .map(|(child_id, id)| {
@@ -288,8 +336,15 @@ impl UiTree {
             }
             Err(UiInternalError::WidgetUpdateFailedTypeMismatch) => {
                 let parent = self.node_ref_mut(id).unwrap().parent;
+                let old_window = self.node_ref(id).unwrap().window;
                 // rebuild
-                let node = self.build_node(parent, id, view, Some(ctx.old_children));
+                let node = self.build_node(parent, id, view, Some(ctx.old_children), context);
+                if let Some(window) = old_window {
+                    context
+                        .window_registry()
+                        .expect("window context checked before updating")
+                        .unregister(window);
+                }
                 let node_mut = self.node_ref_mut(id).unwrap();
                 *node_mut = node;
                 true
@@ -297,13 +352,20 @@ impl UiTree {
         }
     }
 
-    fn remove_reverse_scan_order(&mut self, id: UiId) {
+    fn remove_reverse_scan_order(&mut self, id: UiId, context: &Context<'_>) {
         let Some(node) = self.node_ref_mut(id) else {
             return;
         };
         let children = std::mem::take(&mut node.children);
+        let window = node.window;
         for (_, child) in children.into_iter().rev() {
-            self.remove_reverse_scan_order(child);
+            self.remove_reverse_scan_order(child, context);
+        }
+        if let Some(window) = window {
+            context
+                .window_registry()
+                .expect("window context checked before removing nodes")
+                .unregister(window);
         }
         self.nodes.remove(id);
     }
@@ -335,6 +397,9 @@ impl Default for UiTree {
 //   their state with the position, not with the view; give them explicit keys to reorder.
 
 pub struct DeclContext<'a> {
+    context: Context<'a>,
+    current: UiId,
+    window: Option<WindowInstanceId>,
     // Children of the previous frame not yet claimed by `DeclContext::child`.
     old_children: Vec<(UiKey, ChildId, UiId)>,
     queued_widgets: Vec<QueuedView<'a>>,
@@ -358,15 +423,17 @@ impl DeclContext<'_> {
         current_id: UiId,
     ) -> (SmallVec<[(ChildId, UiId); CHILDREN_SMALLVEC]>, bool) {
         let Self {
+            context,
             old_children,
             queued_widgets,
             structure_changed,
+            ..
         } = self;
         let mut changed = structure_changed || !old_children.is_empty();
 
         // remove old branch
         for (_, _, id) in old_children.iter().rev() {
-            tree.remove_reverse_scan_order(*id);
+            tree.remove_reverse_scan_order(*id, &context);
         }
 
         let mut new_children = SmallVec::new();
@@ -376,11 +443,11 @@ impl DeclContext<'_> {
             if let Some(scoped_id) = q.existing_index {
                 // update it
                 // Do not short-circuit: every declared child must be updated.
-                changed |= tree.update_node(scoped_id, q.view);
+                changed |= tree.update_node(scoped_id, q.view, &context);
                 new_children.push((q.child_id, scoped_id));
             } else {
                 // build new
-                let scoped_id = tree.build_new(Some(current_id), q.view);
+                let scoped_id = tree.build_new(Some(current_id), q.view, &context);
                 new_children.push((q.child_id, scoped_id));
             }
         }
@@ -408,6 +475,24 @@ pub(crate) enum UiInternalError {
 // -----------
 
 impl<'a> DeclContext<'a> {
+    pub fn context(&self) -> &Context<'a> {
+        &self.context
+    }
+
+    pub(crate) fn register_window(
+        &mut self,
+        config: crate::window::WindowConfig,
+        content: ChildId,
+    ) -> WindowInstanceId {
+        let id = self
+            .context
+            .window_registry()
+            .expect("Window declarations require an application WindowRegistry in Context")
+            .register(self.current, config, content);
+        self.window = Some(id);
+        id
+    }
+
     pub fn child<V: View>(&mut self, view: &'a V) -> ChildId {
         // check if the view is already in the tree
         let key = view.ui_key();

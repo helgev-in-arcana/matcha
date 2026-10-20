@@ -12,6 +12,7 @@ use crate::metrics::Position;
 mod cache;
 mod input;
 mod updates;
+mod windows;
 
 #[derive(Default)]
 struct Observations {
