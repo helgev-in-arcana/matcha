@@ -3,70 +3,69 @@ use render_interface::{Object, Phase, PixelMask, PixelMaskIndex, Scene};
 
 use super::*;
 
-mod resources;
-
 impl UiTree {
     /// Build a complete Scene for PlainRenderer (or another render-interface implementation).
     /// Call layout after geometry updates. This method does not schedule layout or GPU work.
     /// Pure draw definitions/IDs are reused; Backdrop subtrees are refreshed every call.
     /// Rebuild the Scene when its external background or target mapping changes: replaying a
     /// previously returned Scene keeps its immutable IDs, including those of snapshot readers.
-    pub fn render(&mut self, ctx: Context) -> Result<Scene, UiError> {
-        let mut scene = Scene::default();
-        if let Some(root) = self.root {
-            self.check_render_layout(root)?;
-            scene.phases.push(Phase::default());
-            self.render_node(root, Matrix4::identity(), None, false, &ctx, &mut scene)?;
+    pub fn render(&mut self, ctx: &mut Context) -> Result<Scene, UiError> {
+        match self.root {
+            Some(root) => self.render_from(root, ctx),
+            None => Ok(Scene::default()),
         }
+    }
+
+    pub(super) fn render_from(&mut self, root: UiId, ctx: &mut Context) -> Result<Scene, UiError> {
+        self.check_render_layout(root, ctx)?;
+        let mut scene = Scene::default();
+        scene.phases.push(Phase::default());
+        self.render_node(root, Matrix4::identity(), None, false, ctx, &mut scene)?;
         Ok(scene)
     }
 
-    fn check_render_layout(&self, id: UiId) -> Result<(), UiError> {
+    pub(super) fn check_render_layout(&self, id: UiId, ctx: &mut Context) -> Result<(), UiError> {
         let node = self.node_ref(id).expect("live render tree");
+        let mut scoped = node.scoped_context(ctx);
+        let ctx = &mut scoped;
         if node.window.is_some() {
             return Ok(());
         }
-        if node.cache_epochs.layout != self.cache_epochs.layout
-            || node
-                .placement
-                .is_none_or(|p| node.layout_cache != Some(p.bounds))
+        if node
+            .placement
+            .is_none_or(|p| !node.cache.laid_out(p.bounds, ctx.cache_epoch()))
         {
             return Err(UiError::LayoutRequired);
         }
         for (_, child) in &node.children {
-            self.check_render_layout(*child)?;
+            self.check_render_layout(*child, ctx)?;
         }
         Ok(())
     }
 
-    fn render_node(
+    pub(super) fn render_node(
         &mut self,
         id: UiId,
         parent_transform: Matrix4<f32>,
         parent_mask: Option<PixelMaskIndex>,
         inherited_backdrop: bool,
-        ctx: &Context,
+        ctx: &mut Context,
         scene: &mut Scene,
     ) -> Result<(), UiError> {
-        let epoch = self.cache_epochs.render;
         let node = self.node_ref_mut(id).expect("live render tree");
+        let mut scoped = node.scoped_context(ctx);
+        let ctx = &mut scoped;
         if node.window.is_some() {
             return Ok(());
         }
-        node.sync_render_epoch(epoch);
         let placement = node.placement.expect("layout validated before rendering");
         let widget = node.widget.as_ref().expect("widget restored after layout");
         let backdrop = inherited_backdrop || widget.uses_backdrop();
-        if backdrop || node.draw_cache.is_none() {
-            // ID ownership is isolated from traversal so an explicit caller-owned resource
-            // route can later preserve external IDs without rewriting Scene assembly.
-            node.draw_cache = Some(resources::manage(
-                widget.render(placement.bounds, ctx.clone()),
-            )?);
-        }
-        let draw = node.draw_cache.as_ref().unwrap();
         let world = parent_transform * placement.affine;
-        let children = node.children.clone();
+        let child_count = node.children.len();
+        let draw = node.cache.drawing(ctx.cache_epoch(), backdrop, || {
+            widget.render(placement.bounds, ctx)
+        })?;
 
         // All generators for this widget see the snapshot before its own colors. Later
         // dependent children get a new phase after those colors. Empty phases are reused.
@@ -97,15 +96,23 @@ impl UiTree {
         for color in &draw.color {
             let mesh = scene.resources.share_mesh(&color.mesh)?;
             let texture = scene.resources.share_texture(&color.texture)?;
-            scene.phases.last_mut().unwrap().objects.push(Object {
-                mesh,
-                texture,
-                transform: world * color.transform,
-                mask,
-                opacity: color.opacity,
-            });
+            scene
+                .phases
+                .last_mut()
+                .expect("scene starts with a phase")
+                .objects
+                .push(Object {
+                    mesh,
+                    texture,
+                    transform: world * color.transform,
+                    mask,
+                    opacity: color.opacity,
+                });
         }
-        for (_, child) in children {
+        // Render callbacks cannot change topology. Copy one ID after each short borrow
+        // instead of allocating a snapshot of the children for every rendered node.
+        for index in 0..child_count {
+            let child = self.node_ref(id).expect("live render tree").children[index].1;
             self.render_node(child, world, mask, backdrop, ctx, scene)?;
         }
         Ok(())

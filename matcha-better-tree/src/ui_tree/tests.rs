@@ -20,6 +20,17 @@ struct Observations {
     measure_calls: usize,
     layout_calls: usize,
     layout_bounds: Vec<Bounds>,
+    render_calls: usize,
+    scopes: Vec<(&'static str, crate::CacheEpoch, f64, [f32; 2])>,
+}
+
+fn record_scope(observations: &Arc<Mutex<Observations>>, stage: &'static str, ctx: &Context) {
+    observations.lock().unwrap().scopes.push((
+        stage,
+        ctx.cache_epoch(),
+        ctx.dpi(),
+        ctx.viewport_size(),
+    ));
 }
 
 struct ProbeView(Arc<Mutex<Observations>>);
@@ -30,7 +41,8 @@ impl View for ProbeView {
         None
     }
 
-    fn build<'a>(&'a self, _: &mut DeclContext<'a>) -> impl Widget<V = Self> {
+    fn build<'a>(&'a self, ctx: &mut DeclContext<'a, '_>) -> impl Widget<V = Self> {
+        record_scope(&self.0, "build", ctx.context());
         ProbeWidget(Arc::clone(&self.0))
     }
 }
@@ -38,19 +50,22 @@ impl View for ProbeView {
 impl Widget for ProbeWidget {
     type V = ProbeView;
 
-    fn update<'a>(&mut self, view: &'a Self::V, _: &mut DeclContext<'a>) -> UpdateResult {
+    fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a, '_>) -> UpdateResult {
         self.0 = Arc::clone(&view.0);
+        record_scope(&self.0, "update", ctx.context());
         UpdateResult::empty()
     }
 
-    fn input(&mut self, _: Bounds, event: &DeviceEvent, _: Context) -> InputResult {
+    fn input(&mut self, _: Bounds, event: &DeviceEvent, ctx: &mut Context) -> InputResult {
+        record_scope(&self.0, "input", ctx);
         self.0.lock().unwrap().events.push(event.clone());
         InputResult::default()
     }
 
     // Use Widget's default Bounds-based hit test.
 
-    fn measure(&self, _: Constraints, _: Children<'_>, ctx: Context) -> Bounds {
+    fn measure(&self, _: Constraints, _: Children<'_>, ctx: &mut Context) -> Bounds {
+        record_scope(&self.0, "measure", ctx);
         self.0.lock().unwrap().measure_calls += 1;
         Bounds {
             x: bounds().x * ctx.scale_factor(),
@@ -58,13 +73,16 @@ impl Widget for ProbeWidget {
         }
     }
 
-    fn layout(&self, bounds: Bounds, _: Children<'_>, _: Context) {
+    fn layout(&self, bounds: Bounds, _: Children<'_>, ctx: &mut Context) {
+        record_scope(&self.0, "layout", ctx);
         let mut observations = self.0.lock().unwrap();
         observations.layout_calls += 1;
         observations.layout_bounds.push(bounds);
     }
 
-    fn render(&self, _: Bounds, _: Context) -> Draw {
+    fn render(&self, _: Bounds, ctx: &mut Context) -> Draw {
+        record_scope(&self.0, "render", ctx);
+        self.0.lock().unwrap().render_calls += 1;
         Draw {
             color: SmallVec::new(),
             mask: None,
@@ -88,7 +106,7 @@ impl<V: View> View for ContainerView<V> {
         None
     }
 
-    fn build<'a>(&'a self, ctx: &mut DeclContext<'a>) -> impl Widget<V = Self> {
+    fn build<'a>(&'a self, ctx: &mut DeclContext<'a, '_>) -> impl Widget<V = Self> {
         ContainerWidget::<V> {
             child: ctx.child(&self.child),
             child_position: self.child_position,
@@ -100,7 +118,7 @@ impl<V: View> View for ContainerView<V> {
 impl<V: View> Widget for ContainerWidget<V> {
     type V = ContainerView<V>;
 
-    fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a>) -> UpdateResult {
+    fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a, '_>) -> UpdateResult {
         let changed = self.child_position != view.child_position;
         self.child = ctx.child(&view.child);
         self.child_position = view.child_position;
@@ -111,7 +129,7 @@ impl<V: View> Widget for ContainerWidget<V> {
         }
     }
 
-    fn input(&mut self, _: Bounds, _: &DeviceEvent, _: Context) -> InputResult {
+    fn input(&mut self, _: Bounds, _: &DeviceEvent, _: &mut Context) -> InputResult {
         InputResult::default()
     }
 
@@ -119,17 +137,17 @@ impl<V: View> Widget for ContainerWidget<V> {
         &self,
         constraints: Constraints,
         mut children: Children<'_>,
-        ctx: Context,
+        ctx: &mut Context,
     ) -> Bounds {
         children.measure(self.child, constraints, ctx).unwrap()
     }
 
-    fn layout(&self, _: Bounds, mut children: Children<'_>, ctx: Context) {
+    fn layout(&self, _: Bounds, mut children: Children<'_>, ctx: &mut Context) {
         // This placement is relative to this container, independent of its own placement.
         children.layout(self.child, self.child_position, ctx);
     }
 
-    fn render(&self, _: Bounds, _: Context) -> Draw {
+    fn render(&self, _: Bounds, _: &mut Context) -> Draw {
         Draw {
             color: SmallVec::new(),
             mask: None,
@@ -167,10 +185,13 @@ fn quarter_turn() -> Matrix4<f32> {
 
 fn setup<V: View>(child: V) -> (UiTree, UiId, ChildId) {
     let mut tree = UiTree::new();
-    tree.update(&ContainerView {
-        child,
-        child_position: position(Matrix4::identity()),
-    });
+    tree.update(
+        &ContainerView {
+            child,
+            child_position: position(Matrix4::identity()),
+        },
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     let root = tree.root.unwrap();
     // This fixture places the host only; each test controls when/how its child is laid out.
     tree.node_ref_mut(root).unwrap().placement = Some(Placement {
@@ -209,7 +230,11 @@ fn hit_test_maps_affine_points_to_default_local_bounds() {
             * quarter_turn()
             * Matrix4::new_nonuniform_scaling(&Vector3::new(2.0, 3.0, 4.0)),
     ] {
-        children.layout(child, position(affine), Context::new());
+        children.layout(
+            child,
+            position(affine),
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+        );
         for (local, expected) in [
             (Vector4::new(2.0, 3.0, 4.0, 1.0), true),
             (Vector4::new(11.0, 3.0, 4.0, 1.0), false),
@@ -224,7 +249,7 @@ fn hit_test_maps_affine_points_to_default_local_bounds() {
                         y: parent.y,
                         z: parent.z,
                     },
-                    Context::new(),
+                    &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
                 ),
                 Some(expected),
                 "affine={affine:?}, local={local:?}",
@@ -245,7 +270,7 @@ fn translated_hit_test_includes_local_bounds_edges() {
     children.layout(
         child,
         position(translation(100.0, 20.0, 7.0)),
-        Context::new(),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
     );
     for point in [
         Point {
@@ -259,7 +284,14 @@ fn translated_hit_test_includes_local_bounds_edges() {
             z: 17.0,
         },
     ] {
-        assert_eq!(children.is_inside(child, point, Context::new()), Some(true));
+        assert_eq!(
+            children.is_inside(
+                child,
+                point,
+                &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+            ),
+            Some(true)
+        );
     }
 }
 
@@ -275,39 +307,72 @@ fn hit_test_uses_updated_affine_and_bounds() {
     children.layout(
         child,
         position(translation(100.0, 0.0, 0.0)),
-        Context::new(),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
     );
     assert_eq!(
-        children.is_inside(child, point(105.0), Context::new()),
+        children.is_inside(
+            child,
+            point(105.0),
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+        ),
         Some(true)
     );
     let mut updated = position(translation(200.0, 0.0, 0.0));
-    children.layout(child, updated, Context::new());
+    children.layout(
+        child,
+        updated,
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     assert_eq!(observations.lock().unwrap().layout_calls, 1);
-    let _ = children
-        .tree
-        .input(&mouse_event(205.0, 5.0), Context::new());
+    let _ = children.tree.input(
+        &mouse_event(205.0, 5.0),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     assert_eq!(
         observations.lock().unwrap().events[0].mouse_position(),
         Some([5.0, 5.0])
     );
     assert_eq!(
-        children.is_inside(child, point(105.0), Context::new()),
+        children.is_inside(
+            child,
+            point(105.0),
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+        ),
         Some(false)
     );
     assert_eq!(
-        children.is_inside(child, point(205.0), Context::new()),
+        children.is_inside(
+            child,
+            point(205.0),
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+        ),
         Some(true)
     );
     assert_eq!(
-        children.is_inside(child, point(215.0), Context::new()),
+        children.is_inside(
+            child,
+            point(215.0),
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+        ),
         Some(false)
     );
     updated.bounds.x = 20.0;
-    children.layout(child, updated, Context::new());
-    children.layout(child, updated, Context::new());
+    children.layout(
+        child,
+        updated,
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
+    children.layout(
+        child,
+        updated,
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     assert_eq!(
-        children.is_inside(child, point(215.0), Context::new()),
+        children.is_inside(
+            child,
+            point(215.0),
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+        ),
         Some(true)
     );
     let observations = observations.lock().unwrap();
@@ -324,9 +389,16 @@ fn invalidating_layout_preserves_placement_and_recomputes_same_bounds() {
         tree: &mut tree,
         current: root,
     }
-    .layout(child, placed, Context::new());
+    .layout(
+        child,
+        placed,
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     let child_ui_id = tree.node_ref(root).unwrap().child(child).unwrap();
-    tree.node_ref_mut(child_ui_id).unwrap().layout_cache = None;
+    tree.node_ref_mut(child_ui_id)
+        .unwrap()
+        .cache
+        .invalidate(UpdateResult::LAYOUT);
 
     let mut children = Children {
         tree: &mut tree,
@@ -340,19 +412,28 @@ fn invalidating_layout_preserves_placement_and_recomputes_same_bounds() {
                 y: 5.0,
                 z: 0.0
             },
-            Context::new()
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
         ),
         Some(true)
     );
-    let _ = children
-        .tree
-        .input(&mouse_event(105.0, 5.0), Context::new());
+    let _ = children.tree.input(
+        &mouse_event(105.0, 5.0),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     assert_eq!(
         observations.lock().unwrap().events[0].mouse_position(),
         Some([5.0, 5.0])
     );
-    children.layout(child, placed, Context::new());
-    children.layout(child, placed, Context::new());
+    children.layout(
+        child,
+        placed,
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
+    children.layout(
+        child,
+        placed,
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     assert_eq!(observations.lock().unwrap().layout_calls, 2);
 }
 
@@ -370,12 +451,12 @@ fn moving_container_reuses_descendant_layout() {
     children.layout(
         child,
         position(translation(100.0, 0.0, 0.0)),
-        Context::new(),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
     );
     children.layout(
         child,
         position(translation(200.0, 0.0, 0.0)),
-        Context::new(),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
     );
     assert_eq!(observations.lock().unwrap().layout_calls, 1);
     assert_eq!(
@@ -388,7 +469,7 @@ fn moving_container_reuses_descendant_layout() {
                     y: 5.0,
                     z: 0.0
                 },
-                &Context::new()
+                &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
             )
             .is_some(),
         true
@@ -403,14 +484,15 @@ fn moving_container_reuses_descendant_layout() {
                     y: 5.0,
                     z: 0.0
                 },
-                &Context::new()
+                &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
             )
             .is_some(),
         false
     );
-    let _ = children
-        .tree
-        .input(&mouse_event(215.0, 5.0), Context::new());
+    let _ = children.tree.input(
+        &mouse_event(215.0, 5.0),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     assert_eq!(
         observations.lock().unwrap().events[0].mouse_position(),
         Some([5.0, 5.0])
@@ -429,10 +511,83 @@ fn singular_hit_test_returns_none_and_recovers_after_layout() {
         y: 5.0,
         z: 5.0,
     };
-    children.layout(child, position(Matrix4::new_scaling(0.0)), Context::new());
-    assert_eq!(children.is_inside(child, point, Context::new()), None);
-    children.layout(child, position(Matrix4::identity()), Context::new());
-    assert_eq!(children.is_inside(child, point, Context::new()), Some(true));
+    children.layout(
+        child,
+        position(Matrix4::new_scaling(0.0)),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
+    assert_eq!(
+        children.is_inside(
+            child,
+            point,
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+        ),
+        None
+    );
+    children.layout(
+        child,
+        position(Matrix4::identity()),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
+    assert_eq!(
+        children.is_inside(
+            child,
+            point,
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+        ),
+        Some(true)
+    );
+}
+
+#[test]
+fn child_and_tree_hit_tests_reject_unusable_local_coordinates() {
+    let (mut tree, root, child) = setup(ProbeView(Arc::default()));
+    let child_node = tree.node_ref(root).unwrap().child(child).unwrap();
+    let mut registry = crate::ui_tree::window::WindowRegistry::default();
+    let mut context = Context::new(&mut registry);
+    for (affine, point) in [
+        (
+            Matrix4::identity(),
+            Point {
+                x: f32::NAN,
+                y: 1.0,
+                z: 0.0,
+            },
+        ),
+        (
+            Matrix4::identity(),
+            Point {
+                x: 1.0,
+                y: f32::INFINITY,
+                z: 0.0,
+            },
+        ),
+        // Finite parent coordinates can still overflow during the inverse transform.
+        (
+            translation(-f32::MAX, 0.0, 0.0),
+            Point {
+                x: f32::MAX,
+                y: 1.0,
+                z: 0.0,
+            },
+        ),
+        (
+            Matrix4::new_scaling(0.0),
+            Point {
+                x: 1.0,
+                y: 1.0,
+                z: 0.0,
+            },
+        ),
+    ] {
+        let mut children = Children {
+            tree: &mut tree,
+            current: root,
+        };
+        children.layout(child, position(affine), &mut context);
+        assert_eq!(children.is_inside(child, point, &mut context), None);
+        assert_eq!(tree.hit_test(child_node, point, &mut context), None);
+    }
 }
 
 #[test]
@@ -450,18 +605,45 @@ fn missing_layout_and_stale_child_are_not_dispatched() {
             tree: &mut tree,
             current: root,
         };
-        assert_eq!(children.is_inside(child, point, Context::new()), None);
-        let _ = children.tree.input(&event, Context::new());
-        children.layout(child, position(Matrix4::identity()), Context::new());
+        assert_eq!(
+            children.is_inside(
+                child,
+                point,
+                &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+            ),
+            None
+        );
+        let _ = children.tree.input(
+            &event,
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+        );
+        children.layout(
+            child,
+            position(Matrix4::identity()),
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+        );
     }
     // Replacing the root removes the old child and invalidates its handle.
-    tree.update(&ProbeView(Arc::default()));
+    tree.update(
+        &ProbeView(Arc::default()),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     let mut children = Children {
         tree: &mut tree,
         current: root,
     };
-    assert_eq!(children.is_inside(child, point, Context::new()), None);
-    let _ = children.tree.input(&event, Context::new());
+    assert_eq!(
+        children.is_inside(
+            child,
+            point,
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+        ),
+        None
+    );
+    let _ = children.tree.input(
+        &event,
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     assert!(observations.lock().unwrap().events.is_empty());
 }
 
@@ -481,7 +663,7 @@ fn nested_hit_test_applies_each_relative_transform_once() {
     children.layout(
         child,
         position(translation(100.0, 50.0, 0.0) * quarter_turn()),
-        Context::new(),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
     );
     // Leaf-local (2, 3) -> container-local (14, 14) -> root-local (86, 64).
     assert_eq!(
@@ -494,7 +676,7 @@ fn nested_hit_test_applies_each_relative_transform_once() {
                     y: 64.0,
                     z: 0.0
                 },
-                &Context::new()
+                &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
             )
             .is_some(),
         true
@@ -510,7 +692,7 @@ fn nested_hit_test_applies_each_relative_transform_once() {
                     y: 84.0,
                     z: 0.0
                 },
-                &Context::new()
+                &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
             )
             .is_some(),
         false
@@ -534,10 +716,13 @@ fn nested_input_preserves_raw_event_and_delivers_local_mouse_position() {
     children.layout(
         child,
         position(translation(100.0, 50.0, 0.0) * quarter_turn()),
-        Context::new(),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
     );
     let event = mouse_event(86.0, 64.0);
-    let _ = children.tree.input(&event, Context::new());
+    let _ = children.tree.input(
+        &event,
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     let observations = observations.lock().unwrap();
     assert_eq!(observations.events.len(), 1);
     let received = &observations.events[0];
@@ -557,10 +742,17 @@ fn non_pointer_input_waits_for_a_separate_delivery_route() {
         tree: &mut tree,
         current: root,
     };
-    children.layout(child, position(Matrix4::identity()), Context::new());
+    children.layout(
+        child,
+        position(Matrix4::identity()),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     let event = DeviceEvent::stateless(DeviceEventData::ModifiersChanged(Modifiers::default()));
     assert_eq!(
-        children.tree.input(&event, Context::new()),
+        children.tree.input(
+            &event,
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+        ),
         InputResult::default()
     );
     let observations = observations.lock().unwrap();

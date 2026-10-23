@@ -5,17 +5,27 @@ use super::*;
 impl UiTree {
     /// Dispatch a viewport-coordinate mouse event through the hit target's ancestor path.
     /// Layout must be current. Focus/capture and non-mouse delivery are separate routes.
-    pub fn input(&mut self, event: &DeviceEvent, ctx: Context) -> InputResult {
-        if !matches!(event.event(), DeviceEventData::MouseInput { .. }) {
-            return InputResult::default();
-        }
+    pub fn input(&mut self, event: &DeviceEvent, ctx: &mut Context) -> InputResult {
         let Some(root) = self.root else {
             return InputResult::default();
         };
+        self.input_from(root, event, ctx)
+    }
+
+    pub(super) fn input_from(
+        &mut self,
+        root: UiId,
+        event: &DeviceEvent,
+        ctx: &mut Context,
+    ) -> InputResult {
+        if !matches!(event.event(), DeviceEventData::MouseInput { .. }) {
+            return InputResult::default();
+        }
+
         let Some([x, y]) = event.mouse_position() else {
             return InputResult::default();
         };
-        let Some(target) = self.hit_test(root, Point { x, y, z: 0.0 }, &ctx) else {
+        let Some(target) = self.hit_test(root, Point { x, y, z: 0.0 }, ctx) else {
             return InputResult::default();
         };
 
@@ -27,14 +37,18 @@ impl UiTree {
                 .node_ref(id)
                 .expect("hit target and ancestors are live");
             ids.push(id);
-            current = node.parent;
+            current = if id == root { None } else { node.parent };
         }
         ids.reverse();
         let mut local_event = event.clone();
         let path: Vec<_> = ids
             .into_iter()
             .map(|id| {
-                let placement = self.node_ref(id).unwrap().placement.unwrap();
+                let placement = self
+                    .node_ref(id)
+                    .expect("hit path contains live nodes")
+                    .placement
+                    .expect("hit path contains placed nodes");
                 local_event = local_event.transform(placement.affine);
                 (id, placement.bounds, local_event.clone())
             })
@@ -46,20 +60,25 @@ impl UiTree {
         let bubble = (0..path.len()).rev().map(|index| (index, false));
         for (index, is_preview) in preview.chain(bubble) {
             let (id, bounds, event) = &path[index];
+            let node = self.node_ref(*id).expect("live input node");
+            let mut scoped = node.scoped_context(ctx);
             let widget = self
                 .node_ref_mut(*id)
-                .unwrap()
+                .expect("input callbacks cannot remove nodes")
                 .widget
                 .as_mut()
                 .expect("input callbacks cannot remove widgets from the tree");
             let response = if is_preview {
-                widget.preview_input(*bounds, event, ctx.clone())
+                widget.preview_input(*bounds, event, &mut scoped)
             } else {
-                widget.input(*bounds, event, ctx.clone())
+                widget.input(*bounds, event, &mut scoped)
             };
             result.update |= response.update;
             if response.update.contains(UpdateResult::RENDER) {
-                self.node_ref_mut(*id).unwrap().draw_cache = None;
+                self.node_ref_mut(*id)
+                    .expect("input callbacks cannot remove nodes")
+                    .cache
+                    .invalidate(UpdateResult::RENDER);
             }
             if response.update.contains(UpdateResult::LAYOUT) {
                 deepest_changed = Some(deepest_changed.map_or(index, |old| old.max(index)));
@@ -74,9 +93,8 @@ impl UiTree {
         // whose normal input callback was skipped by Stop. Keep placement and other subtrees.
         if let Some(last) = deepest_changed {
             for (id, _, _) in &path[..=last] {
-                let node = self.node_ref_mut(*id).unwrap();
-                node.measure_cache = None;
-                node.layout_cache = None;
+                let node = self.node_ref_mut(*id).expect("hit path remains live");
+                node.cache.invalidate(UpdateResult::LAYOUT);
             }
         }
         result
@@ -85,21 +103,15 @@ impl UiTree {
     /// Reverse paint order: last declared child's subtree first, then this widget itself.
     /// Assumes parent content is behind children. There is no implicit clipping to parent bounds;
     /// explicit render-mask/clip policy will need to be shared with rendering when it is added.
-    pub(super) fn hit_test(&self, id: UiId, point: Point, ctx: &Context) -> Option<UiId> {
+    pub(super) fn hit_test(&self, id: UiId, point: Point, ctx: &mut Context) -> Option<UiId> {
         let node = self.node_ref(id)?;
+        let mut scoped = node.scoped_context(ctx);
+        let ctx = &mut scoped;
         if node.window.is_some() {
             return None;
         }
         let placement = node.placement?;
-        let local = placement.affine_inverse? * Vector4::new(point.x, point.y, point.z, 1.0);
-        let point = Point {
-            x: local.x,
-            y: local.y,
-            z: local.z,
-        };
-        if ![point.x, point.y, point.z].iter().all(|v| v.is_finite()) {
-            return None;
-        }
+        let point = placement.local_point(point)?;
 
         for (_, child) in node.children.iter().rev() {
             if let Some(target) = self.hit_test(*child, point, ctx) {
@@ -108,7 +120,7 @@ impl UiTree {
         }
         node.widget
             .as_ref()?
-            .is_inside(placement.bounds, point, ctx.clone())
+            .is_inside(placement.bounds, point, ctx)
             .then_some(id)
     }
 }

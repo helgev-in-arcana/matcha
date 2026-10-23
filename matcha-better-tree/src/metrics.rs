@@ -7,12 +7,12 @@ pub struct Point {
     pub z: f32,
 }
 
-impl Into<Point> for Bounds {
-    fn into(self) -> Point {
-        Point {
-            x: self.x,
-            y: self.y,
-            z: self.z,
+impl From<Bounds> for Point {
+    fn from(bounds: Bounds) -> Self {
+        Self {
+            x: bounds.x,
+            y: bounds.y,
+            z: bounds.z,
         }
     }
 }
@@ -24,12 +24,12 @@ pub struct Bounds {
     pub z: f32,
 }
 
-impl Into<Bounds> for Point {
-    fn into(self) -> Bounds {
-        Bounds {
-            x: self.x,
-            y: self.y,
-            z: self.z,
+impl From<Point> for Bounds {
+    fn from(point: Point) -> Self {
+        Self {
+            x: point.x,
+            y: point.y,
+            z: point.z,
         }
     }
 }

@@ -6,38 +6,26 @@ version.workspace = true
 [dependencies]
 # self
 render-interface = { workspace = true }
-plain-renderer = { workspace = true }
-utils = { workspace = true }
-gpu-utils = { workspace = true }
-shared-buffer = { workspace = true }
-matcha-window = { workspace = true }
-
-# async runtime, utility
-tokio = { workspace = true }
-futures = { workspace = true }
-parking_lot = { workspace = true }
+# Select the backend through this crate's features, independently of workspace defaults.
+matcha-window = { path = "../matcha-window", default-features = false }
 
 # graphics
 wgpu = { workspace = true }
-bytemuck = { features = ["derive"], workspace = true }
 
 # math
 nalgebra = { features = ["bytemuck"], workspace = true }
 
-# wasm support
-web-time = { workspace = true }
-
 # other
 bitflags = { workspace = true }
-num = { workspace = true }
-fxhash = { workspace = true }
-dashmap = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
-log = { workspace = true }
 
 [dev-dependencies]
-matcha-window = { workspace = true, features = ["headless"] }
+gpu-utils = { workspace = true }
+plain-renderer = { workspace = true }
+matcha-window = { path = "../matcha-window", default-features = false, features = ["headless"] }
+futures = { workspace = true }
+bytemuck = { workspace = true }
 
 [features]
 default = ["winit"]

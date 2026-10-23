@@ -1,4 +1,4 @@
-//! Generational storage. Reservations are explicit and must be filled or cancelled by callers.
+//! Generational storage. Reserved IDs become observable only after a value is inserted.
 //! IDs belong to the arena that issued them; they must not be used with another arena.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -80,6 +80,7 @@ impl<T> Arena<T> {
     }
 
     /// Release only a current reservation. Never removes an occupied value.
+    #[cfg(test)]
     pub(crate) fn cancel_reserved(&mut self, id: Id) -> bool {
         let Some(slot) = self.slots.get_mut(id.index) else {
             return false;
@@ -147,6 +148,7 @@ impl<T> Arena<T> {
     }
 
     /// Iterate live values in slot order, excluding free and reserved slots.
+    #[cfg(test)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = (Id, &T)> {
         self.slots
             .iter()

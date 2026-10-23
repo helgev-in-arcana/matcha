@@ -39,7 +39,7 @@ impl View for NodeView {
     fn key(&self) -> Option<u64> {
         Some(self.key)
     }
-    fn build<'a>(&'a self, ctx: &mut DeclContext<'a>) -> impl Widget<V = Self> {
+    fn build<'a>(&'a self, ctx: &mut DeclContext<'a, '_>) -> impl Widget<V = Self> {
         NodeWidget {
             width: self.width,
             children: self.children.iter().map(|child| ctx.child(child)).collect(),
@@ -50,7 +50,7 @@ impl View for NodeView {
 
 impl Widget for NodeWidget {
     type V = NodeView;
-    fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a>) -> UpdateResult {
+    fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a, '_>) -> UpdateResult {
         self.calls.lock().unwrap().updates += 1;
         let changed = self.width != view.width;
         self.width = view.width;
@@ -62,25 +62,25 @@ impl Widget for NodeWidget {
             UpdateResult::empty()
         }
     }
-    fn input(&mut self, _: Bounds, _: &DeviceEvent, _: Context) -> InputResult {
+    fn input(&mut self, _: Bounds, _: &DeviceEvent, _: &mut Context) -> InputResult {
         InputResult::default()
     }
     fn measure(
         &self,
         constraints: Constraints,
         mut children: Children<'_>,
-        ctx: Context,
+        ctx: &mut Context,
     ) -> Bounds {
         self.calls.lock().unwrap().measures += 1;
         let x = self.width
             + self
                 .children
                 .iter()
-                .map(|id| children.measure(*id, constraints, ctx.clone()).unwrap().x)
+                .map(|id| children.measure(*id, constraints, ctx).unwrap().x)
                 .sum::<f32>();
         Bounds { x, ..bounds() }
     }
-    fn layout(&self, assigned: Bounds, mut children: Children<'_>, ctx: Context) {
+    fn layout(&self, assigned: Bounds, mut children: Children<'_>, ctx: &mut Context) {
         self.calls.lock().unwrap().layouts += 1;
         let width = assigned.x / self.children.len().max(1) as f32;
         for (index, id) in self.children.iter().enumerate() {
@@ -93,11 +93,11 @@ impl Widget for NodeWidget {
                     },
                     affine: translation(index as f32 * width, 0.0, 0.0),
                 },
-                ctx.clone(),
+                ctx,
             );
         }
     }
-    fn render(&self, _: Bounds, _: Context) -> Draw {
+    fn render(&self, _: Bounds, _: &mut Context) -> Draw {
         Draw {
             color: SmallVec::new(),
             mask: None,
@@ -106,10 +106,13 @@ impl Widget for NodeWidget {
 }
 
 fn refresh(tree: &mut UiTree, view: &NodeView) {
-    tree.update(&ContainerView {
-        child: view.clone(),
-        child_position: position(Matrix4::identity()),
-    });
+    tree.update(
+        &ContainerView {
+            child: view.clone(),
+            child_position: position(Matrix4::identity()),
+        },
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
 }
 
 fn warm(tree: &mut UiTree, root: UiId, child: ChildId) -> Bounds {
@@ -118,16 +121,42 @@ fn warm(tree: &mut UiTree, root: UiId, child: ChildId) -> Bounds {
         current: root,
     };
     let measured = children
-        .measure(child, Constraints::default(), Context::new())
+        .measure(
+            child,
+            Constraints::default(),
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+        )
         .unwrap();
-    children.layout(child, position(Matrix4::identity()), Context::new());
+    children.layout(
+        child,
+        position(Matrix4::identity()),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     measured
 }
 
 fn assert_cached(tree: &UiTree, id: UiId, expected: bool) {
     let node = tree.node_ref(id).unwrap();
-    assert_eq!(node.measure_cache.is_some(), expected);
-    assert_eq!(node.layout_cache.is_some(), expected);
+    assert_eq!(
+        node.cache
+            .measure()
+            .get(
+                crate::CacheEpoch::default(),
+                crate::ui_tree::cache_epoch::CacheGroup::Layout
+            )
+            .is_some(),
+        expected
+    );
+    assert_eq!(
+        node.cache
+            .layout()
+            .get(
+                crate::CacheEpoch::default(),
+                crate::ui_tree::cache_epoch::CacheGroup::Layout
+            )
+            .is_some(),
+        expected
+    );
 }
 
 #[test]
@@ -163,8 +192,15 @@ fn leaf_change_invalidates_all_ancestors_but_preserves_sibling_and_placement() {
     let sibling = tree.node_ref(top).unwrap().children[1].1;
     let placement = tree.node_ref(leaf).unwrap().placement.unwrap();
     // Root operations are not exposed yet; seed its caches to check propagation to the root.
-    tree.node_ref_mut(root).unwrap().measure_cache = Some((Constraints::default(), bounds()));
-    tree.node_ref_mut(root).unwrap().layout_cache = Some(bounds());
+    tree.node_ref_mut(root).unwrap().cache.cache_measure(
+        Constraints::default(),
+        bounds(),
+        crate::CacheEpoch::default(),
+    );
+    tree.node_ref_mut(root)
+        .unwrap()
+        .cache
+        .cache_layout(bounds(), crate::CacheEpoch::default());
     view.children[0].children[0].width = 20.0;
     refresh(&mut tree, &view);
     for id in [root, top, branch, leaf] {
@@ -202,7 +238,11 @@ fn parent_change_retains_descendant_caches_until_bounds_change() {
         tree: &mut tree,
         current: root,
     }
-    .layout(child, larger, Context::new());
+    .layout(
+        child,
+        larger,
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     assert_eq!(view.children[0].calls.lock().unwrap().layouts, 2);
     assert_eq!(view.children[0].calls.lock().unwrap().measures, 1);
 }
@@ -283,14 +323,14 @@ impl View for AlternateView {
     fn key(&self) -> Option<u64> {
         Some(self.key)
     }
-    fn build<'a>(&'a self, _: &mut DeclContext<'a>) -> impl Widget<V = Self> {
+    fn build<'a>(&'a self, _: &mut DeclContext<'a, '_>) -> impl Widget<V = Self> {
         AlternateWidget(self.width)
     }
 }
 
 impl Widget for AlternateWidget {
     type V = AlternateView;
-    fn update<'a>(&mut self, view: &'a Self::V, _: &mut DeclContext<'a>) -> UpdateResult {
+    fn update<'a>(&mut self, view: &'a Self::V, _: &mut DeclContext<'a, '_>) -> UpdateResult {
         let changed = self.0 != view.width;
         self.0 = view.width;
         if changed {
@@ -299,17 +339,17 @@ impl Widget for AlternateWidget {
             UpdateResult::empty()
         }
     }
-    fn input(&mut self, _: Bounds, _: &DeviceEvent, _: Context) -> InputResult {
+    fn input(&mut self, _: Bounds, _: &DeviceEvent, _: &mut Context) -> InputResult {
         InputResult::default()
     }
-    fn measure(&self, _: Constraints, _: Children<'_>, _: Context) -> Bounds {
+    fn measure(&self, _: Constraints, _: Children<'_>, _: &mut Context) -> Bounds {
         Bounds {
             x: self.0,
             ..bounds()
         }
     }
-    fn layout(&self, _: Bounds, _: Children<'_>, _: Context) {}
-    fn render(&self, _: Bounds, _: Context) -> Draw {
+    fn layout(&self, _: Bounds, _: Children<'_>, _: &mut Context) {}
+    fn render(&self, _: Bounds, _: &mut Context) -> Draw {
         Draw {
             color: SmallVec::new(),
             mask: None,
@@ -322,8 +362,10 @@ fn same_key_type_rebuild_is_reported_even_when_child_ids_do_not_change() {
     let (mut tree, root, child) = setup(NodeView::new(1, 10.0, vec![]));
     assert_eq!(warm(&mut tree, root, child).x, 10.0);
     let old_children = std::mem::take(&mut tree.node_ref_mut(root).unwrap().children);
+    let mut registry = crate::ui_tree::window::WindowRegistry::default();
+    let mut context = Context::new(&mut registry);
     let mut ctx = DeclContext {
-        context: tree.context.clone(),
+        context: &mut context,
         current: root,
         window: None,
         old_children: old_children
@@ -339,7 +381,7 @@ fn same_key_type_rebuild_is_reported_even_when_child_ids_do_not_change() {
     };
     assert_eq!(ctx.child(&replacement), child);
     assert!(!ctx.structure_changed);
-    let (new_children, changed) = ctx.finish(&mut tree, root);
+    let (new_children, changed) = ctx.finish(&mut tree, &());
     assert!(changed);
     assert_eq!(new_children, old_children);
     assert_cached(&tree, new_children[0].1, false);

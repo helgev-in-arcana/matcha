@@ -1,21 +1,124 @@
 //! Windows are ordinary declarations in the application's single UI tree.
 //!
-//! The registry owns window instances and records their arena locations. Widgets
-//! retain only IDs. App event routing and window-root traversal are not wired yet;
-//! parent rendering and input must not traverse into a window's content.
+//! The registry owns native window instances and records their arena locations and
+//! native event routes. WindowWidget owns cache epochs and event metrics.
+//! UiTree's window entry points scope Context to that window; parent rendering and
+//! input stop at native window boundaries. App lifecycle scheduling is still separate.
 
+use std::any::Any;
 use std::marker::PhantomData;
 
 use matcha_window::event::device_event::DeviceEvent;
+use matcha_window::event::window_event::WindowEvent;
 use matcha_window::window::{Fullscreen, Position, Size, Theme, Window as OsWindow, WindowButtons};
 
-use crate::context::Context;
+use crate::CacheEpoch;
 use crate::metrics::{Bounds, Constraints, Point};
-use crate::widget::{Children, DeclContext, Draw, InputResult, UpdateResult, View, Widget};
+use crate::ui_tree::context::Context;
+use crate::ui_tree::widget::{Draw, InputResult, UpdateResult, View, Widget};
+use crate::ui_tree::{ChildId, Children, DeclContext};
 
 mod registry;
-pub use registry::{WindowInstance, WindowInstanceId, WindowRegistry, WindowRenderError};
+mod tree;
+pub use registry::{WindowInstance, WindowInstanceId, WindowRegistry};
 
+/// Immutable registration handle. Construction fixes both identity and the concrete widget type.
+/// Only this boundary knows how to downcast; tree traversal uses its operations.
+#[derive(Clone, Copy)]
+pub(crate) struct WindowBinding {
+    id: WindowInstanceId,
+    state: fn(&dyn Any) -> WindowState,
+    event: fn(&mut dyn Any, &WindowEvent, &mut Context<'_>) -> UpdateResult,
+    invalidate: fn(&mut dyn Any, UpdateResult, &mut Context<'_>),
+}
+
+struct WindowState {
+    epoch: CacheEpoch,
+    content: ChildId,
+    dpi: Option<f64>,
+    viewport: Option<[f32; 2]>,
+}
+
+pub(crate) fn scoped_context<'a>(
+    binding: Option<WindowBinding>,
+    widget: &dyn Any,
+    parent: &'a mut Context<'_>,
+) -> Context<'a> {
+    match binding {
+        Some(binding) => binding.content_context(widget, parent).1,
+        None => parent.with_cache_epoch(parent.cache_epoch()),
+    }
+}
+
+impl WindowBinding {
+    pub(crate) fn new<V: View>(id: WindowInstanceId) -> Self {
+        Self {
+            id,
+            state: |widget| {
+                let widget = widget
+                    .downcast_ref::<WindowWidget<V>>()
+                    .expect("registered window widget type matches");
+                WindowState {
+                    epoch: widget.cache_epoch,
+                    content: widget.content,
+                    dpi: widget.dpi,
+                    viewport: widget.viewport,
+                }
+            },
+            event: |widget, event, ctx| {
+                widget
+                    .downcast_mut::<WindowWidget<V>>()
+                    .expect("registered window widget type matches")
+                    .handle_window_event(event, ctx)
+            },
+            invalidate: |widget, flags, ctx| {
+                widget
+                    .downcast_mut::<WindowWidget<V>>()
+                    .expect("registered window widget type matches")
+                    .invalidate_caches(flags, ctx)
+            },
+        }
+    }
+
+    pub(crate) fn id(self) -> WindowInstanceId {
+        self.id
+    }
+
+    pub(crate) fn content_context<'a>(
+        self,
+        widget: &dyn Any,
+        parent: &'a mut Context<'_>,
+    ) -> (ChildId, Context<'a>) {
+        let state = (self.state)(widget);
+        let context =
+            WindowInstance::scoped_context(self.id, state.epoch, state.dpi, state.viewport, parent);
+        (state.content, context)
+    }
+
+    pub(crate) fn dispatch(
+        self,
+        widget: &mut dyn Any,
+        event: &WindowEvent,
+        parent: &mut Context<'_>,
+    ) -> UpdateResult {
+        let (_, mut scoped) = self.content_context(widget, parent);
+        (self.event)(widget, event, &mut scoped)
+    }
+
+    pub(crate) fn invalidate(
+        self,
+        widget: &mut dyn Any,
+        flags: UpdateResult,
+        parent: &mut Context<'_>,
+    ) {
+        let (_, mut scoped) = self.content_context(widget, parent);
+        (self.invalidate)(widget, flags, &mut scoped);
+    }
+
+    pub(crate) fn unregister(self, context: &mut Context<'_>) {
+        context.window_registry().unregister(self.id);
+    }
+}
 /// Declares an independent native window, with content in the same UI tree.
 pub struct Window<V: View> {
     label: Option<String>,
@@ -59,38 +162,81 @@ impl<V: View> View for Window<V> {
         self.key
     }
 
-    fn build<'a>(&'a self, ctx: &mut DeclContext<'a>) -> impl Widget<V = Self> {
+    fn build<'a>(&'a self, ctx: &mut DeclContext<'a, '_>) -> impl Widget<V = Self> {
         let content = ctx.child(&self.view);
-        let id = ctx.register_window(self.config.clone(), content);
+        let id = ctx.register_window::<V>(self.config.clone());
         WindowWidget {
             id,
             view_type: PhantomData,
+            content,
+            cache_epoch: CacheEpoch::new(),
+            dpi: None,
+            viewport: None,
         }
     }
 }
 
-/// The widget stores an ID; the registry owns the window and UiTree owns its content.
+/// Owns the cache domain and event metrics. The registry owns OsWindow and UiTree owns content.
 pub struct WindowWidget<V: View> {
     id: WindowInstanceId,
     view_type: PhantomData<V>,
+    content: ChildId,
+    cache_epoch: CacheEpoch,
+    dpi: Option<f64>,
+    viewport: Option<[f32; 2]>,
 }
+
+impl<V: View> WindowWidget<V> {
+    fn invalidate_caches(&mut self, flags: UpdateResult, ctx: &mut Context<'_>) {
+        self.cache_epoch.advance(flags);
+        ctx.window_registry()
+            .get_mut(self.id)
+            .expect("live window is registered")
+            .request_redraw();
+    }
+
+    fn handle_window_event(&mut self, event: &WindowEvent, ctx: &mut Context<'_>) -> UpdateResult {
+        let flags = match event {
+            WindowEvent::ScaleFactorChanged { scale_factor } => {
+                let changed = self.dpi != Some(*scale_factor);
+                self.dpi = Some(*scale_factor);
+                if changed {
+                    UpdateResult::LAYOUT | UpdateResult::RENDER
+                } else {
+                    UpdateResult::empty()
+                }
+            }
+            WindowEvent::Resized { inner_size, .. } => {
+                // Backend state may already reflect this event; always invalidate the first notice.
+                let changed = self.viewport != Some(*inner_size);
+                self.viewport = Some(*inner_size);
+                if changed {
+                    UpdateResult::LAYOUT | UpdateResult::RENDER
+                } else {
+                    UpdateResult::empty()
+                }
+            }
+            WindowEvent::Theme(_) => UpdateResult::RENDER,
+            _ => UpdateResult::empty(),
+        };
+        if !flags.is_empty() {
+            self.invalidate_caches(flags, ctx);
+        }
+        flags
+    }
+}
+
 
 impl<V: View> Widget for WindowWidget<V> {
     type V = Window<V>;
 
-    fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a>) -> UpdateResult {
-        // ************************
-        // todo: これ変な実装になってるかも
-        // ************************
+    fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a, '_>) -> UpdateResult {
         let content = ctx.child(&view.view);
-        let registry = ctx
-            .context()
-            .window_registry()
-            .expect("Window updates require an application WindowRegistry in Context");
-        let mut instance = registry
-            .get(self.id)
+        let registry = ctx.context().window_registry();
+        let instance = registry
+            .get_mut(self.id)
             .expect("live Window widget is registered");
-        instance.content = content;
+        self.content = content;
         instance.update_config(view.config.clone());
         // Descendant drawing changes are not yet summarized by UiTree::update.
         // Schedule a window pass even when the window's own declaration is unchanged.
@@ -98,24 +244,23 @@ impl<V: View> Widget for WindowWidget<V> {
         UpdateResult::empty()
     }
 
-    fn input(&mut self, _: Bounds, _: &DeviceEvent, _: Context) -> InputResult {
+    fn input(&mut self, _: Bounds, _: &DeviceEvent, _: &mut Context) -> InputResult {
         InputResult::default()
     }
 
-    fn is_inside(&self, _: Bounds, _: Point, _: Context) -> bool {
+    fn is_inside(&self, _: Bounds, _: Point, _: &mut Context) -> bool {
         false
     }
 
-    fn measure(&self, _: Constraints, _: Children<'_>, _: Context) -> Bounds {
+    fn measure(&self, _: Constraints, _: Children<'_>, _: &mut Context) -> Bounds {
         Bounds::default()
     }
 
-    fn layout(&self, _: Bounds, _: Children<'_>, _: Context) {
-        // TODO(app): lay out the registered content root using the OS viewport,
-        // independently of this node's zero-size placement in its parent.
+    fn layout(&self, _: Bounds, _: Children<'_>, _: &mut Context) {
+        // UiTree::layout_window lays out content independently of this zero-size declaration.
     }
 
-    fn render(&self, _: Bounds, _: Context) -> Draw {
+    fn render(&self, _: Bounds, _: &mut Context) -> Draw {
         Draw::default()
     }
 }

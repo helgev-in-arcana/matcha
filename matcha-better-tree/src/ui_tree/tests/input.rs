@@ -45,7 +45,7 @@ impl View for InputView {
     fn key(&self) -> Option<u64> {
         Some(self.key)
     }
-    fn build<'a>(&'a self, ctx: &mut DeclContext<'a>) -> impl Widget<V = Self> {
+    fn build<'a>(&'a self, ctx: &mut DeclContext<'a, '_>) -> impl Widget<V = Self> {
         InputWidget {
             view: self.clone(),
             children: self.children.iter().map(|child| ctx.child(child)).collect(),
@@ -75,18 +75,18 @@ impl InputWidget {
 
 impl Widget for InputWidget {
     type V = InputView;
-    fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a>) -> UpdateResult {
+    fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a, '_>) -> UpdateResult {
         self.view = view.clone();
         self.children = view.children.iter().map(|child| ctx.child(child)).collect();
         UpdateResult::empty()
     }
-    fn preview_input(&mut self, _: Bounds, event: &DeviceEvent, _: Context) -> InputResult {
+    fn preview_input(&mut self, _: Bounds, event: &DeviceEvent, _: &mut Context) -> InputResult {
         self.record(true, event)
     }
-    fn input(&mut self, _: Bounds, event: &DeviceEvent, _: Context) -> InputResult {
+    fn input(&mut self, _: Bounds, event: &DeviceEvent, _: &mut Context) -> InputResult {
         self.record(false, event)
     }
-    fn is_inside(&self, b: Bounds, p: Point, _: Context) -> bool {
+    fn is_inside(&self, b: Bounds, p: Point, _: &mut Context) -> bool {
         self.view.hit_self
             && (0.0..=b.x).contains(&p.x)
             && (0.0..=b.y).contains(&p.y)
@@ -96,26 +96,23 @@ impl Widget for InputWidget {
         &self,
         constraints: Constraints,
         mut children: Children<'_>,
-        ctx: Context,
+        ctx: &mut Context,
     ) -> Bounds {
         let mut width = self.width;
         for child in &self.children {
-            width += children
-                .measure(*child, constraints, ctx.clone())
-                .unwrap()
-                .x;
+            width += children.measure(*child, constraints, ctx).unwrap().x;
         }
         Bounds {
             x: width,
             ..bounds()
         }
     }
-    fn layout(&self, _: Bounds, mut children: Children<'_>, ctx: Context) {
+    fn layout(&self, _: Bounds, mut children: Children<'_>, ctx: &mut Context) {
         for (id, child) in self.children.iter().zip(&self.view.children) {
-            children.layout(*id, child.placement, ctx.clone());
+            children.layout(*id, child.placement, ctx);
         }
     }
-    fn render(&self, _: Bounds, _: Context) -> Draw {
+    fn render(&self, _: Bounds, _: &mut Context) -> Draw {
         Draw {
             color: SmallVec::new(),
             mask: None,
@@ -134,7 +131,10 @@ fn tree() -> InputView {
 
 fn ready(view: &InputView) -> UiTree {
     let mut tree = UiTree::new();
-    tree.update(view);
+    tree.update(
+        view,
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     // Warm measurement through the existing widget entry point; root measurement API is
     // separate work. Root layout and input use the actual framework entry points below.
     let root = tree.root.unwrap();
@@ -145,12 +145,19 @@ fn ready(view: &InputView) -> UiTree {
             tree: &mut tree,
             current: root,
         },
-        Context::new(),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
     );
     let node = tree.node_ref_mut(root).unwrap();
     node.widget = Some(widget);
-    node.measure_cache = Some((Constraints::default(), measured));
-    tree.layout(bounds(), Context::new());
+    node.cache.cache_measure(
+        Constraints::default(),
+        measured,
+        crate::CacheEpoch::default(),
+    );
+    tree.layout(
+        bounds(),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     tree
 }
 
@@ -167,12 +174,24 @@ fn assert_invalidated(tree: &UiTree, changed_keys: &[u64]) {
             panic!("test widgets are keyed")
         };
         assert_eq!(
-            node.measure_cache.is_none(),
+            node.cache
+                .measure()
+                .get(
+                    crate::CacheEpoch::default(),
+                    crate::ui_tree::cache_epoch::CacheGroup::Layout
+                )
+                .is_none(),
             changed_keys.contains(&key),
             "measure: {key}"
         );
         assert_eq!(
-            node.layout_cache.is_none(),
+            node.cache
+                .layout()
+                .get(
+                    crate::CacheEpoch::default(),
+                    crate::ui_tree::cache_epoch::CacheGroup::Layout
+                )
+                .is_none(),
             changed_keys.contains(&key),
             "layout: {key}"
         );
@@ -193,7 +212,10 @@ fn order(view: &InputView) -> Vec<(u64, bool)> {
 fn preview_descends_and_normal_input_bubbles_on_one_path() {
     let view = tree();
     let mut tree = ready(&view);
-    let result = tree.input(&mouse_event(5.0, 5.0), Context::new());
+    let result = tree.input(
+        &mouse_event(5.0, 5.0),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     assert_eq!(result, InputResult::default());
     assert_eq!(
         order(&view),
@@ -218,7 +240,10 @@ fn preview_stop_prevents_target_delivery_but_invalidates_ancestors() {
     };
     let mut tree = ready(&view);
     assert_eq!(
-        tree.input(&mouse_event(5.0, 5.0), Context::new()),
+        tree.input(
+            &mouse_event(5.0, 5.0),
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+        ),
         view.children[0].preview
     );
     assert_eq!(order(&view), vec![(1, true), (2, true)]);
@@ -233,7 +258,10 @@ fn target_stop_does_not_stop_cache_invalidation_to_root() {
         propagation: InputPropagation::Stop,
     };
     let mut tree = ready(&view);
-    let result = tree.input(&mouse_event(5.0, 5.0), Context::new());
+    let result = tree.input(
+        &mouse_event(5.0, 5.0),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     assert_eq!(result, view.children[0].children[0].input);
     assert_eq!(
         order(&view),
@@ -248,7 +276,11 @@ fn target_stop_does_not_stop_cache_invalidation_to_root() {
             tree: &mut tree,
             current: parent
         }
-        .measure(leaf, Constraints::default(), Context::new())
+        .measure(
+            leaf,
+            Constraints::default(),
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+        )
         .unwrap()
         .x,
         11.0
@@ -261,7 +293,10 @@ fn changes_in_preview_survive_a_later_unchanged_stop() {
     view.preview.update = UpdateResult::LAYOUT;
     view.children[0].children[0].input.propagation = InputPropagation::Stop;
     let mut tree = ready(&view);
-    let result = tree.input(&mouse_event(5.0, 5.0), Context::new());
+    let result = tree.input(
+        &mouse_event(5.0, 5.0),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     assert_eq!(
         result,
         InputResult {
@@ -278,7 +313,10 @@ fn unchanged_stop_preserves_all_caches() {
     view.children[0].input.propagation = InputPropagation::Stop;
     let mut tree = ready(&view);
     assert_eq!(
-        tree.input(&mouse_event(5.0, 5.0), Context::new()),
+        tree.input(
+            &mouse_event(5.0, 5.0),
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+        ),
         view.children[0].input
     );
     assert_eq!(
@@ -293,7 +331,10 @@ fn changed_continue_reaches_root_and_preserves_unvisited_sibling() {
     let mut view = tree();
     view.children[0].children[0].input.update = UpdateResult::LAYOUT;
     let mut tree = ready(&view);
-    let result = tree.input(&mouse_event(5.0, 5.0), Context::new());
+    let result = tree.input(
+        &mouse_event(5.0, 5.0),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     assert_eq!(result, view.children[0].children[0].input);
     assert_eq!(order(&view).last(), Some(&(1, false)));
     assert_invalidated(&tree, &[1, 2, 3]);
@@ -306,7 +347,10 @@ fn overflowing_child_is_targeted_and_each_phase_gets_local_coordinates() {
     view.children[0].placement.affine = translation(100.0, 0.0, 0.0);
     view.children[0].children[0].placement.affine = translation(20.0, 0.0, 0.0);
     let mut tree = ready(&view);
-    let _ = tree.input(&mouse_event(125.0, 5.0), Context::new());
+    let _ = tree.input(
+        &mouse_event(125.0, 5.0),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     assert_eq!(
         order(&view),
         vec![
@@ -341,7 +385,10 @@ fn overlapping_siblings_follow_declaration_order_even_after_slot_preserving_reor
     );
     let mut tree = ready(&view);
     let original_front = find(&tree, 3);
-    let _ = tree.input(&mouse_event(5.0, 5.0), Context::new());
+    let _ = tree.input(
+        &mouse_event(5.0, 5.0),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     // Continue bubbles to the parent, not through to the sibling behind it.
     assert_eq!(
         order(&view),
@@ -349,10 +396,19 @@ fn overlapping_siblings_follow_declaration_order_even_after_slot_preserving_reor
     );
     view.log.lock().unwrap().clear();
     view.children.swap(0, 1);
-    tree.update(&view);
-    tree.layout(bounds(), Context::new());
+    tree.update(
+        &view,
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
+    tree.layout(
+        bounds(),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     assert_eq!(find(&tree, 3), original_front);
-    let _ = tree.input(&mouse_event(5.0, 5.0), Context::new());
+    let _ = tree.input(
+        &mouse_event(5.0, 5.0),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
     assert_eq!(
         order(&view),
         vec![(1, true), (2, true), (2, false), (1, false)]
@@ -372,7 +428,10 @@ fn singular_and_non_hitting_front_widgets_allow_searching_behind_them() {
         }
         let view = InputView::node(1, &log, vec![back, front]);
         let mut tree = ready(&view);
-        let _ = tree.input(&mouse_event(5.0, 5.0), Context::new());
+        let _ = tree.input(
+            &mouse_event(5.0, 5.0),
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+        );
         assert_eq!(
             order(&view),
             vec![(1, true), (2, true), (2, false), (1, false)]
@@ -385,11 +444,35 @@ fn empty_unplaced_and_missed_trees_produce_no_callbacks() {
     let view = tree();
     let mut tree = UiTree::new();
     let event = mouse_event(500.0, 500.0);
-    assert_eq!(tree.input(&event, Context::new()), InputResult::default());
-    tree.update(&view);
-    assert_eq!(tree.input(&event, Context::new()), InputResult::default());
-    tree.layout(bounds(), Context::new());
-    assert_eq!(tree.input(&event, Context::new()), InputResult::default());
+    assert_eq!(
+        tree.input(
+            &event,
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+        ),
+        InputResult::default()
+    );
+    tree.update(
+        &view,
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
+    assert_eq!(
+        tree.input(
+            &event,
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+        ),
+        InputResult::default()
+    );
+    tree.layout(
+        bounds(),
+        &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
+    );
+    assert_eq!(
+        tree.input(
+            &event,
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+        ),
+        InputResult::default()
+    );
     assert!(view.log.lock().unwrap().is_empty());
 }
 
@@ -402,21 +485,35 @@ fn preview_and_bubble_union_flags_without_cross_invalidating_drawing() {
         propagation: InputPropagation::Stop,
     };
     let mut tree = ready(&view);
-    tree.render(Context::new()).unwrap();
+    tree.render(&mut Context::new(
+        &mut crate::ui_tree::window::WindowRegistry::default(),
+    ))
+    .unwrap();
     assert_eq!(
-        tree.input(&mouse_event(5.0, 5.0), Context::new()),
+        tree.input(
+            &mouse_event(5.0, 5.0),
+            &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
+        ),
         InputResult {
             update: UpdateResult::LAYOUT | UpdateResult::RENDER,
             propagation: InputPropagation::Stop,
         }
     );
     assert_invalidated(&tree, &[1, 2, 3]);
-    assert!(tree.node_ref(find(&tree, 1)).unwrap().draw_cache.is_none());
+    assert!(
+        !tree
+            .node_ref(find(&tree, 1))
+            .unwrap()
+            .cache
+            .drawn(crate::CacheEpoch::default())
+    );
     for key in [2, 3, 4] {
         assert!(
             tree.node_ref(find(&tree, key))
                 .unwrap()
-                .draw_cache
+                .cache
+                .draw()
+                .value()
                 .is_some()
         );
     }

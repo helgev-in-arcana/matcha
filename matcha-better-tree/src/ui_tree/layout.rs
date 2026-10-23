@@ -5,7 +5,7 @@ use super::*;
 
 impl UiTree {
     /// Assign root-local bounds and lay out the tree.
-    pub fn layout(&mut self, bounds: Bounds, ctx: Context) {
+    pub fn layout(&mut self, bounds: Bounds, ctx: &mut Context) {
         if let Some(root) = self.root {
             self.layout_node(
                 root,
@@ -18,30 +18,23 @@ impl UiTree {
         }
     }
 
-    fn layout_node(&mut self, id: UiId, position: Position, ctx: Context) {
-        let epoch = self.cache_epochs.layout;
+    pub(super) fn layout_node(&mut self, id: UiId, position: Position, ctx: &mut Context) {
         let Some(node) = self.node_ref_mut(id) else {
             return;
         };
-        node.sync_layout_epoch(epoch);
+        let mut scoped = node.scoped_context(ctx);
+        let ctx = &mut scoped;
+        let epoch = ctx.cache_epoch();
         if node
             .placement
             .is_none_or(|old| old.bounds != position.bounds)
         {
-            node.draw_cache = None;
+            node.cache.invalidate(UpdateResult::RENDER);
         }
-        let affine_inverse = match node.placement {
-            Some(placement) if placement.affine == position.affine => placement.affine_inverse,
-            _ => position.affine.try_inverse(),
-        };
-        node.placement = Some(Placement {
-            bounds: position.bounds,
-            affine: position.affine,
-            affine_inverse,
-        });
+        node.placement = Some(Placement::new(position, node.placement));
 
         // Movement changes placement but does not invalidate the children's local layout.
-        if node.layout_cache == Some(position.bounds) {
+        if node.cache.laid_out(position.bounds, epoch) {
             return;
         }
 
@@ -61,7 +54,7 @@ impl UiTree {
             .node_ref_mut(id)
             .expect("tree cannot be changed during layout");
         node.widget = Some(widget);
-        node.layout_cache = Some(position.bounds);
+        node.cache.cache_layout(position.bounds, epoch);
     }
 }
 
@@ -70,15 +63,14 @@ impl Children<'_> {
         &mut self,
         id: ChildId,
         constraints: Constraints,
-        ctx: Context,
+        ctx: &mut Context,
     ) -> Option<Bounds> {
-        let epoch = self.tree.cache_epochs.layout;
         let (node, ui_id) = self.get(id)?;
-        node.sync_layout_epoch(epoch);
+        let mut scoped = node.scoped_context(ctx);
+        let ctx = &mut scoped;
+        let epoch = ctx.cache_epoch();
 
-        if let Some((cached_constraints, cached_bounds)) = node.measure_cache
-            && cached_constraints == constraints
-        {
+        if let Some(cached_bounds) = node.cache.measured(constraints, epoch) {
             return Some(cached_bounds);
         }
 
@@ -95,13 +87,13 @@ impl Children<'_> {
             .get(id)
             .expect("tree cannot be changed during this method");
         node.widget = Some(widget);
-        node.measure_cache = Some((constraints, bounds));
+        node.cache.cache_measure(constraints, bounds, epoch);
 
         Some(bounds)
     }
 
     /// Place a child using bounds in its own coordinates and an affine mapping to this parent.
-    pub fn layout(&mut self, id: ChildId, position: Position, ctx: Context) {
+    pub fn layout(&mut self, id: ChildId, position: Position, ctx: &mut Context) {
         let Some((_, ui_id)) = self.get(id) else {
             return;
         };

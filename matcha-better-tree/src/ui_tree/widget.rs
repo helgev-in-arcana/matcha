@@ -1,35 +1,15 @@
 use std::any::Any;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use matcha_window::event::device_event::DeviceEvent;
 use nalgebra::Matrix4;
 use smallvec::SmallVec;
 
-use crate::context::Context;
 use crate::metrics::{Bounds, Constraints, Point};
-pub use crate::ui_tree::{Children, DeclContext};
+use crate::ui_tree::Children;
+pub use crate::ui_tree::DeclContext;
+use crate::ui_tree::context::Context;
 
 const COLOR_SMALLVEC: usize = 2;
-
-/// Handle to a child, issued by `DeclContext::child`.
-///
-/// Unique across the whole process (all parents, frames and arenas), so a stale id, or one that
-/// leaked through the model into another widget, resolves to nothing instead of to the wrong
-/// child. Stable across frames for as long as the child is reused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ChildId {
-    uid: u64,
-}
-
-impl ChildId {
-    pub(crate) fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        // Only uniqueness is needed; no other memory is published through this counter.
-        Self {
-            uid: NEXT.fetch_add(1, Ordering::Relaxed),
-        }
-    }
-}
 
 pub trait View: Any {
     fn label(&self) -> Option<&str>;
@@ -37,7 +17,69 @@ pub trait View: Any {
     fn key(&self) -> Option<u64> {
         None
     }
-    fn build<'a>(&'a self, ctx: &mut DeclContext<'a>) -> impl Widget<V = Self>;
+    fn build<'a>(&'a self, ctx: &mut DeclContext<'a, '_>) -> impl Widget<V = Self>;
+}
+
+pub trait Widget: Any {
+    type V: View;
+
+    /// Update this widget and declare every child, even when returning empty flags.
+    /// Report LAYOUT for changes affecting measurement/child layout, RENDER for changes to
+    /// this widget's drawing, or LAYOUT | RENDER for both. Descendant layout caches are retained until
+    /// their own update or Constraints/Bounds keys require work.
+    fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a, '_>) -> UpdateResult;
+
+    /// Observe or intercept an event from root to target (inclusive), before normal input.
+    /// `mouse_position()` is widget-local. Stop cancels the rest of preview and normal input.
+    fn preview_input(
+        &mut self,
+        bounds: Bounds,
+        event: &DeviceEvent,
+        ctx: &mut Context,
+    ) -> InputResult {
+        let _ = (bounds, event, ctx);
+        InputResult::default()
+    }
+
+    /// Handle an event from target to root. `mouse_position()` is widget-local.
+    /// The framework routes events; widgets do not forward them to children.
+    /// Report LAYOUT and/or RENDER independently, even when stopping propagation.
+    fn input(&mut self, bounds: Bounds, event: &DeviceEvent, ctx: &mut Context) -> InputResult;
+
+    /// Test a point in this widget's local coordinates. The framework applies the relative
+    /// affine's inverse before calling this method. Test only this widget's own shape;
+    /// descendants are searched separately, even when this method returns false.
+    fn is_inside(&self, b: Bounds, p: Point, ctx: &mut Context) -> bool {
+        let _ = ctx;
+
+        (0.0 <= p.x && p.x <= b.x) && (0.0 <= p.y && p.y <= b.y) && (0.0 <= p.z && p.z <= b.z)
+    }
+
+    fn measure(
+        &self,
+        constraints: Constraints,
+        children: Children<'_>,
+        ctx: &mut Context,
+    ) -> Bounds;
+
+    /// Lay out this widget's children using its assigned local bounds.
+    /// Any child placements passed to `Children::layout` are relative to this widget.
+    /// Re-running layout alone does not invalidate this widget's drawing. Updates affecting
+    /// both child layout and this widget's appearance must also request RENDER.
+    fn layout(&self, bounds: Bounds, children: Children<'_>, ctx: &mut Context);
+
+    /// Whether any source returned by render reads the phase-start snapshot (Backdrop).
+    /// The minimal pipeline refreshes this widget and its descendants on every Scene build,
+    /// since earlier siblings and the renderer's external initial image can change independently.
+    fn uses_backdrop(&self) -> bool {
+        false
+    }
+
+    /// Produce widget-local drawing definitions. The framework assigns the submitted content
+    /// IDs and retains them while the draw cache is valid. Generators must capture immutable
+    /// parameters; mutable external resources require an explicit update result.
+    /// If any generator reads the snapshot, uses_backdrop must return true.
+    fn render(&self, bounds: Bounds, ctx: &mut Context) -> Draw;
 }
 
 bitflags::bitflags! {
@@ -77,58 +119,6 @@ impl Default for InputResult {
             propagation: InputPropagation::Continue,
         }
     }
-}
-
-pub trait Widget: Any {
-    type V: View;
-
-    /// Update this widget and declare every child, even when returning empty flags.
-    /// Report LAYOUT for changes affecting measurement/child layout, RENDER for changes to
-    /// this widget's drawing, or LAYOUT | RENDER for both. Descendant layout caches are retained until
-    /// their own update or Constraints/Bounds keys require work.
-    fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a>) -> UpdateResult;
-
-    /// Observe or intercept an event from root to target (inclusive), before normal input.
-    /// `mouse_position()` is widget-local. Stop cancels the rest of preview and normal input.
-    fn preview_input(&mut self, bounds: Bounds, event: &DeviceEvent, ctx: Context) -> InputResult {
-        let _ = (bounds, event, ctx);
-        InputResult::default()
-    }
-
-    /// Handle an event from target to root. `mouse_position()` is widget-local.
-    /// The framework routes events; widgets do not forward them to children.
-    /// Report LAYOUT and/or RENDER independently, even when stopping propagation.
-    fn input(&mut self, bounds: Bounds, event: &DeviceEvent, ctx: Context) -> InputResult;
-
-    /// Test a point in this widget's local coordinates. The framework applies the relative
-    /// affine's inverse before calling this method. Test only this widget's own shape;
-    /// descendants are searched separately, even when this method returns false.
-    fn is_inside(&self, b: Bounds, p: Point, ctx: Context) -> bool {
-        let _ = ctx;
-
-        (0.0 <= p.x && p.x <= b.x) && (0.0 <= p.y && p.y <= b.y) && (0.0 <= p.z && p.z <= b.z)
-    }
-
-    fn measure(&self, constraints: Constraints, children: Children<'_>, ctx: Context) -> Bounds;
-
-    /// Lay out this widget's children using its assigned local bounds.
-    /// Any child placements passed to `Children::layout` are relative to this widget.
-    /// Re-running layout alone does not invalidate this widget's drawing. Updates affecting
-    /// both child layout and this widget's appearance must also request RENDER.
-    fn layout(&self, bounds: Bounds, children: Children<'_>, ctx: Context);
-
-    /// Whether any source returned by render reads the phase-start snapshot (Backdrop).
-    /// The minimal pipeline refreshes this widget and its descendants on every Scene build,
-    /// since earlier siblings and the renderer's external initial image can change independently.
-    fn uses_backdrop(&self) -> bool {
-        false
-    }
-
-    /// Produce widget-local drawing definitions. The framework assigns the submitted content
-    /// IDs and retains them while the draw cache is valid. Generators must capture immutable
-    /// parameters; mutable external resources require an explicit update result.
-    /// If any generator reads the snapshot, uses_backdrop must return true.
-    fn render(&self, bounds: Bounds, ctx: Context) -> Draw;
 }
 
 /// Own content is painted before children, which are painted in declaration order.

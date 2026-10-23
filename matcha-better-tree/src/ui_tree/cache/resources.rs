@@ -1,12 +1,10 @@
-//! Submitted IDs belong to the framework's cached draw, not the Widget's source templates.
+//! Submitted IDs belong to the cached Draw, not the Widget's source templates.
 //! Future caller-managed resources can bypass remapping here while using the same Scene writer.
 use std::collections::HashMap;
 
-use render_interface::{
-    MaskId, MaskSource, MeshId, MeshSource, ResourcePool, TextureId, TextureSource,
-};
+use render_interface::{MaskSource, MeshId, MeshSource, ResourcePool, TextureId, TextureSource};
 
-use crate::widget::{Draw, UiError};
+use crate::ui_tree::widget::{Draw, UiError};
 
 // Reuse aliases inside one Draw (e.g. a color and mask sharing a mesh). Equal template IDs
 // must describe equal content; ResourcePool checks descriptor/output-layout consistency.
@@ -14,7 +12,6 @@ pub(super) fn manage(mut draw: Draw) -> Result<Draw, UiError> {
     let mut templates = ResourcePool::default();
     let mut meshes = HashMap::<MeshId, MeshSource>::new();
     let mut textures = HashMap::<TextureId, TextureSource>::new();
-    let mut masks = HashMap::<MaskId, MaskSource>::new();
     for color in &mut draw.color {
         templates.share_mesh(&color.mesh)?;
         templates.share_texture(&color.texture)?;
@@ -34,10 +31,8 @@ pub(super) fn manage(mut draw: Draw) -> Result<Draw, UiError> {
             .entry(mask.mesh.id())
             .or_insert_with(|| fresh_mesh(&mask.mesh))
             .clone();
-        mask.mask = masks
-            .entry(mask.mask.id())
-            .or_insert_with(|| fresh_mask(&mask.mask))
-            .clone();
+        // A Draw has at most one mask, so there are no mask aliases to track.
+        mask.mask = fresh_mask(&mask.mask);
     }
     Ok(draw)
 }
@@ -64,7 +59,7 @@ fn fresh_mask(source: &MaskSource) -> MaskSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widget::{Color, Mask};
+    use crate::ui_tree::widget::{Color, Mask};
     use nalgebra::Matrix4;
     use render_interface::{MeshDescriptor, PrepareOutputLayout, TextureDescriptor};
 
