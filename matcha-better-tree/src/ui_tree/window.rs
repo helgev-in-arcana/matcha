@@ -1,7 +1,7 @@
 //! Windows are ordinary declarations in the application's single UI tree.
 //!
 //! The registry owns native window instances and records their arena locations and
-//! native event routes. WindowWidget owns cache epochs and event metrics.
+//! native event routes. WindowWidget owns event metrics; UiTree invalidates caches.
 //! UiTree's window entry points scope Context to that window; parent rendering and
 //! input stop at native window boundaries. App lifecycle scheduling is still separate.
 
@@ -12,7 +12,6 @@ use matcha_window::event::device_event::DeviceEvent;
 use matcha_window::event::window_event::WindowEvent;
 use matcha_window::window::{Fullscreen, Position, Size, Theme, Window as OsWindow, WindowButtons};
 
-use crate::CacheEpoch;
 use crate::metrics::{Bounds, Constraints, Point};
 use crate::ui_tree::context::Context;
 use crate::ui_tree::widget::{Draw, InputResult, UpdateResult, View, Widget};
@@ -28,12 +27,10 @@ pub use registry::{WindowInstance, WindowInstanceId, WindowRegistry};
 pub(crate) struct WindowBinding {
     id: WindowInstanceId,
     state: fn(&dyn Any) -> WindowState,
-    event: fn(&mut dyn Any, &WindowEvent, &mut Context<'_>) -> UpdateResult,
-    invalidate: fn(&mut dyn Any, UpdateResult, &mut Context<'_>),
+    event: fn(&mut dyn Any, &WindowEvent) -> UpdateResult,
 }
 
 struct WindowState {
-    epoch: CacheEpoch,
     content: ChildId,
     dpi: Option<f64>,
     viewport: Option<[f32; 2]>,
@@ -46,7 +43,7 @@ pub(crate) fn scoped_context<'a>(
 ) -> Context<'a> {
     match binding {
         Some(binding) => binding.content_context(widget, parent).1,
-        None => parent.with_cache_epoch(parent.cache_epoch()),
+        None => parent.reborrow(),
     }
 }
 
@@ -59,23 +56,16 @@ impl WindowBinding {
                     .downcast_ref::<WindowWidget<V>>()
                     .expect("registered window widget type matches");
                 WindowState {
-                    epoch: widget.cache_epoch,
                     content: widget.content,
                     dpi: widget.dpi,
                     viewport: widget.viewport,
                 }
             },
-            event: |widget, event, ctx| {
+            event: |widget, event| {
                 widget
                     .downcast_mut::<WindowWidget<V>>()
                     .expect("registered window widget type matches")
-                    .handle_window_event(event, ctx)
-            },
-            invalidate: |widget, flags, ctx| {
-                widget
-                    .downcast_mut::<WindowWidget<V>>()
-                    .expect("registered window widget type matches")
-                    .invalidate_caches(flags, ctx)
+                    .handle_window_event(event)
             },
         }
     }
@@ -90,29 +80,12 @@ impl WindowBinding {
         parent: &'a mut Context<'_>,
     ) -> (ChildId, Context<'a>) {
         let state = (self.state)(widget);
-        let context =
-            WindowInstance::scoped_context(self.id, state.epoch, state.dpi, state.viewport, parent);
+        let context = WindowInstance::scoped_context(self.id, state.dpi, state.viewport, parent);
         (state.content, context)
     }
 
-    pub(crate) fn dispatch(
-        self,
-        widget: &mut dyn Any,
-        event: &WindowEvent,
-        parent: &mut Context<'_>,
-    ) -> UpdateResult {
-        let (_, mut scoped) = self.content_context(widget, parent);
-        (self.event)(widget, event, &mut scoped)
-    }
-
-    pub(crate) fn invalidate(
-        self,
-        widget: &mut dyn Any,
-        flags: UpdateResult,
-        parent: &mut Context<'_>,
-    ) {
-        let (_, mut scoped) = self.content_context(widget, parent);
-        (self.invalidate)(widget, flags, &mut scoped);
+    pub(crate) fn dispatch(self, widget: &mut dyn Any, event: &WindowEvent) -> UpdateResult {
+        (self.event)(widget, event)
     }
 
     pub(crate) fn unregister(self, context: &mut Context<'_>) {
@@ -169,34 +142,24 @@ impl<V: View> View for Window<V> {
             id,
             view_type: PhantomData,
             content,
-            cache_epoch: CacheEpoch::new(),
             dpi: None,
             viewport: None,
         }
     }
 }
 
-/// Owns the cache domain and event metrics. The registry owns OsWindow and UiTree owns content.
+/// Owns event metrics. The registry owns OsWindow and UiTree owns content and caches.
 pub struct WindowWidget<V: View> {
     id: WindowInstanceId,
     view_type: PhantomData<V>,
     content: ChildId,
-    cache_epoch: CacheEpoch,
     dpi: Option<f64>,
     viewport: Option<[f32; 2]>,
 }
 
 impl<V: View> WindowWidget<V> {
-    fn invalidate_caches(&mut self, flags: UpdateResult, ctx: &mut Context<'_>) {
-        self.cache_epoch.advance(flags);
-        ctx.window_registry()
-            .get_mut(self.id)
-            .expect("live window is registered")
-            .request_redraw();
-    }
-
-    fn handle_window_event(&mut self, event: &WindowEvent, ctx: &mut Context<'_>) -> UpdateResult {
-        let flags = match event {
+    fn handle_window_event(&mut self, event: &WindowEvent) -> UpdateResult {
+        match event {
             WindowEvent::ScaleFactorChanged { scale_factor } => {
                 let changed = self.dpi != Some(*scale_factor);
                 self.dpi = Some(*scale_factor);
@@ -218,14 +181,9 @@ impl<V: View> WindowWidget<V> {
             }
             WindowEvent::Theme(_) => UpdateResult::RENDER,
             _ => UpdateResult::empty(),
-        };
-        if !flags.is_empty() {
-            self.invalidate_caches(flags, ctx);
         }
-        flags
     }
 }
-
 
 impl<V: View> Widget for WindowWidget<V> {
     type V = Window<V>;

@@ -12,7 +12,6 @@ use crate::arena::{Arena, Id as UiId};
 use crate::metrics::{Bounds, Constraints, Point};
 
 mod cache;
-pub mod cache_epoch;
 pub mod context;
 mod input;
 mod layout;
@@ -241,12 +240,28 @@ impl UiTree {
         self.nodes.clear();
     }
 
-    /// Immediately release selected CPU cache values without changing window epochs or placement.
+    /// Immediately release selected CPU cache values without changing placement.
     /// Returned Scenes may still share their resources; GPU residency belongs to the renderer.
     pub fn clear_caches(&mut self, flags: UpdateResult) {
         if !flags.is_empty() {
             for (_, node) in self.nodes.iter_mut() {
                 node.cache.invalidate(flags);
+            }
+        }
+    }
+
+    /// Invalidate one environment scope, stopping at nested native windows.
+    fn invalidate_caches_from(&mut self, id: UiId, flags: UpdateResult) {
+        if flags.is_empty() {
+            return;
+        }
+        let node = self.node_ref_mut(id).expect("live invalidation root");
+        node.cache.invalidate(flags);
+        let child_count = node.children.len();
+        for index in 0..child_count {
+            let child = self.node_ref(id).expect("live invalidation root").children[index].1;
+            if self.node_ref(child).expect("live child").window.is_none() {
+                self.invalidate_caches_from(child, flags);
             }
         }
     }
@@ -275,7 +290,7 @@ impl UiTree {
         old_children: Vec<(UiKey, ChildId, UiId)>,
         context: &mut Context<'_>,
     ) -> UiNode {
-        let mut context = context.with_cache_epoch(context.cache_epoch());
+        let mut context = context.reborrow();
         let mut ctx = DeclContext {
             context: &mut context,
             current: id,
@@ -306,7 +321,7 @@ impl UiTree {
         let node = self.node_ref_mut(id).expect("live update node");
         let window = node.window;
         let mut widget = node.widget.take().expect("widget restored after callbacks");
-        // A replacement must build in the parent scope, not the old window's domain.
+        // A replacement must build in the parent scope, not the old window's scope.
         let old_children = std::mem::take(&mut node.children)
             .into_iter()
             .map(|(child_id, child)| {
@@ -356,7 +371,12 @@ impl UiTree {
                 }
                 let parent = self.node_ref(id).expect("live replacement node").parent;
                 let node = self.build_node(parent, id, view, old_children, context);
+                let environment_changed = window.is_some() || node.window.is_some();
                 *self.node_ref_mut(id).expect("live replacement node") = node;
+                if environment_changed {
+                    // Reconciliation can retain descendants across a native-window boundary change.
+                    self.invalidate_caches_from(id, UpdateResult::LAYOUT | UpdateResult::RENDER);
+                }
                 true
             }
         }

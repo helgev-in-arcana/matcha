@@ -33,7 +33,7 @@ impl UiTree {
         }
         if node
             .placement
-            .is_none_or(|p| !node.cache.laid_out(p.bounds, ctx.cache_epoch()))
+            .is_none_or(|p| !node.cache.laid_out(p.bounds))
         {
             return Err(UiError::LayoutRequired);
         }
@@ -63,9 +63,9 @@ impl UiTree {
         let backdrop = inherited_backdrop || widget.uses_backdrop();
         let world = parent_transform * placement.affine;
         let child_count = node.children.len();
-        let draw = node.cache.drawing(ctx.cache_epoch(), backdrop, || {
-            widget.render(placement.bounds, ctx)
-        })?;
+        let draw = node
+            .cache
+            .drawing(backdrop, || widget.render(placement.bounds, ctx))?;
 
         // All generators for this widget see the snapshot before its own colors. Later
         // dependent children get a new phase after those colors. Empty phases are reused.

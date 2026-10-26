@@ -7,7 +7,6 @@ use matcha_window::adapter::EventLoop;
 use matcha_window::window::{Window as OsWindow, WindowError, WindowId};
 
 use super::WindowConfig;
-use crate::CacheEpoch;
 use crate::arena::Id as UiId;
 use crate::ui_tree::context::{Context, PlatformState};
 
@@ -153,7 +152,6 @@ impl WindowInstance {
     /// Snapshot native metrics, then select this instance's platform state in a reborrowed Context.
     pub(super) fn scoped_context<'a>(
         id: WindowInstanceId,
-        epoch: CacheEpoch,
         dpi: Option<f64>,
         viewport: Option<[f32; 2]>,
         parent: &'a mut Context<'_>,
@@ -169,7 +167,7 @@ impl WindowInstance {
                 .map_or([0.0; 2], |w| w.inner_size().map(|n| n as f32))
         });
         parent
-            .with_cache_epoch(epoch)
+            .reborrow()
             .with_dpi(dpi)
             .with_viewport_size(viewport)
             .with_window(id)

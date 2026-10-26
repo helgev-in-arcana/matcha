@@ -137,26 +137,8 @@ fn warm(tree: &mut UiTree, root: UiId, child: ChildId) -> Bounds {
 
 fn assert_cached(tree: &UiTree, id: UiId, expected: bool) {
     let node = tree.node_ref(id).unwrap();
-    assert_eq!(
-        node.cache
-            .measure()
-            .get(
-                crate::CacheEpoch::default(),
-                crate::ui_tree::cache_epoch::CacheGroup::Layout
-            )
-            .is_some(),
-        expected
-    );
-    assert_eq!(
-        node.cache
-            .layout()
-            .get(
-                crate::CacheEpoch::default(),
-                crate::ui_tree::cache_epoch::CacheGroup::Layout
-            )
-            .is_some(),
-        expected
-    );
+    assert_eq!(node.cache.measure().is_some(), expected);
+    assert_eq!(node.cache.layout().is_some(), expected);
 }
 
 #[test]
@@ -192,15 +174,14 @@ fn leaf_change_invalidates_all_ancestors_but_preserves_sibling_and_placement() {
     let sibling = tree.node_ref(top).unwrap().children[1].1;
     let placement = tree.node_ref(leaf).unwrap().placement.unwrap();
     // Root operations are not exposed yet; seed its caches to check propagation to the root.
-    tree.node_ref_mut(root).unwrap().cache.cache_measure(
-        Constraints::default(),
-        bounds(),
-        crate::CacheEpoch::default(),
-    );
     tree.node_ref_mut(root)
         .unwrap()
         .cache
-        .cache_layout(bounds(), crate::CacheEpoch::default());
+        .cache_measure(Constraints::default(), bounds());
+    tree.node_ref_mut(root)
+        .unwrap()
+        .cache
+        .cache_layout(bounds());
     view.children[0].children[0].width = 20.0;
     refresh(&mut tree, &view);
     for id in [root, top, branch, leaf] {

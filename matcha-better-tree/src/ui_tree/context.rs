@@ -6,7 +6,6 @@ use std::time::Instant;
 use matcha_window::clipboard::Clipboard;
 use matcha_window::window::{CursorIcon, Window};
 
-use crate::CacheEpoch;
 use crate::ui_tree::window::{WindowInstanceId, WindowRegistry};
 
 #[derive(Default)]
@@ -80,7 +79,6 @@ impl ServicesStorage<'_> {
 
 pub struct Context<'a> {
     windows: &'a mut WindowRegistry,
-    cache_epoch: CacheEpoch,
     viewport_size: [f32; 2],
     dpi: f64,
     frame_time: Instant,
@@ -92,7 +90,6 @@ impl<'a> Context<'a> {
     pub fn new(windows: &'a mut WindowRegistry) -> Self {
         Self {
             windows,
-            cache_epoch: CacheEpoch::default(),
             viewport_size: [0.0, 0.0],
             dpi: 1.0,
             frame_time: Instant::now(),
@@ -106,10 +103,6 @@ impl<'a> Context<'a> {
         self.windows
     }
 
-    pub fn cache_epoch(&self) -> CacheEpoch {
-        self.cache_epoch
-    }
-
     /// Reborrow services for one node. Metrics are scoped; platform and resource changes persist.
     /// The scoped context cannot escape the parent borrow, even if the registry lives longer.
     /// ```compile_fail
@@ -118,14 +111,13 @@ impl<'a> Context<'a> {
     /// let escaped;
     /// {
     ///     let mut parent = Context::new(&mut registry);
-    ///     escaped = parent.with_cache_epoch(parent.cache_epoch());
+    ///     escaped = parent.reborrow();
     /// }
-    /// let _ = escaped.cache_epoch();
+    /// let _ = escaped.dpi();
     /// ```
-    pub fn with_cache_epoch(&mut self, cache_epoch: CacheEpoch) -> Context<'_> {
+    pub fn reborrow(&mut self) -> Context<'_> {
         Context {
             windows: &mut *self.windows,
-            cache_epoch,
             viewport_size: self.viewport_size,
             dpi: self.dpi,
             frame_time: self.frame_time,
@@ -277,22 +269,20 @@ mod tests {
         let mut registry = WindowRegistry::default();
         let mut parent = Context::new(&mut registry).with_dpi(1.5);
         let original = parent.insert_resource(String::from("original"));
-        let parent_epoch = parent.cache_epoch();
         {
-            let mut child = parent.with_cache_epoch(CacheEpoch::new()).with_dpi(2.0);
+            let mut child = parent.reborrow().with_dpi(2.0);
             assert_eq!(Arc::strong_count(&original), 2);
             assert!(Arc::ptr_eq(&child.resource::<String>().unwrap(), &original));
             child.insert_resource(String::from("replacement"));
             child.set_cursor_icon(CursorIcon::Text);
             let initialized = child.get_or_init_resource(|| vec![1_u32, 2]);
-            let mut nested = child.with_cache_epoch(child.cache_epoch());
+            let mut nested = child.reborrow();
             assert!(Arc::ptr_eq(
                 &nested.get_or_init_resource::<Vec<u32>>(|| panic!("already initialized")),
                 &initialized,
             ));
             nested.set_ime_allowed(true);
         }
-        assert_eq!(parent.cache_epoch(), parent_epoch);
         assert_eq!(parent.dpi(), 1.5);
         assert_eq!(parent.cursor_icon(), CursorIcon::Text);
         assert!(parent.is_ime_allowed());
@@ -311,13 +301,12 @@ mod tests {
         let area = ([10.0, 20.0], [30.0, 40.0]);
         {
             let mut parent = Context::new(&mut registry);
-            let epoch = parent.cache_epoch();
-            let mut window_a = parent.with_cache_epoch(epoch).with_window(a);
+            let mut window_a = parent.reborrow().with_window(a);
             window_a.set_cursor_icon(CursorIcon::Text);
             window_a.set_ime_allowed(true);
             window_a.set_ime_cursor_area(area.0, area.1);
             {
-                let window_b = window_a.with_cache_epoch(epoch).with_window(b);
+                let window_b = window_a.reborrow().with_window(b);
                 assert_eq!(window_b.cursor_icon(), CursorIcon::Default);
                 assert!(!window_b.is_ime_allowed());
                 assert_eq!(window_b.ime_cursor_area(), None);
@@ -343,8 +332,7 @@ mod tests {
         {
             let mut parent = Context::new(&mut registry);
             assert!(!parent.is_ime_allowed());
-            let epoch = parent.cache_epoch();
-            let window_a = parent.with_cache_epoch(epoch).with_window(a);
+            let window_a = parent.reborrow().with_window(a);
             assert!(window_a.is_ime_allowed());
             assert_eq!(window_a.ime_cursor_area(), Some(area));
         }

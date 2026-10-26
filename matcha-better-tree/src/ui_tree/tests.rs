@@ -21,16 +21,15 @@ struct Observations {
     layout_calls: usize,
     layout_bounds: Vec<Bounds>,
     render_calls: usize,
-    scopes: Vec<(&'static str, crate::CacheEpoch, f64, [f32; 2])>,
+    scopes: Vec<(&'static str, f64, [f32; 2])>,
 }
 
 fn record_scope(observations: &Arc<Mutex<Observations>>, stage: &'static str, ctx: &Context) {
-    observations.lock().unwrap().scopes.push((
-        stage,
-        ctx.cache_epoch(),
-        ctx.dpi(),
-        ctx.viewport_size(),
-    ));
+    observations
+        .lock()
+        .unwrap()
+        .scopes
+        .push((stage, ctx.dpi(), ctx.viewport_size()));
 }
 
 struct ProbeView(Arc<Mutex<Observations>>);

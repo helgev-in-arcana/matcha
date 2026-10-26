@@ -51,7 +51,7 @@ impl UiTree {
     }
 
     /// Deliver a native window event. Unknown/deleted windows are ignored.
-    /// This changes the owning WindowWidget's epoch without walking its content.
+    /// Environment changes invalidate the target window's caches, excluding nested windows.
     pub fn window_event(
         &mut self,
         id: WindowId,
@@ -64,11 +64,20 @@ impl UiTree {
             .widget
             .as_deref_mut()
             .expect("live widget");
-        Some(binding.dispatch(widget, event, ctx))
+        let flags = binding.dispatch(widget, event);
+        if !flags.is_empty() {
+            self.invalidate_caches_from(node_id, flags);
+            ctx.window_registry()
+                .get_mut(binding.id())
+                .expect("live window is registered")
+                .request_redraw();
+        }
+        Some(flags)
     }
 
     /// Explicit environment invalidation, e.g. when a target/device change requires new drawing.
     /// Surface recreation alone does not imply CPU Draw definitions became invalid.
+    /// Releases selected CPU cache values in this window, excluding nested windows.
     pub fn invalidate_window_caches(
         &mut self,
         id: WindowId,
@@ -78,13 +87,11 @@ impl UiTree {
         let Some((node_id, binding)) = self.window_route(id, ctx) else {
             return false;
         };
-        let widget = self
-            .node_ref_mut(node_id)
-            .expect("live window")
-            .widget
-            .as_deref_mut()
-            .expect("live widget");
-        binding.invalidate(widget, flags, ctx);
+        self.invalidate_caches_from(node_id, flags);
+        ctx.window_registry()
+            .get_mut(binding.id())
+            .expect("live window is registered")
+            .request_redraw();
         true
     }
 

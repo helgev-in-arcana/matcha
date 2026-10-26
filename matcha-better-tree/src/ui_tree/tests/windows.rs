@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use matcha_window::headless_interface::HeadlessEventLoop;
-use matcha_window::window::{CursorIcon, Size, WindowConfig as NativeConfig};
+use matcha_window::window::{CursorIcon, Size, Theme, WindowConfig as NativeConfig};
 
 use super::*;
 use crate::ui_tree::window::{Apply, Window, WindowConfig, WindowRegistry};
@@ -352,25 +352,18 @@ fn nested_windows_share_resources_but_isolate_context_scopes() {
     tree.update(&Window::new(Window::new(probe())), &mut context);
     let outer = tree.root.unwrap();
     let inner = tree.node_ref(outer).unwrap().children[0].1;
-    let parent_epoch = context.cache_epoch();
-    let outer_epoch;
     {
         let mut a = tree.node_ref(outer).unwrap().scoped_context(&mut context);
-        outer_epoch = a.cache_epoch();
-        assert_ne!(outer_epoch, parent_epoch);
         assert!(Arc::ptr_eq(&a.resource::<String>().unwrap(), &shared));
         a.set_cursor_icon(CursorIcon::Text);
         a.set_ime_allowed(true);
         {
             let b = tree.node_ref(inner).unwrap().scoped_context(&mut a);
-            assert_ne!(b.cache_epoch(), outer_epoch);
             assert!(Arc::ptr_eq(&b.resource::<String>().unwrap(), &shared));
             assert!(!b.is_ime_allowed());
         }
-        assert_eq!(a.cache_epoch(), outer_epoch);
         assert!(a.is_ime_allowed());
     }
-    assert_eq!(context.cache_epoch(), parent_epoch);
     assert!(!context.is_ime_allowed());
     assert!(
         tree.node_ref(outer)
@@ -422,14 +415,7 @@ fn parent_passes_do_not_visit_window_content_even_with_existing_placement() {
     tree.render(&mut Context::new(&mut registry)).unwrap();
     let _ = tree.input(&mouse_event(5.0, 5.0), &mut Context::new(&mut registry));
     assert!(observed.lock().unwrap().events.is_empty());
-    assert!(
-        tree.node_ref(child.1)
-            .unwrap()
-            .cache
-            .draw()
-            .value()
-            .is_none()
-    );
+    assert!(tree.node_ref(child.1).unwrap().cache.draw().is_none());
 }
 
 fn update<V: View>(tree: &mut UiTree, registry: &mut WindowRegistry, view: &V) {
@@ -440,8 +426,29 @@ fn clear(tree: &mut UiTree, registry: &mut WindowRegistry) {
     tree.clear(&mut Context::new(registry));
 }
 
+fn native_id(tree: &UiTree, node: UiId, ctx: &mut Context) -> matcha_window::window::WindowId {
+    let binding = tree.node_ref(node).unwrap().window.unwrap();
+    ctx.window_registry()
+        .get_mut(binding.id())
+        .unwrap()
+        .window_id()
+        .unwrap()
+}
+
+fn measure_content(tree: &mut UiTree, window: UiId, ctx: &mut Context) -> Bounds {
+    let node = tree.node_ref(window).unwrap();
+    let child = node.children[0].0;
+    let mut scoped = node.scoped_context(ctx);
+    Children {
+        tree,
+        current: window,
+    }
+    .measure(child, Constraints::default(), &mut scoped)
+    .unwrap()
+}
+
 #[test]
-fn native_events_scope_epochs_and_refresh_only_the_target_window() {
+fn native_events_refresh_only_the_target_window_and_selected_caches() {
     use matcha_window::event::window_event::WindowEvent;
     let a = Arc::new(Mutex::new(Observations::default()));
     let b = Arc::new(Mutex::new(Observations::default()));
@@ -455,48 +462,18 @@ fn native_events_scope_epochs_and_refresh_only_the_target_window() {
     ]);
     let mut registry = WindowRegistry::default();
     let mut ctx = Context::new(&mut registry);
-    let parent_epoch = ctx.cache_epoch();
     let mut tree = UiTree::new();
     tree.update(&view, &mut ctx);
     create(ctx.window_registry(), &HeadlessEventLoop::new());
     let nodes = tree.node_ref(tree.root.unwrap()).unwrap().children.clone();
-    let window_a = tree.node_ref(nodes[0].1).unwrap().window.unwrap();
-    let window_b = tree.node_ref(nodes[1].1).unwrap().window.unwrap();
-    let native_a = ctx
-        .window_registry()
-        .get_mut(window_a.id())
-        .unwrap()
-        .window_id()
-        .unwrap();
-    let native_b = ctx
-        .window_registry()
-        .get_mut(window_b.id())
-        .unwrap()
-        .window_id()
-        .unwrap();
-    let epoch_a = tree
-        .node_ref(nodes[0].1)
-        .unwrap()
-        .scoped_context(&mut ctx)
-        .cache_epoch();
-    let epoch_b = tree
-        .node_ref(nodes[1].1)
-        .unwrap()
-        .scoped_context(&mut ctx)
-        .cache_epoch();
-    assert_ne!(epoch_a, epoch_b);
-    assert_eq!(a.lock().unwrap().scopes[0].1, epoch_a);
-    assert_eq!(b.lock().unwrap().scopes[0].1, epoch_b);
+    let native_a = native_id(&tree, nodes[0].1, &mut ctx);
+    let native_b = native_id(&tree, nodes[1].1, &mut ctx);
     for native in [native_a, native_b] {
         assert!(tree.layout_window(native, &mut ctx));
         assert!(tree.render_window(native, &mut ctx).unwrap().is_some());
     }
     let child_a = tree.node_ref(nodes[0].1).unwrap().children[0].1;
     let child_b = tree.node_ref(nodes[1].1).unwrap().children[0].1;
-    let old_a_layout = tree.node_ref(child_a).unwrap().cache.layout().stamp();
-    let old_a_draw = tree.node_ref(child_a).unwrap().cache.draw().stamp();
-    let old_b_layout = tree.node_ref(child_b).unwrap().cache.layout().stamp();
-    // Delivery downcasts through the registry, but invalidation does not touch node caches.
     assert_eq!(
         tree.window_event(
             native_a,
@@ -505,37 +482,23 @@ fn native_events_scope_epochs_and_refresh_only_the_target_window() {
         ),
         Some(UpdateResult::LAYOUT | UpdateResult::RENDER)
     );
-    assert_eq!(
-        tree.node_ref(child_a).unwrap().cache.layout().stamp(),
-        old_a_layout
-    );
-    assert_eq!(
-        tree.node_ref(child_a).unwrap().cache.draw().stamp(),
-        old_a_draw
-    );
+    assert!(tree.node_ref(child_a).unwrap().cache.layout().is_none());
+    assert!(!tree.node_ref(child_a).unwrap().cache.drawn());
+    assert!(tree.node_ref(child_b).unwrap().cache.layout().is_some());
+    assert!(tree.node_ref(child_b).unwrap().cache.drawn());
     tree.update(&view, &mut ctx);
     assert!(matches!(
         tree.render_window(native_a, &mut ctx),
         Err(UiError::LayoutRequired)
     ));
-    tree.layout_window(native_a, &mut ctx);
-    tree.render_window(native_a, &mut ctx).unwrap();
-    tree.layout_window(native_b, &mut ctx);
-    tree.render_window(native_b, &mut ctx).unwrap();
+    for native in [native_a, native_b] {
+        tree.layout_window(native, &mut ctx);
+        tree.render_window(native, &mut ctx).unwrap();
+    }
     assert_eq!(a.lock().unwrap().layout_calls, 2);
     assert_eq!(a.lock().unwrap().render_calls, 2);
     assert_eq!(b.lock().unwrap().layout_calls, 1);
     assert_eq!(b.lock().unwrap().render_calls, 1);
-    assert_eq!(
-        tree.node_ref(child_b).unwrap().cache.layout().stamp(),
-        old_b_layout
-    );
-    let latest_a = tree
-        .node_ref(nodes[0].1)
-        .unwrap()
-        .scoped_context(&mut ctx)
-        .cache_epoch();
-    assert_eq!(latest_a.revision(), epoch_a.revision() + 1);
     assert_eq!(
         tree.window_event(
             native_a,
@@ -544,123 +507,245 @@ fn native_events_scope_epochs_and_refresh_only_the_target_window() {
         ),
         Some(UpdateResult::empty())
     );
+    tree.layout_window(native_a, &mut ctx);
+    tree.render_window(native_a, &mut ctx).unwrap();
+    assert_eq!(a.lock().unwrap().layout_calls, 2);
+    assert_eq!(a.lock().unwrap().render_calls, 2);
     let _ = tree.input_window(native_a, &mouse_event(5.0, 5.0), &mut ctx);
     let scopes = a.lock().unwrap().scopes.clone();
     for stage in ["update", "layout", "render", "input"] {
-        let entry = scopes.iter().rev().find(|entry| entry.0 == stage).unwrap();
-        assert_eq!((entry.1, entry.2), (latest_a, 2.0));
+        assert_eq!(
+            scopes
+                .iter()
+                .rev()
+                .find(|entry| entry.0 == stage)
+                .unwrap()
+                .1,
+            2.0
+        );
     }
-    assert_eq!(ctx.cache_epoch(), parent_epoch);
     assert_eq!(ctx.dpi(), 1.0);
     assert!(b.lock().unwrap().events.is_empty());
-    // Render-only changes accept old layout stamps without rewriting them.
-    let layout_stamp = tree.node_ref(child_a).unwrap().cache.layout().stamp();
+
+    tree.window_event(native_a, &WindowEvent::Theme(Theme::Dark), &mut ctx);
+    assert!(tree.node_ref(child_a).unwrap().cache.layout().is_some());
+    assert!(!tree.node_ref(child_a).unwrap().cache.drawn());
+    tree.render_window(native_a, &mut ctx).unwrap();
+    assert_eq!(a.lock().unwrap().layout_calls, 2);
+    assert_eq!(a.lock().unwrap().render_calls, 3);
+    assert!(tree.invalidate_window_caches(native_a, UpdateResult::empty(), &mut ctx));
+    tree.render_window(native_a, &mut ctx).unwrap();
+    assert_eq!(a.lock().unwrap().render_calls, 3);
+    for _ in 0..2 {
+        assert!(tree.invalidate_window_caches(native_a, UpdateResult::RENDER, &mut ctx));
+    }
+    tree.render_window(native_a, &mut ctx).unwrap();
+    tree.render_window(native_a, &mut ctx).unwrap();
+    assert_eq!(a.lock().unwrap().render_calls, 4);
+    tree.clear(&mut ctx);
+    assert_eq!(
+        tree.window_event(native_a, &WindowEvent::CloseRequested, &mut ctx),
+        None
+    );
+    assert!(!tree.invalidate_window_caches(native_a, UpdateResult::LAYOUT, &mut ctx));
+    assert!(!tree.layout_window(native_a, &mut ctx));
+    assert!(tree.render_window(native_a, &mut ctx).unwrap().is_none());
+}
+
+#[test]
+fn environment_changes_reach_descendants_behind_unchanged_bounds() {
+    use matcha_window::event::window_event::WindowEvent;
+    let observed = Arc::new(Mutex::new(Observations::default()));
+    let view = Window::new(ContainerView {
+        child: ContainerView {
+            child: ProbeView(observed.clone()),
+            child_position: position(Matrix4::identity()),
+        },
+        child_position: position(Matrix4::identity()),
+    })
+    .with_config(config("outer", Some(Apply::Init([100, 80].into()))));
+    let mut registry = WindowRegistry::default();
+    let mut ctx = Context::new(&mut registry);
+    let mut tree = UiTree::new();
+    tree.update(&view, &mut ctx);
+    create(ctx.window_registry(), &HeadlessEventLoop::new());
+    let root = tree.root.unwrap();
+    let native = native_id(&tree, root, &mut ctx);
+    assert_eq!(measure_content(&mut tree, root, &mut ctx).x, 10.0);
+    tree.layout_window(native, &mut ctx);
+    tree.render_window(native, &mut ctx).unwrap();
+
     tree.window_event(
-        native_a,
-        &WindowEvent::Theme(matcha_window::window::Theme::Dark),
+        native,
+        &WindowEvent::ScaleFactorChanged { scale_factor: 2.0 },
         &mut ctx,
     );
-    tree.render_window(native_a, &mut ctx).unwrap();
-    assert_eq!(
-        tree.node_ref(child_a).unwrap().cache.layout().stamp(),
-        layout_stamp
-    );
-    assert_eq!(a.lock().unwrap().render_calls, 3);
-    // A resize propagates new metrics even if the synthetic backend has not been resized.
+    assert_eq!(measure_content(&mut tree, root, &mut ctx).x, 20.0);
+    assert!(matches!(
+        tree.render_window(native, &mut ctx),
+        Err(UiError::LayoutRequired)
+    ));
+    tree.layout_window(native, &mut ctx);
+    tree.render_window(native, &mut ctx).unwrap();
     tree.window_event(
-        native_a,
+        native,
         &WindowEvent::Resized {
             inner_size: [320.0, 240.0],
             outer_size: [320.0, 240.0],
         },
         &mut ctx,
     );
-    tree.layout_window(native_a, &mut ctx);
-    assert_eq!(a.lock().unwrap().layout_bounds.last().unwrap().x, 320.0);
-    assert_eq!(a.lock().unwrap().scopes.last().unwrap().3, [320.0, 240.0]);
-    tree.render_window(native_a, &mut ctx).unwrap();
-    let before = tree.node_ref(child_a).unwrap().cache.draw().stamp();
-    let renders = a.lock().unwrap().render_calls;
-    assert!(tree.invalidate_window_caches(native_a, UpdateResult::empty(), &mut ctx));
-    tree.render_window(native_a, &mut ctx).unwrap();
-    assert_eq!(tree.node_ref(child_a).unwrap().cache.draw().stamp(), before);
-    for _ in 0..2 {
-        assert!(tree.invalidate_window_caches(native_a, UpdateResult::RENDER, &mut ctx));
+    assert_eq!(measure_content(&mut tree, root, &mut ctx).x, 20.0);
+    tree.layout_window(native, &mut ctx);
+    tree.render_window(native, &mut ctx).unwrap();
+    let observations = observed.lock().unwrap();
+    assert_eq!(observations.measure_calls, 3);
+    assert_eq!(observations.layout_calls, 3);
+    assert_eq!(observations.render_calls, 3);
+    assert!(observations.layout_bounds.iter().all(|b| *b == bounds()));
+    for stage in ["measure", "layout", "render"] {
+        let scope = observations
+            .scopes
+            .iter()
+            .rev()
+            .find(|scope| scope.0 == stage)
+            .unwrap();
+        assert_eq!((scope.1, scope.2), (2.0, [320.0, 240.0]));
     }
-    tree.render_window(native_a, &mut ctx).unwrap();
-    tree.render_window(native_a, &mut ctx).unwrap();
-    assert_eq!(a.lock().unwrap().render_calls, renders + 1);
-    tree.clear(&mut ctx);
-    assert_eq!(
-        tree.window_event(native_a, &WindowEvent::CloseRequested, &mut ctx),
-        None
-    );
-    assert!(!tree.layout_window(native_a, &mut ctx));
-    assert!(tree.render_window(native_a, &mut ctx).unwrap().is_none());
 }
 
 #[test]
-fn window_replacement_changes_domain_and_dispatch_type_at_the_same_ui_id() {
+fn outer_window_invalidation_preserves_nested_window_caches() {
     use matcha_window::event::window_event::WindowEvent;
     let observed = Arc::new(Mutex::new(Observations::default()));
-    let mut tree = UiTree::new();
     let mut registry = WindowRegistry::default();
     let mut ctx = Context::new(&mut registry);
-    tree.update(&Window::new(ProbeView(observed.clone())), &mut ctx);
-    create(ctx.window_registry(), &HeadlessEventLoop::new());
-    let root = tree.root.unwrap();
-    let old_binding = tree.node_ref(root).unwrap().window.unwrap();
-    let old_native = ctx
-        .window_registry()
-        .get_mut(old_binding.id())
-        .unwrap()
-        .window_id()
-        .unwrap();
-    tree.layout_window(old_native, &mut ctx);
-    let old_epoch = tree
-        .node_ref(root)
-        .unwrap()
-        .scoped_context(&mut ctx)
-        .cache_epoch();
+    let mut tree = UiTree::new();
     tree.update(
         &Window::new(ContainerView {
-            child: ProbeView(observed.clone()),
+            child: Window::new(ProbeView(observed.clone())),
             child_position: position(Matrix4::identity()),
         }),
         &mut ctx,
     );
     create(ctx.window_registry(), &HeadlessEventLoop::new());
+    let outer = tree.root.unwrap();
+    let content = tree.node_ref(outer).unwrap().children[0].1;
+    let inner = tree.node_ref(content).unwrap().children[0].1;
+    let leaf = tree.node_ref(inner).unwrap().children[0].1;
+    let native_outer = native_id(&tree, outer, &mut ctx);
+    let native_inner = native_id(&tree, inner, &mut ctx);
+    for native in [native_outer, native_inner] {
+        tree.layout_window(native, &mut ctx);
+        tree.render_window(native, &mut ctx).unwrap();
+    }
+    tree.window_event(
+        native_outer,
+        &WindowEvent::ScaleFactorChanged { scale_factor: 2.0 },
+        &mut ctx,
+    );
+    tree.invalidate_window_caches(
+        native_outer,
+        UpdateResult::LAYOUT | UpdateResult::RENDER,
+        &mut ctx,
+    );
+    assert!(tree.node_ref(content).unwrap().cache.layout().is_none());
+    assert!(tree.node_ref(inner).unwrap().cache.layout().is_some());
+    assert!(tree.node_ref(leaf).unwrap().cache.layout().is_some());
+    assert!(tree.node_ref(leaf).unwrap().cache.drawn());
+    tree.layout_window(native_inner, &mut ctx);
+    tree.render_window(native_inner, &mut ctx).unwrap();
+    assert_eq!(observed.lock().unwrap().layout_calls, 1);
+    assert_eq!(observed.lock().unwrap().render_calls, 1);
+
+    // Removing the outer window retains the inner native window and its environment.
+    tree.update(
+        &ContainerView {
+            child: ContainerView {
+                child: Window::new(ProbeView(observed.clone())),
+                child_position: position(Matrix4::identity()),
+            },
+            child_position: position(Matrix4::identity()),
+        },
+        &mut ctx,
+    );
+    assert_eq!(native_id(&tree, inner, &mut ctx), native_inner);
+    tree.layout_window(native_inner, &mut ctx);
+    tree.render_window(native_inner, &mut ctx).unwrap();
+    assert_eq!(observed.lock().unwrap().layout_calls, 1);
+    assert_eq!(observed.lock().unwrap().render_calls, 1);
+}
+
+#[test]
+fn entering_and_leaving_a_window_invalidates_reused_descendants() {
+    use matcha_window::event::window_event::WindowEvent;
+    let observed = Arc::new(Mutex::new(Observations::default()));
+    let content = || ContainerView {
+        child: ProbeView(observed.clone()),
+        child_position: position(Matrix4::identity()),
+    };
+    let mut registry = WindowRegistry::default();
+    let mut ctx = Context::new(&mut registry);
+    let mut tree = UiTree::new();
+    tree.update(&Window::new(content()), &mut ctx);
+    create(ctx.window_registry(), &HeadlessEventLoop::new());
+    let root = tree.root.unwrap();
+    let child = tree.node_ref(root).unwrap().children[0];
+    let leaf = tree.node_ref(child.1).unwrap().children[0].1;
+    let old_native = native_id(&tree, root, &mut ctx);
+    tree.window_event(
+        old_native,
+        &WindowEvent::ScaleFactorChanged { scale_factor: 2.0 },
+        &mut ctx,
+    );
+    assert_eq!(measure_content(&mut tree, root, &mut ctx).x, 20.0);
+    tree.layout_window(old_native, &mut ctx);
+    tree.render_window(old_native, &mut ctx).unwrap();
+
+    tree.update(
+        &ContainerView {
+            child: content(),
+            child_position: position(Matrix4::identity()),
+        },
+        &mut ctx,
+    );
     assert_eq!(tree.root.unwrap(), root);
-    let new_binding = tree.node_ref(root).unwrap().window.unwrap();
-    let new_native = ctx
-        .window_registry()
-        .get_mut(new_binding.id())
-        .unwrap()
-        .window_id()
-        .unwrap();
-    let new_epoch = tree
-        .node_ref(root)
-        .unwrap()
-        .scoped_context(&mut ctx)
-        .cache_epoch();
-    assert_ne!(old_epoch, new_epoch);
+    assert_eq!(tree.node_ref(root).unwrap().children[0], child);
+    for id in [child.1, leaf] {
+        let cache = &tree.node_ref(id).unwrap().cache;
+        assert!(cache.measure().is_none());
+        assert!(cache.layout().is_none());
+        assert!(!cache.drawn());
+    }
     assert_eq!(
-        tree.window_event(
-            old_native,
-            &WindowEvent::ScaleFactorChanged { scale_factor: 3.0 },
-            &mut ctx
-        ),
+        tree.window_event(old_native, &WindowEvent::CloseRequested, &mut ctx),
         None
     );
-    assert!(
-        tree.window_event(
-            new_native,
-            &WindowEvent::ScaleFactorChanged { scale_factor: 2.0 },
-            &mut ctx
-        )
-        .is_some()
+    assert_eq!(
+        Children {
+            tree: &mut tree,
+            current: root
+        }
+        .measure(child.0, Constraints::default(), &mut ctx)
+        .unwrap()
+        .x,
+        10.0
     );
+    tree.layout(bounds(), &mut ctx);
+    tree.render(&mut ctx).unwrap();
+    assert_eq!(observed.lock().unwrap().layout_calls, 2);
+    assert_eq!(observed.lock().unwrap().render_calls, 2);
+
+    tree.update(&Window::new(content()), &mut ctx);
+    assert_eq!(tree.node_ref(root).unwrap().children[0], child);
+    assert!(tree.node_ref(leaf).unwrap().cache.layout().is_none());
+    assert!(tree.node_ref(leaf).unwrap().cache.measure().is_none());
+    assert!(!tree.node_ref(leaf).unwrap().cache.drawn());
+    create(ctx.window_registry(), &HeadlessEventLoop::new());
+    let new_native = native_id(&tree, root, &mut ctx);
+    assert_ne!(old_native, new_native);
     tree.layout_window(new_native, &mut ctx);
     tree.render_window(new_native, &mut ctx).unwrap();
-    assert_eq!(observed.lock().unwrap().scopes.last().unwrap().2, 2.0);
+    assert_eq!(observed.lock().unwrap().layout_calls, 3);
+    assert_eq!(observed.lock().unwrap().render_calls, 3);
 }
