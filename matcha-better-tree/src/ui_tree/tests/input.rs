@@ -149,7 +149,7 @@ fn ready(view: &InputView) -> UiTree {
     );
     let node = tree.node_ref_mut(root).unwrap();
     node.widget = Some(widget);
-    node.cache.cache_measure(Constraints::default(), measured);
+    node.measure_cache.store(Constraints::default(), measured);
     tree.layout(
         bounds(),
         &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
@@ -170,12 +170,12 @@ fn assert_invalidated(tree: &UiTree, changed_keys: &[u64]) {
             panic!("test widgets are keyed")
         };
         assert_eq!(
-            node.cache.measure().is_none(),
+            node.measure_cache.value().is_none(),
             changed_keys.contains(&key),
             "measure: {key}"
         );
         assert_eq!(
-            node.cache.layout().is_none(),
+            node.layout_cache.value().is_none(),
             changed_keys.contains(&key),
             "layout: {key}"
         );
@@ -484,13 +484,20 @@ fn preview_and_bubble_union_flags_without_cross_invalidating_drawing() {
         }
     );
     assert_invalidated(&tree, &[1, 2, 3]);
-    assert!(!tree.node_ref(find(&tree, 1)).unwrap().cache.drawn());
+    assert!(
+        !tree
+            .node_ref(find(&tree, 1))
+            .unwrap()
+            .render_cache
+            .get(&())
+            .is_some()
+    );
     for key in [2, 3, 4] {
         assert!(
             tree.node_ref(find(&tree, key))
                 .unwrap()
-                .cache
-                .draw()
+                .render_cache
+                .get(&())
                 .is_some()
         );
     }

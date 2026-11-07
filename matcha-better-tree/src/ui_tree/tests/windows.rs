@@ -415,7 +415,13 @@ fn parent_passes_do_not_visit_window_content_even_with_existing_placement() {
     tree.render(&mut Context::new(&mut registry)).unwrap();
     let _ = tree.input(&mouse_event(5.0, 5.0), &mut Context::new(&mut registry));
     assert!(observed.lock().unwrap().events.is_empty());
-    assert!(tree.node_ref(child.1).unwrap().cache.draw().is_none());
+    assert!(
+        tree.node_ref(child.1)
+            .unwrap()
+            .render_cache
+            .get(&())
+            .is_none()
+    );
 }
 
 fn update<V: View>(tree: &mut UiTree, registry: &mut WindowRegistry, view: &V) {
@@ -482,10 +488,35 @@ fn native_events_refresh_only_the_target_window_and_selected_caches() {
         ),
         Some(UpdateResult::LAYOUT | UpdateResult::RENDER)
     );
-    assert!(tree.node_ref(child_a).unwrap().cache.layout().is_none());
-    assert!(!tree.node_ref(child_a).unwrap().cache.drawn());
-    assert!(tree.node_ref(child_b).unwrap().cache.layout().is_some());
-    assert!(tree.node_ref(child_b).unwrap().cache.drawn());
+    assert!(
+        tree.node_ref(child_a)
+            .unwrap()
+            .layout_cache
+            .value()
+            .is_none()
+    );
+    assert!(
+        !tree
+            .node_ref(child_a)
+            .unwrap()
+            .render_cache
+            .get(&())
+            .is_some()
+    );
+    assert!(
+        tree.node_ref(child_b)
+            .unwrap()
+            .layout_cache
+            .value()
+            .is_some()
+    );
+    assert!(
+        tree.node_ref(child_b)
+            .unwrap()
+            .render_cache
+            .get(&())
+            .is_some()
+    );
     tree.update(&view, &mut ctx);
     assert!(matches!(
         tree.render_window(native_a, &mut ctx),
@@ -528,8 +559,21 @@ fn native_events_refresh_only_the_target_window_and_selected_caches() {
     assert!(b.lock().unwrap().events.is_empty());
 
     tree.window_event(native_a, &WindowEvent::Theme(Theme::Dark), &mut ctx);
-    assert!(tree.node_ref(child_a).unwrap().cache.layout().is_some());
-    assert!(!tree.node_ref(child_a).unwrap().cache.drawn());
+    assert!(
+        tree.node_ref(child_a)
+            .unwrap()
+            .layout_cache
+            .value()
+            .is_some()
+    );
+    assert!(
+        !tree
+            .node_ref(child_a)
+            .unwrap()
+            .render_cache
+            .get(&())
+            .is_some()
+    );
     tree.render_window(native_a, &mut ctx).unwrap();
     assert_eq!(a.lock().unwrap().layout_calls, 2);
     assert_eq!(a.lock().unwrap().render_calls, 3);
@@ -649,10 +693,16 @@ fn outer_window_invalidation_preserves_nested_window_caches() {
         UpdateResult::LAYOUT | UpdateResult::RENDER,
         &mut ctx,
     );
-    assert!(tree.node_ref(content).unwrap().cache.layout().is_none());
-    assert!(tree.node_ref(inner).unwrap().cache.layout().is_some());
-    assert!(tree.node_ref(leaf).unwrap().cache.layout().is_some());
-    assert!(tree.node_ref(leaf).unwrap().cache.drawn());
+    assert!(
+        tree.node_ref(content)
+            .unwrap()
+            .layout_cache
+            .value()
+            .is_none()
+    );
+    assert!(tree.node_ref(inner).unwrap().layout_cache.value().is_some());
+    assert!(tree.node_ref(leaf).unwrap().layout_cache.value().is_some());
+    assert!(tree.node_ref(leaf).unwrap().render_cache.get(&()).is_some());
     tree.layout_window(native_inner, &mut ctx);
     tree.render_window(native_inner, &mut ctx).unwrap();
     assert_eq!(observed.lock().unwrap().layout_calls, 1);
@@ -712,10 +762,10 @@ fn entering_and_leaving_a_window_invalidates_reused_descendants() {
     assert_eq!(tree.root.unwrap(), root);
     assert_eq!(tree.node_ref(root).unwrap().children[0], child);
     for id in [child.1, leaf] {
-        let cache = &tree.node_ref(id).unwrap().cache;
-        assert!(cache.measure().is_none());
-        assert!(cache.layout().is_none());
-        assert!(!cache.drawn());
+        let node = tree.node_ref(id).unwrap();
+        assert!(node.measure_cache.value().is_none());
+        assert!(node.layout_cache.value().is_none());
+        assert!(!node.render_cache.get(&()).is_some());
     }
     assert_eq!(
         tree.window_event(old_native, &WindowEvent::CloseRequested, &mut ctx),
@@ -738,9 +788,9 @@ fn entering_and_leaving_a_window_invalidates_reused_descendants() {
 
     tree.update(&Window::new(content()), &mut ctx);
     assert_eq!(tree.node_ref(root).unwrap().children[0], child);
-    assert!(tree.node_ref(leaf).unwrap().cache.layout().is_none());
-    assert!(tree.node_ref(leaf).unwrap().cache.measure().is_none());
-    assert!(!tree.node_ref(leaf).unwrap().cache.drawn());
+    assert!(tree.node_ref(leaf).unwrap().layout_cache.value().is_none());
+    assert!(tree.node_ref(leaf).unwrap().measure_cache.value().is_none());
+    assert!(!tree.node_ref(leaf).unwrap().render_cache.get(&()).is_some());
     create(ctx.window_registry(), &HeadlessEventLoop::new());
     let new_native = native_id(&tree, root, &mut ctx);
     assert_ne!(old_native, new_native);

@@ -43,7 +43,7 @@ pub(crate) fn scoped_context<'a>(
 ) -> Context<'a> {
     match binding {
         Some(binding) => binding.content_context(widget, parent).1,
-        None => parent.reborrow(),
+        None => parent.unobserved(),
     }
 }
 

@@ -6,6 +6,7 @@ use std::time::Instant;
 use matcha_window::clipboard::Clipboard;
 use matcha_window::window::{CursorIcon, Window};
 
+use super::env_reads::EnvReads;
 use crate::ui_tree::window::{WindowInstanceId, WindowRegistry};
 
 #[derive(Default)]
@@ -77,6 +78,7 @@ impl ServicesStorage<'_> {
     }
 }
 
+/// Environment getters take exclusive access to record the current callback's reads.
 pub struct Context<'a> {
     windows: &'a mut WindowRegistry,
     viewport_size: [f32; 2],
@@ -84,6 +86,7 @@ pub struct Context<'a> {
     frame_time: Instant,
     window: Option<WindowInstanceId>,
     services: ServicesStorage<'a>,
+    env_reads: Option<&'a mut EnvReads>,
 }
 
 impl<'a> Context<'a> {
@@ -95,6 +98,7 @@ impl<'a> Context<'a> {
             frame_time: Instant::now(),
             window: None,
             services: ServicesStorage::Owned(Services::default()),
+            env_reads: None,
         }
     }
 
@@ -104,11 +108,12 @@ impl<'a> Context<'a> {
     }
 
     /// Reborrow services for one node. Metrics are scoped; platform and resource changes persist.
+    /// Environment reads remain attributed to the current callback across reborrows.
     /// The scoped context cannot escape the parent borrow, even if the registry lives longer.
     /// ```compile_fail
     /// use matcha_better_tree::ui_tree::{context::Context, window::WindowRegistry};
     /// let mut registry = WindowRegistry::default();
-    /// let escaped;
+    /// let mut escaped;
     /// {
     ///     let mut parent = Context::new(&mut registry);
     ///     escaped = parent.reborrow();
@@ -123,6 +128,37 @@ impl<'a> Context<'a> {
             frame_time: self.frame_time,
             window: self.window,
             services: ServicesStorage::Borrowed(self.services.get_mut()),
+            env_reads: self.env_reads.as_deref_mut(),
+        }
+    }
+
+    /// Run one callback with a fresh recorder and return its result and direct reads together.
+    /// Nested observations are isolated; ordinary reborrows retain the current recorder.
+    /// The parent's recorder is never replaced, including when the callback unwinds.
+    #[must_use]
+    pub(super) fn observe_env_reads<R>(
+        &mut self,
+        callback: impl FnOnce(&mut Context<'_>) -> R,
+    ) -> (R, EnvReads) {
+        let mut reads = EnvReads::empty();
+        let result = {
+            let mut scoped = self.reborrow();
+            scoped.env_reads = Some(&mut reads);
+            callback(&mut scoped)
+        };
+        (result, reads)
+    }
+
+    /// Tree bookkeeping and unobserved callbacks must not add reads to their caller's record.
+    pub(super) fn unobserved(&mut self) -> Context<'_> {
+        let mut context = self.reborrow();
+        context.env_reads = None;
+        context
+    }
+
+    fn record_env_read(&mut self, read: EnvReads) {
+        if let Some(reads) = self.env_reads.as_deref_mut() {
+            *reads |= read;
         }
     }
 
@@ -171,19 +207,22 @@ impl<'a> Context<'a> {
 impl Context<'_> {
     // --- Window & Metrics ---
 
-    pub fn viewport_size(&self) -> [f32; 2] {
+    pub fn viewport_size(&mut self) -> [f32; 2] {
+        self.record_env_read(EnvReads::VIEWPORT_SIZE);
         self.viewport_size
     }
 
-    pub fn dpi(&self) -> f64 {
+    pub fn dpi(&mut self) -> f64 {
+        self.record_env_read(EnvReads::DPI);
         self.dpi
     }
 
-    pub fn scale_factor(&self) -> f32 {
-        self.dpi as f32
+    pub fn scale_factor(&mut self) -> f32 {
+        self.dpi() as f32
     }
 
-    pub fn frame_time(&self) -> Instant {
+    pub fn frame_time(&mut self) -> Instant {
+        self.record_env_read(EnvReads::FRAME_TIME);
         self.frame_time
     }
 

@@ -77,8 +77,7 @@ impl UiTree {
             if response.update.contains(UpdateResult::RENDER) {
                 self.node_ref_mut(*id)
                     .expect("input callbacks cannot remove nodes")
-                    .cache
-                    .invalidate(UpdateResult::RENDER);
+                    .invalidate_caches(UpdateResult::RENDER);
             }
             if response.update.contains(UpdateResult::LAYOUT) {
                 deepest_changed = Some(deepest_changed.map_or(index, |old| old.max(index)));
@@ -94,7 +93,7 @@ impl UiTree {
         if let Some(last) = deepest_changed {
             for (id, _, _) in &path[..=last] {
                 let node = self.node_ref_mut(*id).expect("hit path remains live");
-                node.cache.invalidate(UpdateResult::LAYOUT);
+                node.invalidate_caches(UpdateResult::LAYOUT);
             }
         }
         result

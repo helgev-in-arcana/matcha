@@ -1,4 +1,4 @@
-//! Submitted IDs belong to the cached Draw, not the Widget's source templates.
+//! Prepare submitted IDs for the cached Draw, independently of generic cache storage.
 //! Future caller-managed resources can bypass remapping here while using the same Scene writer.
 use std::collections::HashMap;
 

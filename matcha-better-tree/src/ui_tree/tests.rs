@@ -10,6 +10,7 @@ use super::*;
 use crate::metrics::Position;
 
 mod cache;
+mod env_reads;
 mod input;
 mod updates;
 mod windows;
@@ -24,7 +25,7 @@ struct Observations {
     scopes: Vec<(&'static str, f64, [f32; 2])>,
 }
 
-fn record_scope(observations: &Arc<Mutex<Observations>>, stage: &'static str, ctx: &Context) {
+fn record_scope(observations: &Arc<Mutex<Observations>>, stage: &'static str, ctx: &mut Context) {
     observations
         .lock()
         .unwrap()
@@ -396,8 +397,7 @@ fn invalidating_layout_preserves_placement_and_recomputes_same_bounds() {
     let child_ui_id = tree.node_ref(root).unwrap().child(child).unwrap();
     tree.node_ref_mut(child_ui_id)
         .unwrap()
-        .cache
-        .invalidate(UpdateResult::LAYOUT);
+        .invalidate_caches(UpdateResult::LAYOUT);
 
     let mut children = Children {
         tree: &mut tree,

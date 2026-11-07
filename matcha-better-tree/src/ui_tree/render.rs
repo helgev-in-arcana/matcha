@@ -3,6 +3,8 @@ use render_interface::{Object, Phase, PixelMask, PixelMaskIndex, Scene};
 
 use super::*;
 
+mod resources;
+
 impl UiTree {
     /// Build a complete Scene for PlainRenderer (or another render-interface implementation).
     /// Call layout after geometry updates. This method does not schedule layout or GPU work.
@@ -33,7 +35,7 @@ impl UiTree {
         }
         if node
             .placement
-            .is_none_or(|p| !node.cache.laid_out(p.bounds))
+            .is_none_or(|p| node.layout_cache.get(&p.bounds).is_none())
         {
             return Err(UiError::LayoutRequired);
         }
@@ -63,9 +65,13 @@ impl UiTree {
         let backdrop = inherited_backdrop || widget.uses_backdrop();
         let world = parent_transform * placement.affine;
         let child_count = node.children.len();
-        let draw = node
-            .cache
-            .drawing(backdrop, || widget.render(placement.bounds, ctx))?;
+        let env_reads = &mut node.env_reads;
+        let draw = node.render_cache.get_or_try_insert_with((), backdrop, || {
+            let (draw, reads) = ctx.observe_env_reads(|ctx| widget.render(placement.bounds, ctx));
+            // Retain direct reads even if resource preparation rejects the Draw.
+            env_reads.record(ReadPhase::Render, reads);
+            resources::manage(draw)
+        })?;
 
         // All generators for this widget see the snapshot before its own colors. Later
         // dependent children get a new phase after those colors. Empty phases are reused.

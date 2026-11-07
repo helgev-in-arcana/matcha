@@ -15,15 +15,15 @@ impl DeclContext<'_, '_> {
     /// Register identity and concrete dispatch together; callers cannot install mismatched hooks.
     pub(crate) fn register_window<V: View>(&mut self, config: WindowConfig) -> WindowInstanceId {
         assert!(
-            self.window.is_none(),
+            self.declaration.window.is_none(),
             "one native window registration per declaration node"
         );
         let id = self
             .context
             .window_registry()
-            .register(self.current, config);
+            .register(self.declaration.current, config);
         let binding = WindowBinding::new::<V>(id);
-        self.window = Some(binding);
+        self.declaration.window = Some(binding);
         id
     }
 }

@@ -167,7 +167,7 @@ impl WindowInstance {
                 .map_or([0.0; 2], |w| w.inner_size().map(|n| n as f32))
         });
         parent
-            .reborrow()
+            .unobserved()
             .with_dpi(dpi)
             .with_viewport_size(viewport)
             .with_window(id)

@@ -137,8 +137,8 @@ fn warm(tree: &mut UiTree, root: UiId, child: ChildId) -> Bounds {
 
 fn assert_cached(tree: &UiTree, id: UiId, expected: bool) {
     let node = tree.node_ref(id).unwrap();
-    assert_eq!(node.cache.measure().is_some(), expected);
-    assert_eq!(node.cache.layout().is_some(), expected);
+    assert_eq!(node.measure_cache.value().is_some(), expected);
+    assert_eq!(node.layout_cache.value().is_some(), expected);
 }
 
 #[test]
@@ -176,12 +176,12 @@ fn leaf_change_invalidates_all_ancestors_but_preserves_sibling_and_placement() {
     // Root operations are not exposed yet; seed its caches to check propagation to the root.
     tree.node_ref_mut(root)
         .unwrap()
-        .cache
-        .cache_measure(Constraints::default(), bounds());
+        .measure_cache
+        .store(Constraints::default(), bounds());
     tree.node_ref_mut(root)
         .unwrap()
-        .cache
-        .cache_layout(bounds());
+        .layout_cache
+        .store(bounds(), ());
     view.children[0].children[0].width = 20.0;
     refresh(&mut tree, &view);
     for id in [root, top, branch, leaf] {
@@ -345,8 +345,7 @@ fn same_key_type_rebuild_is_reported_even_when_child_ids_do_not_change() {
     let old_children = std::mem::take(&mut tree.node_ref_mut(root).unwrap().children);
     let mut registry = crate::ui_tree::window::WindowRegistry::default();
     let mut context = Context::new(&mut registry);
-    let mut ctx = DeclContext {
-        context: &mut context,
+    let mut declaration = Declaration {
         current: root,
         window: None,
         old_children: old_children
@@ -360,9 +359,15 @@ fn same_key_type_rebuild_is_reported_even_when_child_ids_do_not_change() {
         key: 1,
         width: 20.0,
     };
-    assert_eq!(ctx.child(&replacement), child);
-    assert!(!ctx.structure_changed);
-    let (new_children, changed) = ctx.finish(&mut tree, &());
+    {
+        let mut ctx = DeclContext {
+            declaration: &mut declaration,
+            context: context.reborrow(),
+        };
+        assert_eq!(ctx.child(&replacement), child);
+    }
+    assert!(!declaration.structure_changed);
+    let (new_children, changed) = declaration.finish(&mut tree, &(), &mut context);
     assert!(changed);
     assert_eq!(new_children, old_children);
     assert_cached(&tree, new_children[0].1, false);

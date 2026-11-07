@@ -28,12 +28,12 @@ impl UiTree {
             .placement
             .is_none_or(|old| old.bounds != position.bounds)
         {
-            node.cache.invalidate(UpdateResult::RENDER);
+            node.render_cache.invalidate();
         }
         node.placement = Some(Placement::new(position, node.placement));
 
         // Movement changes placement but does not invalidate the children's local layout.
-        if node.cache.laid_out(position.bounds) {
+        if node.layout_cache.get(&position.bounds).is_some() {
             return;
         }
 
@@ -41,19 +41,22 @@ impl UiTree {
             .widget
             .take()
             .expect("writing back the widget into ui_node has been forgotten somewhere");
-        widget.layout(
-            position.bounds,
-            Children {
-                tree: self,
-                current: id,
-            },
-            ctx,
-        );
+        let ((), reads) = ctx.observe_env_reads(|ctx| {
+            widget.layout(
+                position.bounds,
+                Children {
+                    tree: self,
+                    current: id,
+                },
+                ctx,
+            )
+        });
         let node = self
             .node_ref_mut(id)
             .expect("tree cannot be changed during layout");
         node.widget = Some(widget);
-        node.cache.cache_layout(position.bounds);
+        node.env_reads.record(ReadPhase::Layout, reads);
+        node.layout_cache.store(position.bounds, ());
     }
 }
 
@@ -68,24 +71,25 @@ impl Children<'_> {
         let mut scoped = node.scoped_context(ctx);
         let ctx = &mut scoped;
 
-        if let Some(cached_bounds) = node.cache.measured(constraints) {
+        if let Some(&cached_bounds) = node.measure_cache.get(&constraints) {
             return Some(cached_bounds);
         }
 
         let widget = std::mem::take(&mut node.widget)
             .expect("writing back the widget into ui_node has been forgotten somewhere");
-        let bounds = {
+        let (bounds, reads) = ctx.observe_env_reads(|ctx| {
             let children = Children {
                 tree: self.tree,
                 current: ui_id,
             };
             widget.measure(constraints, children, ctx)
-        };
+        });
         let (node, _) = self
             .get(id)
             .expect("tree cannot be changed during this method");
         node.widget = Some(widget);
-        node.cache.cache_measure(constraints, bounds);
+        node.env_reads.record(ReadPhase::Measure, reads);
+        node.measure_cache.store(constraints, bounds);
 
         Some(bounds)
     }

@@ -23,7 +23,7 @@ fn layout_invalidation_recomputes_measurement_and_layout_but_keeps_drawing() {
 
     tree.clear_caches(UpdateResult::LAYOUT);
     let mut context = context.reborrow().with_dpi(2.0);
-    assert!(tree.node_ref(id).unwrap().cache.measure().is_none());
+    assert!(tree.node_ref(id).unwrap().measure_cache.value().is_none());
     assert!(matches!(
         tree.render(&mut context),
         Err(UiError::LayoutRequired)
@@ -59,9 +59,9 @@ fn clearing_selected_caches_preserves_other_results_and_placement() {
     assert!(
         tree.nodes
             .iter()
-            .all(|(_, node)| node.cache.draw().is_none())
+            .all(|(_, node)| node.render_cache.get(&()).is_none())
     );
-    assert!(tree.node_ref(id).unwrap().cache.measure().is_some());
+    assert!(tree.node_ref(id).unwrap().measure_cache.value().is_some());
     assert_eq!(
         tree.node_ref(id).unwrap().placement.unwrap().affine,
         placement.affine
@@ -72,12 +72,10 @@ fn clearing_selected_caches_preserves_other_results_and_placement() {
     assert_eq!(observations.lock().unwrap().render_calls, 2);
 
     tree.clear_caches(UpdateResult::LAYOUT);
-    assert!(
-        tree.nodes
-            .iter()
-            .all(|(_, node)| node.cache.measure().is_none() && node.cache.layout().is_none())
-    );
-    assert!(tree.node_ref(id).unwrap().cache.draw().is_some());
+    assert!(tree.nodes.iter().all(
+        |(_, node)| node.measure_cache.value().is_none() && node.layout_cache.value().is_none()
+    ));
+    assert!(tree.node_ref(id).unwrap().render_cache.get(&()).is_some());
     tree.clear_caches(UpdateResult::RENDER);
     tree.clear_caches(UpdateResult::empty());
     assert!(matches!(
@@ -87,58 +85,77 @@ fn clearing_selected_caches_preserves_other_results_and_placement() {
 }
 
 #[test]
-fn failed_drawing_generation_is_retried_and_refresh_preserves_the_previous_value() {
-    use crate::ui_tree::widget::Color;
-    use render_interface::{MeshDescriptor, MeshSource, TextureDescriptor, TextureSource};
+fn generic_cache_matches_keys_reuses_values_and_releases_replaced_entries() {
+    use std::rc::Rc;
 
-    let mesh = MeshSource::new(MeshDescriptor::triangles(3, 0), |_| Ok(()));
-    let texture = TextureSource::new(
-        TextureDescriptor::new([1, 1], wgpu::TextureFormat::Rgba8Unorm),
-        |_| Ok(()),
+    #[derive(PartialEq)]
+    struct Key(u8);
+    struct Value;
+    // Keys need neither Default nor Clone, and values need neither Default nor equality.
+    let first = Rc::new(Value);
+    let second = Rc::new(Value);
+    let mut cache = Cache::<Key, Rc<Value>>::default();
+    assert!(cache.get(&Key(1)).is_none());
+    cache.store(Key(1), Rc::clone(&first));
+    assert_eq!(Rc::strong_count(&first), 2);
+    assert!(cache.get(&Key(2)).is_none());
+    let reused = cache
+        .get_or_try_insert_with(Key(1), false, || Err::<Rc<Value>, _>("must reuse"))
+        .unwrap();
+    assert!(Rc::ptr_eq(reused, &first));
+
+    let replaced = cache
+        .get_or_try_insert_with(Key(2), false, || Ok::<_, ()>(Rc::clone(&second)))
+        .unwrap();
+    assert!(Rc::ptr_eq(replaced, &second));
+    assert!(cache.get(&Key(1)).is_none());
+    assert_eq!(Rc::strong_count(&first), 1);
+    assert_eq!(Rc::strong_count(&second), 2);
+    let refreshed = cache
+        .get_or_try_insert_with(Key(2), true, || Ok::<_, ()>(Rc::clone(&first)))
+        .unwrap();
+    assert!(Rc::ptr_eq(refreshed, &first));
+    assert_eq!(Rc::strong_count(&second), 1);
+    cache.invalidate();
+    cache.invalidate();
+    assert!(cache.get(&Key(2)).is_none());
+    assert_eq!(Rc::strong_count(&first), 1);
+}
+
+#[test]
+fn failed_generation_keeps_the_previous_key_and_value_and_can_be_retried() {
+    let mut cache = Cache::<u32, String>::default();
+    assert!(
+        cache
+            .get_or_try_insert_with(1, false, || Err::<String, _>("failed"))
+            .is_err()
     );
-    let valid = Draw {
-        color: vec![Color {
-            mesh: mesh.clone(),
-            texture,
-            transform: Matrix4::identity(),
-            opacity: 1.0,
-        }]
-        .into(),
-        mask: None,
-    };
-    let mut conflicting = valid.clone();
-    let mut second = conflicting.color[0].clone();
-    second.mesh = MeshSource::with_id(mesh.id(), MeshDescriptor::triangles(6, 0), |_| Ok(()));
-    conflicting.color.push(second);
-    let mut cache = NodeCache::default();
-    for _ in 0..2 {
-        assert!(matches!(
-            cache.drawing(false, || conflicting.clone()),
-            Err(UiError::Resource(_))
-        ));
-        assert!(!cache.drawn());
+    assert!(cache.value().is_none());
+    cache.store(1, String::from("old"));
+
+    // Both a changed key and a forced refresh must retain the original entry on failure.
+    for (key, refresh) in [(2, false), (1, true), (2, false)] {
+        assert!(
+            cache
+                .get_or_try_insert_with(key, refresh, || Err::<String, _>("failed"))
+                .is_err()
+        );
+        assert_eq!(cache.get(&1).map(String::as_str), Some("old"));
+        assert!(cache.get(&2).is_none());
     }
-    let previous_mesh = cache.drawing(false, || valid.clone()).unwrap().color[0]
-        .mesh
-        .id();
     assert_eq!(
-        cache.drawing(false, || panic!("must reuse")).unwrap().color[0]
-            .mesh
-            .id(),
-        previous_mesh
+        cache
+            .get_or_try_insert_with(2, false, || Ok::<_, ()>(String::from("new")))
+            .unwrap(),
+        "new"
     );
-    for _ in 0..2 {
-        assert!(matches!(
-            cache.drawing(true, || conflicting.clone()),
-            Err(UiError::Resource(_))
-        ));
-        assert_eq!(cache.draw().unwrap().color[0].mesh.id(), previous_mesh);
-    }
-    let replaced = cache.drawing(true, || valid.clone()).unwrap();
-    assert_ne!(replaced.color[0].mesh.id(), previous_mesh);
-    cache.invalidate(UpdateResult::RENDER);
-    assert!(!cache.drawn());
-    assert!(cache.drawing(false, || conflicting).is_err());
-    assert!(!cache.drawn());
-    assert!(cache.drawing(false, || valid).is_ok());
+    assert!(cache.get(&1).is_none());
+    assert_eq!(cache.get(&2).map(String::as_str), Some("new"));
+    cache.invalidate();
+    assert!(
+        cache
+            .get_or_try_insert_with(2, true, || Err::<String, _>("failed"))
+            .is_err()
+    );
+    assert!(cache.value().is_none());
 }
