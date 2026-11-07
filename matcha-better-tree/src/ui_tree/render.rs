@@ -39,8 +39,8 @@ impl UiTree {
         {
             return Err(UiError::LayoutRequired);
         }
-        for (_, child) in &node.children {
-            self.check_render_layout(*child, ctx)?;
+        for child in node.child_ids() {
+            self.check_render_layout(child, ctx)?;
         }
         Ok(())
     }
@@ -64,11 +64,11 @@ impl UiTree {
         let widget = node.widget.as_ref().expect("widget restored after layout");
         let backdrop = inherited_backdrop || widget.uses_backdrop();
         let world = parent_transform * placement.affine;
-        let child_count = node.children.len();
+        let child_count = node.child_ids().len();
         let env_reads = &mut node.env_reads;
         let draw = node.render_cache.get_or_try_insert_with((), backdrop, || {
             let (draw, reads) = ctx.observe_env_reads(|ctx| widget.render(placement.bounds, ctx));
-            // Retain direct reads even if resource preparation rejects the Draw.
+            // Record the callback even if resource preparation rejects its Draw afterwards.
             env_reads.record(ReadPhase::Render, reads);
             resources::manage(draw)
         })?;
@@ -118,7 +118,12 @@ impl UiTree {
         // Render callbacks cannot change topology. Copy one ID after each short borrow
         // instead of allocating a snapshot of the children for every rendered node.
         for index in 0..child_count {
-            let child = self.node_ref(id).expect("live render tree").children[index].1;
+            let child = self
+                .node_ref(id)
+                .expect("live render tree")
+                .child_ids()
+                .nth(index)
+                .expect("child exists throughout render");
             self.render_node(child, world, mask, backdrop, ctx, scene)?;
         }
         Ok(())

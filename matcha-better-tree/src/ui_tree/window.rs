@@ -15,7 +15,7 @@ use matcha_window::window::{Fullscreen, Position, Size, Theme, Window as OsWindo
 use crate::metrics::{Bounds, Constraints, Point};
 use crate::ui_tree::context::Context;
 use crate::ui_tree::widget::{Draw, InputResult, UpdateResult, View, Widget};
-use crate::ui_tree::{ChildId, Children, DeclContext};
+use crate::ui_tree::{Children, DeclContext};
 
 mod registry;
 mod tree;
@@ -31,7 +31,6 @@ pub(crate) struct WindowBinding {
 }
 
 struct WindowState {
-    content: ChildId,
     dpi: Option<f64>,
     viewport: Option<[f32; 2]>,
 }
@@ -42,7 +41,7 @@ pub(crate) fn scoped_context<'a>(
     parent: &'a mut Context<'_>,
 ) -> Context<'a> {
     match binding {
-        Some(binding) => binding.content_context(widget, parent).1,
+        Some(binding) => binding.scoped_context(widget, parent),
         None => parent.unobserved(),
     }
 }
@@ -56,7 +55,6 @@ impl WindowBinding {
                     .downcast_ref::<WindowWidget<V>>()
                     .expect("registered window widget type matches");
                 WindowState {
-                    content: widget.content,
                     dpi: widget.dpi,
                     viewport: widget.viewport,
                 }
@@ -74,14 +72,9 @@ impl WindowBinding {
         self.id
     }
 
-    pub(crate) fn content_context<'a>(
-        self,
-        widget: &dyn Any,
-        parent: &'a mut Context<'_>,
-    ) -> (ChildId, Context<'a>) {
+    fn scoped_context<'a>(self, widget: &dyn Any, parent: &'a mut Context<'_>) -> Context<'a> {
         let state = (self.state)(widget);
-        let context = WindowInstance::scoped_context(self.id, state.dpi, state.viewport, parent);
-        (state.content, context)
+        WindowInstance::scoped_context(self.id, state.dpi, state.viewport, parent)
     }
 
     pub(crate) fn dispatch(self, widget: &mut dyn Any, event: &WindowEvent) -> UpdateResult {
@@ -127,6 +120,8 @@ impl<V: View> Window<V> {
 }
 
 impl<V: View> View for Window<V> {
+    type ChildData = ();
+
     fn label(&self) -> Option<&str> {
         self.label.as_deref()
     }
@@ -136,12 +131,11 @@ impl<V: View> View for Window<V> {
     }
 
     fn build<'a>(&'a self, ctx: &mut DeclContext<'a, '_>) -> impl Widget<V = Self> {
-        let content = ctx.child(&self.view);
+        ctx.child(&self.view);
         let id = ctx.register_window::<V>(self.config.clone());
         WindowWidget {
             id,
             view_type: PhantomData,
-            content,
             dpi: None,
             viewport: None,
         }
@@ -152,7 +146,6 @@ impl<V: View> View for Window<V> {
 pub struct WindowWidget<V: View> {
     id: WindowInstanceId,
     view_type: PhantomData<V>,
-    content: ChildId,
     dpi: Option<f64>,
     viewport: Option<[f32; 2]>,
 }
@@ -189,12 +182,11 @@ impl<V: View> Widget for WindowWidget<V> {
     type V = Window<V>;
 
     fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a, '_>) -> UpdateResult {
-        let content = ctx.child(&view.view);
+        ctx.child(&view.view);
         let registry = ctx.context().window_registry();
         let instance = registry
             .get_mut(self.id)
             .expect("live Window widget is registered");
-        self.content = content;
         instance.update_config(view.config.clone());
         // Descendant drawing changes are not yet summarized by UiTree::update.
         // Schedule a window pass even when the window's own declaration is unchanged.

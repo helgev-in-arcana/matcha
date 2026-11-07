@@ -34,10 +34,10 @@ fn window_content_is_reconciled_in_the_same_arena() {
         &Window::new(probe()).with_label("main"),
     );
     let root = tree.root.unwrap();
-    let child = tree.node_ref(root).unwrap().children[0];
+    let child = child_at(&tree, root, 0);
     assert_eq!(tree.nodes.iter().count(), 2);
     assert_eq!(tree.node_ref(root).unwrap().label.as_deref(), Some("main"));
-    assert_eq!(tree.node_ref(child.1).unwrap().parent, Some(root));
+    assert_eq!(tree.node_ref(child).unwrap().parent, Some(root));
 
     let id = registry.ids()[0];
     assert_eq!(
@@ -56,10 +56,10 @@ fn window_content_is_reconciled_in_the_same_arena() {
         &mut registry,
         &Window::new(ProbeView(updated.clone())).with_label("renamed"),
     );
-    assert_eq!(tree.node_ref(root).unwrap().children[0], child);
+    assert_eq!(child_at(&tree, root, 0), child);
     assert_eq!(registry.id_for_window(native), Some(id));
     let _ = tree
-        .node_ref_mut(child.1)
+        .node_ref_mut(child)
         .unwrap()
         .widget
         .as_mut()
@@ -263,6 +263,7 @@ fn replacing_a_window_at_the_same_node_unregisters_only_the_old_id() {
 struct WindowList(Vec<Window<ProbeView>>);
 struct WindowListWidget;
 impl View for WindowList {
+    type ChildData = ();
     fn label(&self) -> Option<&str> {
         None
     }
@@ -331,8 +332,8 @@ fn keyed_windows_reorder_without_recreation_and_removal_invalidates_old_ids() {
     assert_eq!(registry.location(ids["2"].1), Some(second_location));
     assert_eq!(registry.id_for_window(ids["1"].1), Some(ids["1"].0));
     let root = tree.node_ref(tree.root.unwrap()).unwrap();
-    assert_eq!(root.children[0].1, second_location);
-    assert_eq!(root.children[1].1, first_location);
+    assert_eq!(root.child_ids().next().unwrap(), second_location);
+    assert_eq!(root.child_ids().nth(1).unwrap(), first_location);
     update(&mut tree, &mut registry, &view(&[2, 3]));
     create(&mut registry, &event_loop);
     assert_eq!(event_loop.created_window_ids().len(), 3);
@@ -351,7 +352,7 @@ fn nested_windows_share_resources_but_isolate_context_scopes() {
     let shared = context.insert_resource(String::from("application resource"));
     tree.update(&Window::new(Window::new(probe())), &mut context);
     let outer = tree.root.unwrap();
-    let inner = tree.node_ref(outer).unwrap().children[0].1;
+    let inner = child_at(&tree, outer, 0);
     {
         let mut a = tree.node_ref(outer).unwrap().scoped_context(&mut context);
         assert!(Arc::ptr_eq(&a.resource::<String>().unwrap(), &shared));
@@ -388,27 +389,19 @@ fn parent_passes_do_not_visit_window_content_even_with_existing_placement() {
         },
     );
     let root = tree.root.unwrap();
-    let window = tree.node_ref(root).unwrap().children[0];
-    let child = tree.node_ref(window.1).unwrap().children[0];
-    let measured = Children {
-        tree: &mut tree,
-        current: root,
-    }
-    .measure(
-        window.0,
+    let window = child_at(&tree, root, 0);
+    let child = child_at(&tree, window, 0);
+    let measured = tree.measure_node(
+        window,
         Constraints::default(),
         &mut Context::new(&mut registry),
     );
-    assert_eq!(measured, Some(Bounds::default()));
+    assert_eq!(measured, Bounds::default());
     tree.layout(bounds(), &mut Context::new(&mut registry));
     assert_eq!(observed.lock().unwrap().layout_calls, 0);
     tree.render(&mut Context::new(&mut registry)).unwrap();
-    Children {
-        tree: &mut tree,
-        current: window.1,
-    }
-    .layout(
-        child.0,
+    tree.layout_node(
+        child,
         position(Matrix4::identity()),
         &mut Context::new(&mut registry),
     );
@@ -416,7 +409,7 @@ fn parent_passes_do_not_visit_window_content_even_with_existing_placement() {
     let _ = tree.input(&mouse_event(5.0, 5.0), &mut Context::new(&mut registry));
     assert!(observed.lock().unwrap().events.is_empty());
     assert!(
-        tree.node_ref(child.1)
+        tree.node_ref(child)
             .unwrap()
             .render_cache
             .get(&())
@@ -443,14 +436,9 @@ fn native_id(tree: &UiTree, node: UiId, ctx: &mut Context) -> matcha_window::win
 
 fn measure_content(tree: &mut UiTree, window: UiId, ctx: &mut Context) -> Bounds {
     let node = tree.node_ref(window).unwrap();
-    let child = node.children[0].0;
+    let child = node.child_ids().next().unwrap();
     let mut scoped = node.scoped_context(ctx);
-    Children {
-        tree,
-        current: window,
-    }
-    .measure(child, Constraints::default(), &mut scoped)
-    .unwrap()
+    tree.measure_node(child, Constraints::default(), &mut scoped)
 }
 
 #[test]
@@ -471,15 +459,19 @@ fn native_events_refresh_only_the_target_window_and_selected_caches() {
     let mut tree = UiTree::new();
     tree.update(&view, &mut ctx);
     create(ctx.window_registry(), &HeadlessEventLoop::new());
-    let nodes = tree.node_ref(tree.root.unwrap()).unwrap().children.clone();
-    let native_a = native_id(&tree, nodes[0].1, &mut ctx);
-    let native_b = native_id(&tree, nodes[1].1, &mut ctx);
+    let nodes = tree
+        .node_ref(tree.root.unwrap())
+        .unwrap()
+        .child_ids()
+        .collect::<Vec<_>>();
+    let native_a = native_id(&tree, nodes[0], &mut ctx);
+    let native_b = native_id(&tree, nodes[1], &mut ctx);
     for native in [native_a, native_b] {
         assert!(tree.layout_window(native, &mut ctx));
         assert!(tree.render_window(native, &mut ctx).unwrap().is_some());
     }
-    let child_a = tree.node_ref(nodes[0].1).unwrap().children[0].1;
-    let child_b = tree.node_ref(nodes[1].1).unwrap().children[0].1;
+    let child_a = child_at(&tree, nodes[0], 0);
+    let child_b = child_at(&tree, nodes[1], 0);
     assert_eq!(
         tree.window_event(
             native_a,
@@ -674,9 +666,9 @@ fn outer_window_invalidation_preserves_nested_window_caches() {
     );
     create(ctx.window_registry(), &HeadlessEventLoop::new());
     let outer = tree.root.unwrap();
-    let content = tree.node_ref(outer).unwrap().children[0].1;
-    let inner = tree.node_ref(content).unwrap().children[0].1;
-    let leaf = tree.node_ref(inner).unwrap().children[0].1;
+    let content = child_at(&tree, outer, 0);
+    let inner = child_at(&tree, content, 0);
+    let leaf = child_at(&tree, inner, 0);
     let native_outer = native_id(&tree, outer, &mut ctx);
     let native_inner = native_id(&tree, inner, &mut ctx);
     for native in [native_outer, native_inner] {
@@ -740,8 +732,8 @@ fn entering_and_leaving_a_window_invalidates_reused_descendants() {
     tree.update(&Window::new(content()), &mut ctx);
     create(ctx.window_registry(), &HeadlessEventLoop::new());
     let root = tree.root.unwrap();
-    let child = tree.node_ref(root).unwrap().children[0];
-    let leaf = tree.node_ref(child.1).unwrap().children[0].1;
+    let child = child_at(&tree, root, 0);
+    let leaf = child_at(&tree, child, 0);
     let old_native = native_id(&tree, root, &mut ctx);
     tree.window_event(
         old_native,
@@ -760,25 +752,19 @@ fn entering_and_leaving_a_window_invalidates_reused_descendants() {
         &mut ctx,
     );
     assert_eq!(tree.root.unwrap(), root);
-    assert_eq!(tree.node_ref(root).unwrap().children[0], child);
-    for id in [child.1, leaf] {
+    assert_eq!(child_at(&tree, root, 0), child);
+    for id in [child, leaf] {
         let node = tree.node_ref(id).unwrap();
         assert!(node.measure_cache.value().is_none());
         assert!(node.layout_cache.value().is_none());
-        assert!(!node.render_cache.get(&()).is_some());
+        assert!(node.render_cache.get(&()).is_none());
     }
     assert_eq!(
         tree.window_event(old_native, &WindowEvent::CloseRequested, &mut ctx),
         None
     );
     assert_eq!(
-        Children {
-            tree: &mut tree,
-            current: root
-        }
-        .measure(child.0, Constraints::default(), &mut ctx)
-        .unwrap()
-        .x,
+        tree.measure_node(child, Constraints::default(), &mut ctx).x,
         10.0
     );
     tree.layout(bounds(), &mut ctx);
@@ -787,7 +773,7 @@ fn entering_and_leaving_a_window_invalidates_reused_descendants() {
     assert_eq!(observed.lock().unwrap().render_calls, 2);
 
     tree.update(&Window::new(content()), &mut ctx);
-    assert_eq!(tree.node_ref(root).unwrap().children[0], child);
+    assert_eq!(child_at(&tree, root, 0), child);
     assert!(tree.node_ref(leaf).unwrap().layout_cache.value().is_none());
     assert!(tree.node_ref(leaf).unwrap().measure_cache.value().is_none());
     assert!(!tree.node_ref(leaf).unwrap().render_cache.get(&()).is_some());

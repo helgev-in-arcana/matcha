@@ -1,10 +1,8 @@
 //! UI ownership, reconciliation, layout, and input. Storage lives in the generic arena module.
 use std::any::{Any, TypeId};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use matcha_window::event::device_event::DeviceEvent;
 use nalgebra::{Matrix4, Vector4};
-use smallvec::SmallVec;
 
 use self::context::Context;
 use self::widget::{Draw, InputPropagation, InputResult, UiError, UpdateResult, View, Widget};
@@ -21,9 +19,192 @@ pub mod widget;
 pub mod window;
 
 use cache::Cache;
-use env_reads::{NodeEnvReads, ReadPhase};
+use env_reads::{EnvReads, NodeEnvReads, ReadPhase};
 
-const CHILDREN_SMALLVEC: usize = 4;
+trait AnyView: Any {
+    fn label(&self) -> Option<&str>;
+    fn ui_key(&self) -> UiKey;
+    fn build_node(
+        &self,
+        tree: &mut UiTree,
+        parent: Option<UiId>,
+        id: UiId,
+        old_children: Vec<(UiKey, UiId)>,
+        context: &mut Context,
+    ) -> UiNode;
+}
+
+impl<V: View> AnyView for V {
+    fn label(&self) -> Option<&str> {
+        View::label(self)
+    }
+
+    fn ui_key(&self) -> UiKey {
+        match View::key(self) {
+            Some(key) => UiKey::Key(key),
+            None => UiKey::Type(TypeId::of::<V>()),
+        }
+    }
+
+    fn build_node(
+        &self,
+        tree: &mut UiTree,
+        parent: Option<UiId>,
+        id: UiId,
+        old_children: Vec<(UiKey, UiId)>,
+        context: &mut Context,
+    ) -> UiNode {
+        let label = View::label(self).map(str::to_owned);
+        let key = self.ui_key();
+        let mut declaration = Declaration::new(id, old_children, None);
+        let ((widget, window), reads) = context.observe_env_reads(|context| {
+            let widget = self.build(&mut declaration.context(context));
+            let window = declaration.window;
+            let mut children = Vec::with_capacity(declaration.queued.len());
+            declaration.finish(tree, &widget, context, &mut children);
+            let mounted: Box<dyn AnyWidget> = Box::new(Mounted { widget, children });
+            (mounted, window)
+        });
+        let mut env_reads = NodeEnvReads::default();
+        env_reads.record(ReadPhase::Build, reads);
+        UiNode {
+            label,
+            key,
+            parent,
+            placement: None,
+            measure_cache: Cache::default(),
+            layout_cache: Cache::default(),
+            render_cache: Cache::default(),
+            env_reads,
+            window,
+            widget: Some(widget),
+        }
+    }
+}
+
+/// The arena erases the widget and its typed child links together.
+struct Mounted<W: Widget> {
+    widget: W,
+    children: Vec<ChildLink<<W::V as View>::ChildData>>,
+}
+
+trait AnyWidget {
+    fn as_widget(&self) -> &dyn Any;
+    fn as_widget_mut(&mut self) -> &mut dyn Any;
+    fn child_count(&self) -> usize;
+    fn child_id(&self, index: usize) -> UiId;
+    fn try_update(
+        &mut self,
+        view: &dyn AnyView,
+        tree: &mut UiTree,
+        id: UiId,
+        window: Option<window::WindowBinding>,
+        context: &mut Context,
+    ) -> Option<(UpdateResult, EnvReads)>;
+    fn preview_input(
+        &mut self,
+        bounds: Bounds,
+        event: &DeviceEvent,
+        ctx: &mut Context,
+    ) -> InputResult;
+    fn input(&mut self, bounds: Bounds, event: &DeviceEvent, ctx: &mut Context) -> InputResult;
+    fn is_inside(&self, b: Bounds, p: Point, ctx: &mut Context) -> bool;
+    fn measure(&self, constraints: Constraints, tree: &mut UiTree, ctx: &mut Context) -> Bounds;
+    fn layout(&self, bounds: Bounds, tree: &mut UiTree, ctx: &mut Context);
+    fn uses_backdrop(&self) -> bool;
+    fn render(&self, bounds: Bounds, ctx: &mut Context) -> Draw;
+}
+
+impl dyn AnyWidget + '_ {
+    fn child_ids(&self) -> impl ExactSizeIterator<Item = UiId> + DoubleEndedIterator {
+        (0..self.child_count()).map(|index| self.child_id(index))
+    }
+}
+
+impl<W: Widget> AnyWidget for Mounted<W> {
+    fn as_widget(&self) -> &dyn Any {
+        &self.widget
+    }
+
+    fn as_widget_mut(&mut self) -> &mut dyn Any {
+        &mut self.widget
+    }
+
+    fn child_count(&self) -> usize {
+        self.children.len()
+    }
+
+    fn child_id(&self, index: usize) -> UiId {
+        self.children[index].node
+    }
+
+    fn try_update(
+        &mut self,
+        view: &dyn AnyView,
+        tree: &mut UiTree,
+        id: UiId,
+        window: Option<window::WindowBinding>,
+        context: &mut Context,
+    ) -> Option<(UpdateResult, EnvReads)> {
+        let view = (view as &dyn Any).downcast_ref::<W::V>()?;
+        let old_children = tree.child_candidates(self);
+        let mut declaration = Declaration::new(id, old_children, window);
+        let mut scoped = window::scoped_context(window, &self.widget, context);
+        let (mut result, reads) =
+            scoped.observe_env_reads(|ctx| self.widget.update(view, &mut declaration.context(ctx)));
+        if declaration.finish(tree, &self.widget, &mut scoped, &mut self.children) {
+            result |= UpdateResult::LAYOUT;
+        }
+        Some((result, reads))
+    }
+
+    fn preview_input(
+        &mut self,
+        bounds: Bounds,
+        event: &DeviceEvent,
+        ctx: &mut Context,
+    ) -> InputResult {
+        self.widget.preview_input(bounds, event, ctx)
+    }
+
+    fn input(&mut self, bounds: Bounds, event: &DeviceEvent, ctx: &mut Context) -> InputResult {
+        self.widget.input(bounds, event, ctx)
+    }
+
+    fn is_inside(&self, b: Bounds, p: Point, ctx: &mut Context) -> bool {
+        self.widget.is_inside(b, p, ctx)
+    }
+
+    fn measure(&self, constraints: Constraints, tree: &mut UiTree, ctx: &mut Context) -> Bounds {
+        self.widget.measure(
+            constraints,
+            Children {
+                links: &self.children,
+                tree,
+            },
+            ctx,
+        )
+    }
+
+    fn layout(&self, bounds: Bounds, tree: &mut UiTree, ctx: &mut Context) {
+        self.widget.layout(
+            bounds,
+            Children {
+                links: &self.children,
+                tree,
+            },
+            ctx,
+        )
+    }
+
+    fn render(&self, bounds: Bounds, ctx: &mut Context) -> Draw {
+        self.widget.render(bounds, ctx)
+    }
+
+    fn uses_backdrop(&self) -> bool {
+        self.widget.uses_backdrop()
+    }
+}
 
 /// Owns a UI tree. Declaration/children contexts expose operations without exposing its arena.
 /// Widget callbacks that panic can leave reconciliation incomplete. Discard the tree and its
@@ -33,101 +214,10 @@ pub struct UiTree {
     root: Option<UiId>,
 }
 
-trait AnyView: Any {
-    fn label(&self) -> Option<&str>;
-    fn ui_key(&self) -> UiKey;
-    fn build<'a>(&'a self, ctx: &mut DeclContext<'a, '_>) -> Box<dyn AnyWidget>;
-}
-
-impl<V: View> AnyView for V {
-    fn label(&self) -> Option<&str> {
-        View::label(self)
-    }
-    fn ui_key(&self) -> UiKey {
-        match View::key(self) {
-            Some(key) => UiKey::Key(key),
-            // `TypeId::of::<V>()` rather than `self.type_id()`: the latter is easy to call on a
-            // reference or trait object by accident and silently yields the wrong type.
-            None => UiKey::Type(TypeId::of::<V>()),
-        }
-    }
-    fn build<'a>(&'a self, ctx: &mut DeclContext<'a, '_>) -> Box<dyn AnyWidget> {
-        Box::new(View::build(self, ctx))
-    }
-}
-
-trait AnyWidget: Any {
-    fn try_update<'a>(
-        &mut self,
-        view: &'a dyn AnyView,
-        ctx: &mut DeclContext<'a, '_>,
-    ) -> Option<UpdateResult>;
-    fn preview_input(
-        &mut self,
-        bounds: Bounds,
-        event: &DeviceEvent,
-        ctx: &mut Context,
-    ) -> InputResult;
-    fn input(&mut self, bounds: Bounds, event: &DeviceEvent, ctx: &mut Context) -> InputResult;
-    fn is_inside(&self, b: Bounds, p: Point, ctx: &mut Context) -> bool;
-    fn measure(
-        &self,
-        constraints: Constraints,
-        children: Children<'_>,
-        ctx: &mut Context,
-    ) -> Bounds;
-    fn layout(&self, bounds: Bounds, children: Children<'_>, ctx: &mut Context);
-    fn uses_backdrop(&self) -> bool;
-    fn render(&self, bounds: Bounds, ctx: &mut Context) -> Draw;
-}
-
-impl<W: Widget> AnyWidget for W {
-    fn try_update<'a>(
-        &mut self,
-        view: &'a dyn AnyView,
-        ctx: &mut DeclContext<'a, '_>,
-    ) -> Option<UpdateResult> {
-        let view = (view as &dyn Any).downcast_ref::<W::V>()?;
-        Some(Widget::update(self, view, ctx))
-    }
-
-    fn preview_input(
-        &mut self,
-        bounds: Bounds,
-        event: &DeviceEvent,
-        ctx: &mut Context,
-    ) -> InputResult {
-        Widget::preview_input(self, bounds, event, ctx)
-    }
-    fn input(&mut self, bounds: Bounds, event: &DeviceEvent, ctx: &mut Context) -> InputResult {
-        Widget::input(self, bounds, event, ctx)
-    }
-    fn is_inside(&self, b: Bounds, p: Point, ctx: &mut Context) -> bool {
-        Widget::is_inside(self, b, p, ctx)
-    }
-    fn measure(
-        &self,
-        constraints: Constraints,
-        children: Children<'_>,
-        ctx: &mut Context,
-    ) -> Bounds {
-        Widget::measure(self, constraints, children, ctx)
-    }
-    fn layout(&self, bounds: Bounds, children: Children<'_>, ctx: &mut Context) {
-        Widget::layout(self, bounds, children, ctx)
-    }
-    fn render(&self, bounds: Bounds, ctx: &mut Context) -> Draw {
-        Widget::render(self, bounds, ctx)
-    }
-    fn uses_backdrop(&self) -> bool {
-        Widget::uses_backdrop(self)
-    }
-}
-
 /// Identity of a node among its siblings, used to match a new view against the old children.
 ///
 /// - `Key`: the view returned an explicit key. Matched by key alone, regardless of type; if the
-///   type changed, the node is rebuilt in place and keeps its `UiId`, `ChildId` and the
+///   type changed, the node is rebuilt in place and keeps its `UiId` and the
 ///   candidates for its own children.
 /// - `Type`: no explicit key. Matched by type, in order of appearance among same-typed siblings.
 ///
@@ -145,19 +235,20 @@ struct UiNode {
 
     // tree
     parent: Option<UiId>,
-    children: SmallVec<[(ChildId, UiId); CHILDREN_SMALLVEC]>,
 
     // Current placement assigned by the parent, independent of layout cache validity.
     placement: Option<Placement>,
 
+    // cache
     measure_cache: Cache<Constraints, Bounds>,
     layout_cache: Cache<Bounds, ()>,
     render_cache: Cache<(), Draw>,
     env_reads: NodeEnvReads,
+
     // Internal window hooks never become part of the public Widget trait.
     window: Option<crate::ui_tree::window::WindowBinding>,
 
-    // widget main body
+    // Taken during recursive callbacks to borrow the child links independently of the arena.
     widget: Option<Box<dyn AnyWidget>>,
 }
 
@@ -211,17 +302,13 @@ impl UiNode {
     fn scoped_context<'a>(&self, parent: &'a mut Context<'_>) -> Context<'a> {
         crate::ui_tree::window::scoped_context(
             self.window,
-            self.widget.as_deref().expect("live widget"),
+            self.widget.as_deref().expect("live widget").as_widget(),
             parent,
         )
     }
 
-    /// `None` if `id` is not a current child of this node: stale, or issued to another parent.
-    fn child(&self, id: ChildId) -> Option<UiId> {
-        self.children
-            .iter()
-            .find(|(child_id, _)| *child_id == id)
-            .map(|(_, ui_id)| *ui_id)
+    fn child_ids(&self) -> impl ExactSizeIterator<Item = UiId> + DoubleEndedIterator {
+        self.widget.as_deref().expect("live widget").child_ids()
     }
 }
 
@@ -272,9 +359,14 @@ impl UiTree {
         }
         let node = self.node_ref_mut(id).expect("live invalidation root");
         node.invalidate_caches(flags);
-        let child_count = node.children.len();
+        let child_count = node.child_ids().len();
         for index in 0..child_count {
-            let child = self.node_ref(id).expect("live invalidation root").children[index].1;
+            let child = self
+                .node_ref(id)
+                .expect("live invalidation root")
+                .child_ids()
+                .nth(index)
+                .expect("live child");
             if self.node_ref(child).expect("live child").window.is_none() {
                 self.invalidate_caches_from(child, flags);
             }
@@ -290,53 +382,21 @@ impl UiTree {
         let id = self.nodes.reserve();
         // Explicit two-phase allocation: the parent ID exists while children are built,
         // but a reserved node is not yet observable through get/get_mut.
-        let node = self.build_node(parent, id, view, Vec::new(), context);
+        let node = view.build_node(self, parent, id, Vec::new(), context);
         self.nodes
             .insert_reserved(id, node)
             .unwrap_or_else(|_| panic!("new node must fill its current reservation"));
         id
     }
 
-    fn build_node(
-        &mut self,
-        parent: Option<UiId>,
-        id: UiId,
-        view: &dyn AnyView,
-        old_children: Vec<(UiKey, ChildId, UiId)>,
-        context: &mut Context<'_>,
-    ) -> UiNode {
-        let mut declaration = Declaration {
-            current: id,
-            old_children,
-            queued_widgets: Vec::new(),
-            structure_changed: false,
-            window: None,
-        };
-        let label = view.label().map(str::to_owned);
-        let key = view.ui_key();
-        let (widget, reads) = context.observe_env_reads(|context| {
-            view.build(&mut DeclContext {
-                declaration: &mut declaration,
-                context: context.reborrow(),
-            })
-        });
-        let mut env_reads = NodeEnvReads::default();
-        env_reads.record(ReadPhase::Build, reads);
-        let window = declaration.window;
-        let (children, _) = declaration.finish(self, widget.as_ref(), context);
-        UiNode {
-            label,
-            key,
-            parent,
-            children,
-            placement: None,
-            measure_cache: Cache::default(),
-            layout_cache: Cache::default(),
-            render_cache: Cache::default(),
-            env_reads,
-            window,
-            widget: Some(widget),
-        }
+    fn child_candidates(&self, widget: &dyn AnyWidget) -> Vec<(UiKey, UiId)> {
+        // Matching normally consumes siblings in declaration order. Keep the next
+        // candidate at the end so claiming an unchanged child takes constant time.
+        widget
+            .child_ids()
+            .rev()
+            .map(|id| (self.node_ref(id).expect("live child").key, id))
+            .collect()
     }
 
     // Return whether this subtree changed so callers invalidate ancestors on the way back up.
@@ -344,91 +404,44 @@ impl UiTree {
         let node = self.node_ref_mut(id).expect("live update node");
         let window = node.window;
         let mut widget = node.widget.take().expect("widget restored after callbacks");
-        // A replacement must build in the parent scope, not the old window's scope.
-        let old_children = std::mem::take(&mut node.children)
-            .into_iter()
-            .map(|(child_id, child)| {
-                (
-                    self.node_ref(child).expect("live child").key,
-                    child_id,
-                    child,
-                )
-            })
-            .collect();
-        let mut scoped = crate::ui_tree::window::scoped_context(window, widget.as_ref(), context);
-        let mut declaration = Declaration {
-            current: id,
-            old_children,
-            queued_widgets: Vec::new(),
-            structure_changed: false,
-            window,
-        };
-        let (result, reads) = scoped.observe_env_reads(|context| {
-            widget.try_update(
-                view,
-                &mut DeclContext {
-                    declaration: &mut declaration,
-                    context: context.reborrow(),
-                },
-            )
-        });
-        match result {
-            Some(result) => {
-                self.node_ref_mut(id)
-                    .expect("live update node")
-                    .env_reads
-                    .record(ReadPhase::Update, reads);
-                let (children, children_changed) =
-                    declaration.finish(self, widget.as_ref(), &mut scoped);
-                let changed = result.contains(UpdateResult::LAYOUT) || children_changed;
-                let node = self.node_ref_mut(id).expect("live update node");
-                if node.label.as_deref() != view.label() {
-                    node.label = view.label().map(str::to_owned);
-                }
-                node.key = view.ui_key();
-                node.children = children;
-                node.widget = Some(widget);
-                node.invalidate_caches(
-                    result
-                        | if changed {
-                            UpdateResult::LAYOUT
-                        } else {
-                            UpdateResult::empty()
-                        },
-                );
-                // A native window is a layout boundary: its content cannot affect its parent's size.
-                changed && window.is_none()
+        if let Some((result, reads)) = widget.try_update(view, self, id, window, context) {
+            let node = self.node_ref_mut(id).expect("live update node");
+            node.env_reads.record(ReadPhase::Update, reads);
+            if node.label.as_deref() != view.label() {
+                node.label = view.label().map(str::to_owned);
             }
-            None => {
-                let old_children = declaration.old_children;
-                drop(scoped);
-                if let Some(window) = window {
-                    window.unregister(context);
-                }
-                let parent = self.node_ref(id).expect("live replacement node").parent;
-                let node = self.build_node(parent, id, view, old_children, context);
-                let environment_changed = window.is_some() || node.window.is_some();
-                *self.node_ref_mut(id).expect("live replacement node") = node;
-                if environment_changed {
-                    // Reconciliation can retain descendants across a native-window boundary change.
-                    self.invalidate_caches_from(id, UpdateResult::LAYOUT | UpdateResult::RENDER);
-                }
-                true
+            node.key = view.ui_key();
+            node.widget = Some(widget);
+            node.invalidate_caches(result);
+            // A native window's content cannot affect its parent's size.
+            result.contains(UpdateResult::LAYOUT) && window.is_none()
+        } else {
+            if let Some(window) = window {
+                window.unregister(context);
             }
+            // A replacement takes over child identities and declares its own typed properties.
+            let old_children = self.child_candidates(widget.as_ref());
+            let parent = self.node_ref(id).expect("live replacement node").parent;
+            let node = view.build_node(self, parent, id, old_children, context);
+            let environment_changed = window.is_some() || node.window.is_some();
+            *self.node_ref_mut(id).expect("live replacement node") = node;
+            if environment_changed {
+                self.invalidate_caches_from(id, UpdateResult::LAYOUT | UpdateResult::RENDER);
+            }
+            true
         }
     }
+
     fn remove_reverse_scan_order(&mut self, id: UiId, context: &mut Context<'_>) {
-        let Some(node) = self.node_ref_mut(id) else {
+        let Some(node) = self.nodes.remove(id) else {
             return;
         };
-        let children = std::mem::take(&mut node.children);
-        for (_, child) in children.into_iter().rev() {
+        for child in node.child_ids().rev() {
             self.remove_reverse_scan_order(child, context);
         }
-        if let Some(window) = self.node_ref(id).and_then(|node| node.window) {
+        if let Some(window) = node.window {
             window.unregister(context);
         }
-        self.nodes.remove(id);
     }
 
     fn node_ref(&self, id: UiId) -> Option<&UiNode> {
@@ -453,182 +466,195 @@ impl Default for UiTree {
 // Matching contract (optimisation contract: violating it never corrupts the tree, it only makes
 // state follow the wrong view):
 // - Explicit keys must be unique among siblings. Checked by a `debug_assert!` in
-//   `DeclContext::child`; in release the first remaining old child with that key wins.
+//   `DeclContext::child_with`; in release the first remaining old child with that key wins.
 // - Unkeyed siblings of the same type are matched by order of appearance. Reordering them moves
 //   their state with the position, not with the view; give them explicit keys to reorder.
 
-/// Declared views live independently of the callback's service borrow.
-/// Only declaration data survives the observed callback.
-pub struct DeclContext<'a, 'env> {
-    declaration: &'env mut Declaration<'a>,
+/// Declared views live for `'a`, independently of the callback's service borrow (`'env`).
+/// Only declaration data survives the callback; its observed Context cannot escape.
+pub struct DeclContext<'a, 'env, P = ()> {
+    declaration: &'env mut Declaration<'a, P>,
     context: Context<'env>,
 }
 
-/// Context-free reconciliation data retained after the observed callback returns.
-struct Declaration<'a> {
+/// Context-free reconciliation data, retained after the observed callback returns.
+struct Declaration<'a, P> {
     current: UiId,
-    // Children of the previous frame not yet claimed by `DeclContext::child`.
-    old_children: Vec<(UiKey, ChildId, UiId)>,
-    queued_widgets: Vec<QueuedView<'a>>,
-    // New children or a departure from the previous sibling order were declared.
-    structure_changed: bool,
-    window: Option<crate::ui_tree::window::WindowBinding>,
+    old_children: Vec<(UiKey, UiId)>,
+    queued: Vec<QueuedView<'a, P>>,
+    window: Option<window::WindowBinding>,
 }
 
-struct QueuedView<'a> {
-    // Some: the view is already in the tree, and this is its index
-    // None: the view is new, and needs to be built and added to the tree
-    existing_index: Option<UiId>,
+struct QueuedView<'a, P> {
     key: UiKey,
+    existing: Option<UiId>,
     view: &'a dyn AnyView,
-    child_id: ChildId,
+    data: P,
 }
 
-impl Declaration<'_> {
+#[derive(PartialEq)]
+struct ChildLink<P> {
+    node: UiId,
+    data: P,
+}
+
+impl<'a, P> Declaration<'a, P> {
+    fn new(
+        current: UiId,
+        old_children: Vec<(UiKey, UiId)>,
+        window: Option<window::WindowBinding>,
+    ) -> Self {
+        Self {
+            current,
+            old_children,
+            queued: Vec::new(),
+            window,
+        }
+    }
+
+    fn context<'env>(&'env mut self, context: &'env mut Context) -> DeclContext<'a, 'env, P> {
+        DeclContext {
+            declaration: self,
+            context: context.reborrow(),
+        }
+    }
+
+    /// Reconcile into the parent's existing link buffer. The result includes both link changes
+    /// and layout changes reported by retained descendants.
     fn finish(
         self,
         tree: &mut UiTree,
         widget: &dyn Any,
-        context: &mut Context<'_>,
-    ) -> (SmallVec<[(ChildId, UiId); CHILDREN_SMALLVEC]>, bool) {
-        let Self {
-            old_children,
-            queued_widgets,
-            structure_changed,
-            current,
-            window,
-        } = self;
-        let mut scoped = crate::ui_tree::window::scoped_context(window, widget, context);
-        let context = &mut scoped;
-        let mut changed = structure_changed || !old_children.is_empty();
-
-        // remove old branch
-        for (_, _, id) in old_children.iter().rev() {
-            tree.remove_reverse_scan_order(*id, context);
+        context: &mut Context,
+        links: &mut Vec<ChildLink<P>>,
+    ) -> bool
+    where
+        P: PartialEq,
+    {
+        let mut scoped = window::scoped_context(self.window, widget, context);
+        for (_, id) in self.old_children {
+            tree.remove_reverse_scan_order(id, &mut scoped);
         }
 
-        let mut new_children = SmallVec::new();
-
-        // reorder children and build new branch
-        for q in &queued_widgets {
-            if let Some(scoped_id) = q.existing_index {
-                // update it
-                // Do not short-circuit: every declared child must be updated.
-                changed |= tree.update_node(scoped_id, q.view, context);
-                new_children.push((q.child_id, scoped_id));
+        let mut changed = links.len() != self.queued.len();
+        links.truncate(self.queued.len());
+        for (index, child) in self.queued.into_iter().enumerate() {
+            let node = match child.existing {
+                Some(id) => {
+                    changed |= tree.update_node(id, child.view, &mut scoped);
+                    id
+                }
+                None => tree.build_new(Some(self.current), child.view, &mut scoped),
+            };
+            let link = ChildLink {
+                node,
+                data: child.data,
+            };
+            if let Some(old) = links.get_mut(index) {
+                changed = changed || *old != link;
+                *old = link;
             } else {
-                // build new
-                let scoped_id = tree.build_new(Some(current), q.view, context);
-                new_children.push((q.child_id, scoped_id));
+                links.push(link);
             }
         }
-
-        (new_children, changed)
+        changed
     }
 }
 
-/// Handle to a child, issued by `DeclContext::child`.
-///
-/// Unique across the whole process (all parents, frames and arenas), so a stale id, or one that
-/// leaked through the model into another widget, resolves to nothing instead of to the wrong
-/// child. Stable across frames for as long as the child is reused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ChildId {
-    uid: u64,
-}
-
-impl ChildId {
-    fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        // Only uniqueness is needed; no other memory is published through this counter.
-        Self {
-            uid: NEXT
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-                .expect("child identity exhausted"),
-        }
-    }
-}
-
-pub struct Children<'a> {
-    tree: &'a mut UiTree,
-    current: UiId,
-}
-
-// -----------
-// Public APIs
-// -----------
-
-impl<'a, 'env> DeclContext<'a, 'env> {
+impl<'a, 'env, P> DeclContext<'a, 'env, P> {
     pub fn context(&mut self) -> &mut Context<'env> {
         &mut self.context
     }
 
-    pub fn child<V: View>(&mut self, view: &'a V) -> ChildId {
-        self.declaration.child(view)
-    }
-}
-
-impl<'a> Declaration<'a> {
-    fn child<V: View>(&mut self, view: &'a V) -> ChildId {
-        // check if the view is already in the tree
+    /// Declare a child and the properties this parent uses for its measurement and layout.
+    /// A change to the ordered child links invalidates this parent's measure and layout caches.
+    pub fn child_with<V: View>(&mut self, view: &'a V, data: P) {
         let key = view.ui_key();
-
+        let declaration = &mut *self.declaration;
         debug_assert!(
-            matches!(key, UiKey::Type(_)) || self.queued_widgets.iter().all(|q| q.key != key),
+            matches!(key, UiKey::Type(_)) || declaration.queued.iter().all(|q| q.key != key),
             "explicit key {key:?} is used by more than one sibling"
         );
-
-        let existing = self
+        let existing = declaration
             .old_children
             .iter()
-            .position(|(k, _, _)| *k == key)
-            .map(|i| {
-                // Taking the next old child preserves order; skipping one changes structure
-                // (a reorder or deletion), even when all retained ids are stable.
-                self.structure_changed |= i != 0;
-                self.old_children.remove(i)
-            });
-
-        // A reused child keeps its `ChildId`, so ids held across frames stay valid.
-        let (existing_index, child_id) = match existing {
-            Some((_, child_id, id)) => (Some(id), child_id),
-            None => {
-                self.structure_changed = true;
-                (None, ChildId::new())
-            }
-        };
-
-        self.queued_widgets.push(QueuedView {
-            existing_index,
+            .rposition(|(k, _)| *k == key)
+            .map(|index| declaration.old_children.remove(index).1);
+        declaration.queued.push(QueuedView {
             key,
+            existing,
             view,
-            child_id,
+            data,
         });
-
-        child_id
     }
 }
 
-impl Children<'_> {
-    fn get(&mut self, id: ChildId) -> Option<(&mut UiNode, UiId)> {
-        let child_ui_id = self.tree.node_ref_mut(self.current)?.child(id)?;
-        Some((self.tree.node_ref_mut(child_ui_id)?, child_ui_id))
+impl<'a> DeclContext<'a, '_> {
+    /// Declare a child of a parent whose child properties are unit.
+    pub fn child<V: View>(&mut self, view: &'a V) {
+        self.child_with(view, ());
+    }
+}
+
+/// This parent's children in declaration order. Each visit borrows one link for the call.
+pub struct Children<'a, P = ()> {
+    links: &'a [ChildLink<P>],
+    tree: &'a mut UiTree,
+}
+
+impl<P> Children<'_, P> {
+    pub fn len(&self) -> usize {
+        self.links.len()
     }
 
-    /// Test a point in this parent's local coordinates against a child's own shape.
-    /// Returns None for an unknown child, missing placement, or unusable local coordinates.
-    pub fn is_inside(&mut self, id: ChildId, point: Point, ctx: &mut Context) -> Option<bool> {
-        let (node, _) = self.get(id)?;
-        let mut scoped = node.scoped_context(ctx);
-        let ctx = &mut scoped;
+    pub fn is_empty(&self) -> bool {
+        self.links.is_empty()
+    }
+
+    /// The order is stable across multiple passes within a widget callback. A child handle
+    /// can only be used during its visit.
+    ///
+    /// ```compile_fail,E0521
+    /// use matcha_better_tree::ui_tree::{Child, Children};
+    ///
+    /// fn save_child<'a>(mut children: Children<'a>) -> Option<Child<'a>> {
+    ///     let mut saved = None;
+    ///     children.for_each(|_, child| saved = Some(child));
+    ///     saved
+    /// }
+    /// ```
+    pub fn for_each(&mut self, mut visit: impl for<'child> FnMut(&'child P, Child<'child>)) {
+        for link in self.links {
+            visit(
+                &link.data,
+                Child {
+                    tree: self.tree,
+                    id: link.node,
+                },
+            );
+        }
+    }
+}
+
+/// A child's operations for the duration of a visit through [`Children::for_each`].
+pub struct Child<'a> {
+    tree: &'a mut UiTree,
+    id: UiId,
+}
+
+impl Child<'_> {
+    /// Test the child's own shape in parent-local coordinates. Returns `None` when
+    /// the child has no placement or the point cannot be mapped into its coordinates.
+    pub fn is_inside(&mut self, point: Point, ctx: &mut Context) -> Option<bool> {
+        let node = self.tree.node_ref(self.id).expect("live child");
         let placement = node.placement?;
         let point = placement.local_point(point)?;
-
-        Some(
-            node.widget
-                .as_ref()?
-                .is_inside(placement.bounds, point, ctx),
-        )
+        let mut scoped = node.scoped_context(ctx);
+        Some(node.widget.as_ref().expect("live widget").is_inside(
+            placement.bounds,
+            point,
+            &mut scoped,
+        ))
     }
 }
 

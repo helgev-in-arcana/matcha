@@ -11,7 +11,7 @@ use crate::ui_tree::context::Context;
 use crate::ui_tree::widget::{InputResult, UiError, UpdateResult, View};
 use crate::ui_tree::{DeclContext, UiTree};
 
-impl DeclContext<'_, '_> {
+impl DeclContext<'_, '_, ()> {
     /// Register identity and concrete dispatch together; callers cannot install mismatched hooks.
     pub(crate) fn register_window<V: View>(&mut self, config: WindowConfig) -> WindowInstanceId {
         assert!(
@@ -42,12 +42,13 @@ impl UiTree {
         id: WindowId,
         ctx: &'a mut Context<'_>,
     ) -> Option<(UiId, Context<'a>)> {
-        let (node_id, binding) = self.window_route(id, ctx)?;
+        let (node_id, _) = self.window_route(id, ctx)?;
         let node = self.node_ref(node_id).expect("live window");
-        let (child, scoped) =
-            binding.content_context(node.widget.as_deref().expect("live widget"), ctx);
-        let child = node.child(child).expect("declared window content");
-        Some((child, scoped))
+        let mut children = node.child_ids();
+        let (Some(content), None) = (children.next(), children.next()) else {
+            unreachable!("a Window declares exactly one content child");
+        };
+        Some((content, node.scoped_context(ctx)))
     }
 
     /// Deliver a native window event. Unknown/deleted windows are ignored.
@@ -64,7 +65,7 @@ impl UiTree {
             .widget
             .as_deref_mut()
             .expect("live widget");
-        let flags = binding.dispatch(widget, event);
+        let flags = binding.dispatch(widget.as_widget_mut(), event);
         if !flags.is_empty() {
             self.invalidate_caches_from(node_id, flags);
             ctx.window_registry()

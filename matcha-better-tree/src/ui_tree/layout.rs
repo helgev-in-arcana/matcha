@@ -41,16 +41,7 @@ impl UiTree {
             .widget
             .take()
             .expect("writing back the widget into ui_node has been forgotten somewhere");
-        let ((), reads) = ctx.observe_env_reads(|ctx| {
-            widget.layout(
-                position.bounds,
-                Children {
-                    tree: self,
-                    current: id,
-                },
-                ctx,
-            )
-        });
+        let ((), reads) = ctx.observe_env_reads(|ctx| widget.layout(position.bounds, self, ctx));
         let node = self
             .node_ref_mut(id)
             .expect("tree cannot be changed during layout");
@@ -58,47 +49,42 @@ impl UiTree {
         node.env_reads.record(ReadPhase::Layout, reads);
         node.layout_cache.store(position.bounds, ());
     }
-}
 
-impl Children<'_> {
-    pub fn measure(
+    pub(super) fn measure_node(
         &mut self,
-        id: ChildId,
+        id: UiId,
         constraints: Constraints,
         ctx: &mut Context,
-    ) -> Option<Bounds> {
-        let (node, ui_id) = self.get(id)?;
+    ) -> Bounds {
+        let node = self.node_ref_mut(id).expect("live measured node");
         let mut scoped = node.scoped_context(ctx);
         let ctx = &mut scoped;
 
         if let Some(&cached_bounds) = node.measure_cache.get(&constraints) {
-            return Some(cached_bounds);
+            return cached_bounds;
         }
 
         let widget = std::mem::take(&mut node.widget)
             .expect("writing back the widget into ui_node has been forgotten somewhere");
-        let (bounds, reads) = ctx.observe_env_reads(|ctx| {
-            let children = Children {
-                tree: self.tree,
-                current: ui_id,
-            };
-            widget.measure(constraints, children, ctx)
-        });
-        let (node, _) = self
-            .get(id)
-            .expect("tree cannot be changed during this method");
+        let (bounds, reads) = ctx.observe_env_reads(|ctx| widget.measure(constraints, self, ctx));
+        let node = self
+            .node_ref_mut(id)
+            .expect("tree cannot be changed during measurement");
         node.widget = Some(widget);
         node.env_reads.record(ReadPhase::Measure, reads);
         node.measure_cache.store(constraints, bounds);
 
-        Some(bounds)
+        bounds
+    }
+}
+
+impl Child<'_> {
+    pub fn measure(&mut self, constraints: Constraints, ctx: &mut Context) -> Bounds {
+        self.tree.measure_node(self.id, constraints, ctx)
     }
 
-    /// Place a child using bounds in its own coordinates and an affine mapping to this parent.
-    pub fn layout(&mut self, id: ChildId, position: Position, ctx: &mut Context) {
-        let Some((_, ui_id)) = self.get(id) else {
-            return;
-        };
-        self.tree.layout_node(ui_id, position, ctx);
+    /// Place the child using bounds in its own coordinates and an affine mapping to its parent.
+    pub fn layout(&mut self, position: Position, ctx: &mut Context) {
+        self.tree.layout_node(self.id, position, ctx);
     }
 }

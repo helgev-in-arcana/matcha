@@ -1,42 +1,42 @@
 use super::*;
 use crate::ui_tree::window::WindowRegistry;
 
-fn measure_child(tree: &mut UiTree, root: UiId, child: ChildId, ctx: &mut Context) -> Bounds {
-    Children {
-        tree,
-        current: root,
-    }
-    .measure(child, Constraints::default(), ctx)
-    .unwrap()
+fn measure_child(tree: &mut UiTree, child: UiId, ctx: &mut Context) -> Bounds {
+    tree.measure_node(child, Constraints::default(), ctx)
 }
 
 #[test]
 fn layout_invalidation_recomputes_measurement_and_layout_but_keeps_drawing() {
     let observations = Arc::default();
-    let (mut tree, root, child) = setup(ProbeView(Arc::clone(&observations)));
-    let id = tree.node_ref(root).unwrap().child(child).unwrap();
+    let (mut tree, _, child) = setup(ProbeView(Arc::clone(&observations)));
     let mut registry = WindowRegistry::default();
     let mut context = Context::new(&mut registry);
-    assert_eq!(measure_child(&mut tree, root, child, &mut context).x, 10.0);
+    assert_eq!(measure_child(&mut tree, child, &mut context).x, 10.0);
     tree.layout(bounds(), &mut context);
     tree.render(&mut context).unwrap();
 
     tree.clear_caches(UpdateResult::LAYOUT);
     let mut context = context.reborrow().with_dpi(2.0);
-    assert!(tree.node_ref(id).unwrap().measure_cache.value().is_none());
+    assert!(
+        tree.node_ref(child)
+            .unwrap()
+            .measure_cache
+            .value()
+            .is_none()
+    );
     assert!(matches!(
         tree.render(&mut context),
         Err(UiError::LayoutRequired)
     ));
     // Recomputing measurement must not make layout valid again.
-    assert_eq!(measure_child(&mut tree, root, child, &mut context).x, 20.0);
+    assert_eq!(measure_child(&mut tree, child, &mut context).x, 20.0);
     assert!(matches!(
         tree.render(&mut context),
         Err(UiError::LayoutRequired)
     ));
     tree.layout(bounds(), &mut context);
     tree.render(&mut context).unwrap();
-    assert_eq!(measure_child(&mut tree, root, child, &mut context).x, 20.0);
+    assert_eq!(measure_child(&mut tree, child, &mut context).x, 20.0);
     let observed = observations.lock().unwrap();
     assert_eq!(observed.measure_calls, 2);
     assert_eq!(observed.layout_calls, 2);
@@ -46,14 +46,13 @@ fn layout_invalidation_recomputes_measurement_and_layout_but_keeps_drawing() {
 #[test]
 fn clearing_selected_caches_preserves_other_results_and_placement() {
     let observations = Arc::default();
-    let (mut tree, root, child) = setup(ProbeView(Arc::clone(&observations)));
-    let id = tree.node_ref(root).unwrap().child(child).unwrap();
+    let (mut tree, _, child) = setup(ProbeView(Arc::clone(&observations)));
     let mut registry = WindowRegistry::default();
     let mut context = Context::new(&mut registry);
-    measure_child(&mut tree, root, child, &mut context);
+    measure_child(&mut tree, child, &mut context);
     tree.layout(bounds(), &mut context);
     tree.render(&mut context).unwrap();
-    let placement = tree.node_ref(id).unwrap().placement.unwrap();
+    let placement = tree.node_ref(child).unwrap().placement.unwrap();
 
     tree.clear_caches(UpdateResult::RENDER);
     assert!(
@@ -61,9 +60,15 @@ fn clearing_selected_caches_preserves_other_results_and_placement() {
             .iter()
             .all(|(_, node)| node.render_cache.get(&()).is_none())
     );
-    assert!(tree.node_ref(id).unwrap().measure_cache.value().is_some());
+    assert!(
+        tree.node_ref(child)
+            .unwrap()
+            .measure_cache
+            .value()
+            .is_some()
+    );
     assert_eq!(
-        tree.node_ref(id).unwrap().placement.unwrap().affine,
+        tree.node_ref(child).unwrap().placement.unwrap().affine,
         placement.affine
     );
     tree.layout(bounds(), &mut context);
@@ -75,7 +80,13 @@ fn clearing_selected_caches_preserves_other_results_and_placement() {
     assert!(tree.nodes.iter().all(
         |(_, node)| node.measure_cache.value().is_none() && node.layout_cache.value().is_none()
     ));
-    assert!(tree.node_ref(id).unwrap().render_cache.get(&()).is_some());
+    assert!(
+        tree.node_ref(child)
+            .unwrap()
+            .render_cache
+            .get(&())
+            .is_some()
+    );
     tree.clear_caches(UpdateResult::RENDER);
     tree.clear_caches(UpdateResult::empty());
     assert!(matches!(

@@ -34,21 +34,23 @@ impl InputView {
 
 struct InputWidget {
     view: InputView,
-    children: Vec<ChildId>,
     width: f32,
 }
 
 impl View for InputView {
+    type ChildData = Position;
     fn label(&self) -> Option<&str> {
         None
     }
     fn key(&self) -> Option<u64> {
         Some(self.key)
     }
-    fn build<'a>(&'a self, ctx: &mut DeclContext<'a, '_>) -> impl Widget<V = Self> {
+    fn build<'a>(&'a self, ctx: &mut DeclContext<'a, '_, Position>) -> impl Widget<V = Self> {
+        for child in &self.children {
+            ctx.child_with(child, child.placement);
+        }
         InputWidget {
             view: self.clone(),
-            children: self.children.iter().map(|child| ctx.child(child)).collect(),
             width: 10.0,
         }
     }
@@ -75,9 +77,15 @@ impl InputWidget {
 
 impl Widget for InputWidget {
     type V = InputView;
-    fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a, '_>) -> UpdateResult {
+    fn update<'a>(
+        &mut self,
+        view: &'a Self::V,
+        ctx: &mut DeclContext<'a, '_, Position>,
+    ) -> UpdateResult {
         self.view = view.clone();
-        self.children = view.children.iter().map(|child| ctx.child(child)).collect();
+        for child in &view.children {
+            ctx.child_with(child, child.placement);
+        }
         UpdateResult::empty()
     }
     fn preview_input(&mut self, _: Bounds, event: &DeviceEvent, _: &mut Context) -> InputResult {
@@ -95,22 +103,18 @@ impl Widget for InputWidget {
     fn measure(
         &self,
         constraints: Constraints,
-        mut children: Children<'_>,
+        mut children: Children<'_, Position>,
         ctx: &mut Context,
     ) -> Bounds {
         let mut width = self.width;
-        for child in &self.children {
-            width += children.measure(*child, constraints, ctx).unwrap().x;
-        }
+        children.for_each(|_, mut child| width += child.measure(constraints, ctx).x);
         Bounds {
             x: width,
             ..bounds()
         }
     }
-    fn layout(&self, _: Bounds, mut children: Children<'_>, ctx: &mut Context) {
-        for (id, child) in self.children.iter().zip(&self.view.children) {
-            children.layout(*id, child.placement, ctx);
-        }
+    fn layout(&self, _: Bounds, mut children: Children<'_, Position>, ctx: &mut Context) {
+        children.for_each(|placement, mut child| child.layout(*placement, ctx));
     }
     fn render(&self, _: Bounds, _: &mut Context) -> Draw {
         Draw {
@@ -135,21 +139,12 @@ fn ready(view: &InputView) -> UiTree {
         view,
         &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
     );
-    // Warm measurement through the existing widget entry point; root measurement API is
-    // separate work. Root layout and input use the actual framework entry points below.
     let root = tree.root.unwrap();
-    let widget = tree.node_ref_mut(root).unwrap().widget.take().unwrap();
-    let measured = widget.measure(
+    tree.measure_node(
+        root,
         Constraints::default(),
-        Children {
-            tree: &mut tree,
-            current: root,
-        },
         &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
     );
-    let node = tree.node_ref_mut(root).unwrap();
-    node.widget = Some(widget);
-    node.measure_cache.store(Constraints::default(), measured);
     tree.layout(
         bounds(),
         &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default()),
@@ -254,18 +249,13 @@ fn target_stop_does_not_stop_cache_invalidation_to_root() {
     assert_invalidated(&tree, &[1, 2, 3]);
     // The actual mutated size must be observed under the same constraints.
     let parent = find(&tree, 2);
-    let leaf = tree.node_ref(parent).unwrap().children[0].0;
+    let leaf = child_at(&tree, parent, 0);
     assert_eq!(
-        Children {
-            tree: &mut tree,
-            current: parent
-        }
-        .measure(
+        tree.measure_node(
             leaf,
             Constraints::default(),
             &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
         )
-        .unwrap()
         .x,
         11.0
     );

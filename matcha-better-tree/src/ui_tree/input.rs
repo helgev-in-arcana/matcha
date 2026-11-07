@@ -112,8 +112,8 @@ impl UiTree {
         let placement = node.placement?;
         let point = placement.local_point(point)?;
 
-        for (_, child) in node.children.iter().rev() {
-            if let Some(target) = self.hit_test(*child, point, ctx) {
+        for child in node.child_ids().rev() {
+            if let Some(target) = self.hit_test(child, point, ctx) {
                 return Some(target);
             }
         }

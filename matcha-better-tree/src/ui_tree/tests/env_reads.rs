@@ -47,13 +47,13 @@ impl ReadView {
 }
 
 struct ReadWidget {
-    children: Vec<ChildId>,
     reads: [EnvReads; 5],
     draw: Draw,
     backdrop: bool,
 }
 
 impl View for ReadView {
+    type ChildData = ();
     fn label(&self) -> Option<&str> {
         None
     }
@@ -62,9 +62,10 @@ impl View for ReadView {
     }
     fn build<'a>(&'a self, ctx: &mut DeclContext<'a, '_>) -> impl Widget<V = Self> {
         read(self.reads[0], ctx.context());
-        let children = self.children.iter().map(|child| ctx.child(child)).collect();
+        for child in &self.children {
+            ctx.child(child);
+        }
         ReadWidget {
-            children,
             reads: self.reads,
             draw: self.draw.clone(),
             backdrop: self.backdrop,
@@ -76,7 +77,9 @@ impl Widget for ReadWidget {
     type V = ReadView;
     fn update<'a>(&mut self, view: &'a ReadView, ctx: &mut DeclContext<'a, '_>) -> UpdateResult {
         self.reads = view.reads;
-        self.children = view.children.iter().map(|child| ctx.child(child)).collect();
+        for child in &view.children {
+            ctx.child(child);
+        }
         self.draw = view.draw.clone();
         self.backdrop = view.backdrop;
         read(self.reads[1], ctx.context());
@@ -98,20 +101,18 @@ impl Widget for ReadWidget {
         ctx: &mut Context,
     ) -> Bounds {
         read(self.reads[2] & !EnvReads::FRAME_TIME, ctx);
-        for &child in &self.children {
-            children.measure(child, constraints, ctx).unwrap();
-        }
+        children.for_each(|_, mut child| {
+            child.measure(constraints, ctx);
+        });
         read(self.reads[2] & EnvReads::FRAME_TIME, ctx);
         bounds()
     }
     fn layout(&self, _: Bounds, mut children: Children<'_>, ctx: &mut Context) {
         read(self.reads[3] & !EnvReads::FRAME_TIME, ctx);
-        for &child in &self.children {
-            children
-                .measure(child, Constraints::default(), ctx)
-                .unwrap();
-            children.layout(child, position(Matrix4::identity()), ctx);
-        }
+        children.for_each(|_, mut child| {
+            child.measure(Constraints::default(), ctx);
+            child.layout(position(Matrix4::identity()), ctx);
+        });
         read(self.reads[3] & EnvReads::FRAME_TIME, ctx);
     }
     fn uses_backdrop(&self) -> bool {
@@ -278,13 +279,8 @@ fn phases_and_nodes_record_only_their_direct_reads_including_cached_child_calls(
     );
     tree.update(&wrapper, &mut ctx);
     let root = tree.root.unwrap();
-    let child = tree.node_ref(root).unwrap().children[0].0;
-    Children {
-        tree: &mut tree,
-        current: root,
-    }
-    .measure(child, Constraints::default(), &mut ctx)
-    .unwrap();
+    let child = child_at(&tree, root, 0);
+    tree.measure_node(child, Constraints::default(), &mut ctx);
     // Layout will encounter already-cached child measurements; they must not become parent reads.
     tree.layout(bounds(), &mut ctx);
     tree.render(&mut ctx).unwrap();
@@ -304,24 +300,14 @@ fn skipped_callbacks_keep_observations_and_executed_callbacks_replace_them() {
     let mut tree = UiTree::new();
     tree.update(&wrapper, &mut ctx);
     let root = tree.root.unwrap();
-    let child = tree.node_ref(root).unwrap().children[0].0;
+    let child = child_at(&tree, root, 0);
     let id = find(&tree, 1);
-    Children {
-        tree: &mut tree,
-        current: root,
-    }
-    .measure(child, Constraints::default(), &mut ctx)
-    .unwrap();
+    tree.measure_node(child, Constraints::default(), &mut ctx);
     tree.layout(bounds(), &mut ctx);
     tree.render(&mut ctx).unwrap();
     wrapper.child.reads = [EnvReads::empty(); 5];
     tree.update(&wrapper, &mut ctx);
-    Children {
-        tree: &mut tree,
-        current: root,
-    }
-    .measure(child, Constraints::default(), &mut ctx)
-    .unwrap();
+    tree.measure_node(child, Constraints::default(), &mut ctx);
     tree.layout(bounds(), &mut ctx);
     tree.render(&mut ctx).unwrap();
     let record = tree.node_ref(id).unwrap().env_reads;
@@ -332,12 +318,7 @@ fn skipped_callbacks_keep_observations_and_executed_callbacks_replace_them() {
     }
     tree.clear_caches(UpdateResult::LAYOUT | UpdateResult::RENDER);
     assert_eq!(tree.node_ref(id).unwrap().env_reads, record);
-    Children {
-        tree: &mut tree,
-        current: root,
-    }
-    .measure(child, Constraints::default(), &mut ctx)
-    .unwrap();
+    tree.measure_node(child, Constraints::default(), &mut ctx);
     tree.layout(bounds(), &mut ctx);
     tree.render(&mut ctx).unwrap();
     let record = tree.node_ref(id).unwrap().env_reads;
@@ -419,8 +400,8 @@ fn window_setup_and_tree_bookkeeping_do_not_add_widget_reads() {
             )
             .unwrap();
         let outer = tree.root.unwrap();
-        let container = tree.node_ref(outer).unwrap().children[0].1;
-        let inner = tree.node_ref(container).unwrap().children[0].1;
+        let container = child_at(&tree, outer, 0);
+        let inner = child_at(&tree, container, 0);
         for node in [outer, inner] {
             let id = tree.node_ref(node).unwrap().window.unwrap().id();
             let native = ctx
@@ -434,8 +415,8 @@ fn window_setup_and_tree_bookkeeping_do_not_add_widget_reads() {
         }
     });
     let outer = tree.root.unwrap();
-    let container = tree.node_ref(outer).unwrap().children[0].1;
-    let inner = tree.node_ref(container).unwrap().children[0].1;
+    let container = child_at(&tree, outer, 0);
+    let inner = child_at(&tree, container, 0);
     for node in [outer, inner, container] {
         let observed = &tree.node_ref(node).unwrap().env_reads;
         for phase in PHASES {

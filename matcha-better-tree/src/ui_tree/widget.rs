@@ -12,12 +12,17 @@ use crate::ui_tree::context::Context;
 const COLOR_SMALLVEC: usize = 2;
 
 pub trait View: Any {
+    /// Properties this parent associates with each child. Equal values must be
+    /// interchangeable for measurement and layout. Use `()` for ordinary children.
+    type ChildData: PartialEq + 'static;
+
     fn label(&self) -> Option<&str>;
     /// Explicit identity among siblings. `None` matches by type and order of appearance.
     fn key(&self) -> Option<u64> {
         None
     }
-    fn build<'a>(&'a self, ctx: &mut DeclContext<'a, '_>) -> impl Widget<V = Self>;
+    fn build<'a>(&'a self, ctx: &mut DeclContext<'a, '_, Self::ChildData>)
+    -> impl Widget<V = Self>;
 }
 
 pub trait Widget: Any {
@@ -27,7 +32,11 @@ pub trait Widget: Any {
     /// Report LAYOUT for changes affecting measurement/child layout, RENDER for changes to
     /// this widget's drawing, or LAYOUT | RENDER for both. Descendant layout caches are retained until
     /// their own update or Constraints/Bounds keys require work.
-    fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a, '_>) -> UpdateResult;
+    fn update<'a>(
+        &mut self,
+        view: &'a Self::V,
+        ctx: &mut DeclContext<'a, '_, <Self::V as View>::ChildData>,
+    ) -> UpdateResult;
 
     /// Observe or intercept an event from root to target (inclusive), before normal input.
     /// `mouse_position()` is widget-local. Stop cancels the rest of preview and normal input.
@@ -58,15 +67,20 @@ pub trait Widget: Any {
     fn measure(
         &self,
         constraints: Constraints,
-        children: Children<'_>,
+        children: Children<'_, <Self::V as View>::ChildData>,
         ctx: &mut Context,
     ) -> Bounds;
 
     /// Lay out this widget's children using its assigned local bounds.
-    /// Any child placements passed to `Children::layout` are relative to this widget.
+    /// Any child placements passed to [`Child::layout`](super::Child::layout) are relative to this widget.
     /// Re-running layout alone does not invalidate this widget's drawing. Updates affecting
     /// both child layout and this widget's appearance must also request RENDER.
-    fn layout(&self, bounds: Bounds, children: Children<'_>, ctx: &mut Context);
+    fn layout(
+        &self,
+        bounds: Bounds,
+        children: Children<'_, <Self::V as View>::ChildData>,
+        ctx: &mut Context,
+    );
 
     /// Whether any source returned by render reads the phase-start snapshot (Backdrop).
     /// The minimal pipeline refreshes this widget and its descendants on every Scene build,
