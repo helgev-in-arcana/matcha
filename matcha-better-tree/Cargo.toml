@@ -6,10 +6,13 @@ version.workspace = true
 [dependencies]
 # self
 render-interface = { workspace = true }
+utils = { workspace = true }
 # Select the backend through this crate's features, independently of workspace defaults.
 matcha-window = { path = "../matcha-window", default-features = false }
 
 # graphics
+gpu-utils = { workspace = true }
+plain-renderer = { workspace = true }
 wgpu = { workspace = true }
 
 # math
@@ -17,12 +20,12 @@ nalgebra = { features = ["bytemuck"], workspace = true }
 
 # other
 bitflags = { workspace = true }
+log = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
+web-time = { workspace = true }
 
 [dev-dependencies]
-gpu-utils = { workspace = true }
-plain-renderer = { workspace = true }
 matcha-window = { path = "../matcha-window", default-features = false, features = ["headless"] }
 futures = { workspace = true }
 bytemuck = { workspace = true }

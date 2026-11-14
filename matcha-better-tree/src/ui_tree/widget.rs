@@ -14,7 +14,7 @@ const COLOR_SMALLVEC: usize = 2;
 pub trait View: Any {
     /// Properties this parent associates with each child. Equal values must be
     /// interchangeable for measurement and layout. Use `()` for ordinary children.
-    type ChildData: PartialEq + 'static;
+    type ChildData: PartialEq + utils::MaybeSendSync + 'static;
 
     fn label(&self) -> Option<&str>;
     /// Explicit identity among siblings. `None` matches by type and order of appearance.
@@ -25,7 +25,7 @@ pub trait View: Any {
     -> impl Widget<V = Self>;
 }
 
-pub trait Widget: Any {
+pub trait Widget: Any + utils::MaybeSendSync {
     type V: View;
 
     /// Update this widget and declare every child, even when returning empty flags.

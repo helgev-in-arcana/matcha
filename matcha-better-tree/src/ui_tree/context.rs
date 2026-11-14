@@ -1,13 +1,13 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use web_time::Instant;
 
 use matcha_window::clipboard::Clipboard;
-use matcha_window::window::{CursorIcon, Window};
+use matcha_window::window::{CursorIcon, Window, WindowError, WindowId};
 
 use super::env_reads::EnvReads;
-use crate::ui_tree::window::{WindowInstanceId, WindowRegistry};
+use crate::ui_tree::window::{WindowConfig, WindowRegistry};
 
 #[derive(Default)]
 pub(crate) struct PlatformState {
@@ -20,7 +20,6 @@ pub(crate) struct PlatformState {
     ime_cursor_area: Option<([f32; 2], [f32; 2])>,
     pushed_ime_cursor_area: Option<([f32; 2], [f32; 2])>,
 }
-
 impl PlatformState {
     /// Apply pending platform changes and remember which values were issued.
     pub(crate) fn sync_to_window(&mut self, window: &Window) {
@@ -50,13 +49,13 @@ impl PlatformState {
 }
 
 #[derive(Default)]
-struct Services {
+pub(crate) struct Services {
     platform: PlatformState,
     clipboard: OnceLock<Clipboard>,
     resources: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
-/// A root Context owns services; nested scopes exclusively reborrow that same storage.
+/// Standalone contexts own services. App callbacks and nested scopes borrow persistent storage.
 enum ServicesStorage<'a> {
     Owned(Services),
     Borrowed(&'a mut Services),
@@ -78,26 +77,43 @@ impl ServicesStorage<'_> {
     }
 }
 
+type WindowFactory<'a> = dyn FnMut(&WindowConfig) -> Result<Window, WindowError> + 'a;
+
 /// Environment getters take exclusive access to record the current callback's reads.
 pub struct Context<'a> {
     windows: &'a mut WindowRegistry,
     viewport_size: [f32; 2],
     dpi: f64,
     frame_time: Instant,
-    window: Option<WindowInstanceId>,
+    window: Option<WindowId>,
+    window_factory: Option<&'a mut WindowFactory<'a>>,
+    window_error: Option<&'a mut Option<WindowError>>,
     services: ServicesStorage<'a>,
     env_reads: Option<&'a mut EnvReads>,
 }
 
 impl<'a> Context<'a> {
     pub fn new(windows: &'a mut WindowRegistry) -> Self {
+        Self::from_storage(windows, ServicesStorage::Owned(Services::default()))
+    }
+
+    pub(crate) fn with_services(
+        windows: &'a mut WindowRegistry,
+        services: &'a mut Services,
+    ) -> Self {
+        Self::from_storage(windows, ServicesStorage::Borrowed(services))
+    }
+
+    fn from_storage(windows: &'a mut WindowRegistry, services: ServicesStorage<'a>) -> Self {
         Self {
             windows,
             viewport_size: [0.0, 0.0],
             dpi: 1.0,
             frame_time: Instant::now(),
             window: None,
-            services: ServicesStorage::Owned(Services::default()),
+            window_factory: None,
+            window_error: None,
+            services,
             env_reads: None,
         }
     }
@@ -105,6 +121,47 @@ impl<'a> Context<'a> {
     /// Borrow the application's window registry for this operation.
     pub fn window_registry(&mut self) -> &mut WindowRegistry {
         self.windows
+    }
+
+    /// Lend window creation to this reconciliation pass, including nested declarations.
+    pub fn with_window_factory<'b>(&'b mut self, open: &'b mut WindowFactory<'b>) -> Context<'b> {
+        let mut scoped = self.reborrow();
+        scoped.window_factory = Some(open);
+        scoped
+    }
+
+    /// Infallible widget callbacks can declare multiple windows. Report the first failure
+    /// once reconciliation has committed the successful mounts.
+    pub(super) fn capture_window_errors(
+        &mut self,
+        reconcile: impl FnOnce(&mut Context<'_>),
+    ) -> Result<(), WindowError> {
+        let mut error = None;
+        {
+            let mut scoped = self.reborrow();
+            scoped.window_error = Some(&mut error);
+            reconcile(&mut scoped);
+        }
+        error.map_or(Ok(()), Err)
+    }
+
+    pub(super) fn open_window(&mut self, config: &WindowConfig) -> Option<Window> {
+        let result = match &mut self.window_factory {
+            Some(open) => open(config),
+            None => Err(WindowError::BackendError(
+                "window declaration requires a window factory".into(),
+            )),
+        };
+        match result {
+            Ok(window) => Some(window),
+            Err(error) => {
+                self.window_error
+                    .as_deref_mut()
+                    .expect("window creation during reconciliation")
+                    .get_or_insert(error);
+                None
+            }
+        }
     }
 
     /// Reborrow services for one node. Metrics are scoped; platform and resource changes persist.
@@ -127,6 +184,11 @@ impl<'a> Context<'a> {
             dpi: self.dpi,
             frame_time: self.frame_time,
             window: self.window,
+            window_factory: self
+                .window_factory
+                .as_mut()
+                .map(|open| &mut **open as &mut WindowFactory<'_>),
+            window_error: self.window_error.as_deref_mut(),
             services: ServicesStorage::Borrowed(self.services.get_mut()),
             env_reads: self.env_reads.as_deref_mut(),
         }
@@ -162,7 +224,10 @@ impl<'a> Context<'a> {
         }
     }
 
-    pub(crate) fn with_window(mut self, window: WindowInstanceId) -> Self {
+    pub(crate) fn with_window(mut self, window: WindowId) -> Self {
+        let native = self.windows.window(window).expect("mounted window");
+        self.dpi = native.dpi();
+        self.viewport_size = native.inner_size().map(|size| size as f32);
         self.window = Some(window);
         self
     }
@@ -183,7 +248,7 @@ impl<'a> Context<'a> {
     }
 
     /// Synchronize any changed cursor icon or IME state to the OS window.
-    /// For a declared Window, use [`crate::ui_tree::window::WindowInstance::sync_to_window`]
+    /// For a declared Window, use [`WindowRegistry::sync_to_window`]
     /// after a tree pass instead.
     pub fn sync_to_window(&mut self, window: &Window) {
         self.platform_mut().sync_to_window(window);
@@ -300,8 +365,8 @@ impl Context<'_> {
 mod tests {
     use super::*;
     use crate::arena::Arena;
-    use crate::ui_tree::window::WindowConfig;
     use matcha_window::headless_interface::HeadlessEventLoop;
+    use matcha_window::window::WindowConfig as OsWindowConfig;
 
     #[test]
     fn scopes_borrow_services_and_preserve_resource_updates_after_returning() {
@@ -335,8 +400,10 @@ mod tests {
     fn window_platform_state_survives_contexts_and_flushes_pending_changes() {
         let mut arena = Arena::<()>::new();
         let mut registry = WindowRegistry::default();
-        let a = registry.register(arena.reserve(), WindowConfig::default());
-        let b = registry.register(arena.reserve(), WindowConfig::default());
+        let event_loop = HeadlessEventLoop::new();
+        let config = OsWindowConfig::default();
+        let a = registry.register(arena.reserve(), Window::new(&config, &event_loop).unwrap());
+        let b = registry.register(arena.reserve(), Window::new(&config, &event_loop).unwrap());
         let area = ([10.0, 20.0], [30.0, 40.0]);
         {
             let mut parent = Context::new(&mut registry);
@@ -354,16 +421,8 @@ mod tests {
             assert!(window_a.is_ime_allowed());
         }
 
-        // Sync before native creation must preserve pending changes.
-        registry.get_mut(a).unwrap().sync_to_window();
         assert!(!registry.platform(a).pushed_ime_allowed);
-        registry
-            .create_pending(
-                &HeadlessEventLoop::new(),
-                &matcha_window::window::WindowConfig::default().surface_config,
-            )
-            .unwrap();
-        registry.get_mut(a).unwrap().sync_to_window();
+        registry.sync_to_window(a);
         assert_eq!(registry.platform(a).pushed_cursor_icon, CursorIcon::Text);
         assert!(registry.platform(a).pushed_ime_allowed);
         assert_eq!(registry.platform(a).pushed_ime_cursor_area, Some(area));

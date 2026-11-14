@@ -60,8 +60,7 @@ impl UiTree {
         let bubble = (0..path.len()).rev().map(|index| (index, false));
         for (index, is_preview) in preview.chain(bubble) {
             let (id, bounds, event) = &path[index];
-            let node = self.node_ref(*id).expect("live input node");
-            let mut scoped = node.scoped_context(ctx);
+            let mut scoped = ctx.unobserved();
             let widget = self
                 .node_ref_mut(*id)
                 .expect("input callbacks cannot remove nodes")
@@ -104,7 +103,7 @@ impl UiTree {
     /// explicit render-mask/clip policy will need to be shared with rendering when it is added.
     pub(super) fn hit_test(&self, id: UiId, point: Point, ctx: &mut Context) -> Option<UiId> {
         let node = self.node_ref(id)?;
-        let mut scoped = node.scoped_context(ctx);
+        let mut scoped = ctx.unobserved();
         let ctx = &mut scoped;
         if node.window.is_some() {
             return None;

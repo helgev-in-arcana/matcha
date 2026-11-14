@@ -19,17 +19,15 @@ impl UiTree {
     }
 
     pub(super) fn render_from(&mut self, root: UiId, ctx: &mut Context) -> Result<Scene, UiError> {
-        self.check_render_layout(root, ctx)?;
+        self.check_render_layout(root)?;
         let mut scene = Scene::default();
         scene.phases.push(Phase::default());
         self.render_node(root, Matrix4::identity(), None, false, ctx, &mut scene)?;
         Ok(scene)
     }
 
-    pub(super) fn check_render_layout(&self, id: UiId, ctx: &mut Context) -> Result<(), UiError> {
+    fn check_render_layout(&self, id: UiId) -> Result<(), UiError> {
         let node = self.node_ref(id).expect("live render tree");
-        let mut scoped = node.scoped_context(ctx);
-        let ctx = &mut scoped;
         if node.window.is_some() {
             return Ok(());
         }
@@ -40,7 +38,7 @@ impl UiTree {
             return Err(UiError::LayoutRequired);
         }
         for child in node.child_ids() {
-            self.check_render_layout(child, ctx)?;
+            self.check_render_layout(child)?;
         }
         Ok(())
     }
@@ -55,7 +53,7 @@ impl UiTree {
         scene: &mut Scene,
     ) -> Result<(), UiError> {
         let node = self.node_ref_mut(id).expect("live render tree");
-        let mut scoped = node.scoped_context(ctx);
+        let mut scoped = ctx.unobserved();
         let ctx = &mut scoped;
         if node.window.is_some() {
             return Ok(());

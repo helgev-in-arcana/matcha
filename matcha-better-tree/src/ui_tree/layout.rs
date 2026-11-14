@@ -22,7 +22,7 @@ impl UiTree {
         let Some(node) = self.node_ref_mut(id) else {
             return;
         };
-        let mut scoped = node.scoped_context(ctx);
+        let mut scoped = ctx.unobserved();
         let ctx = &mut scoped;
         if node
             .placement
@@ -57,7 +57,7 @@ impl UiTree {
         ctx: &mut Context,
     ) -> Bounds {
         let node = self.node_ref_mut(id).expect("live measured node");
-        let mut scoped = node.scoped_context(ctx);
+        let mut scoped = ctx.unobserved();
         let ctx = &mut scoped;
 
         if let Some(&cached_bounds) = node.measure_cache.get(&constraints) {

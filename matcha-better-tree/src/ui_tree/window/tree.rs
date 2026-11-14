@@ -4,51 +4,46 @@ use matcha_window::window::WindowId;
 use nalgebra::Matrix4;
 use render_interface::Scene;
 
-use super::{WindowBinding, WindowConfig, WindowInstanceId};
+use super::{Window, WindowBinding};
 use crate::arena::Id as UiId;
 use crate::metrics::{Bounds, Position};
 use crate::ui_tree::context::Context;
 use crate::ui_tree::widget::{InputResult, UiError, UpdateResult, View};
 use crate::ui_tree::{DeclContext, UiTree};
 
-impl DeclContext<'_, '_, ()> {
-    /// Register identity and concrete dispatch together; callers cannot install mismatched hooks.
-    pub(crate) fn register_window<V: View>(&mut self, config: WindowConfig) -> WindowInstanceId {
-        assert!(
-            self.declaration.window.is_none(),
-            "one native window registration per declaration node"
-        );
-        let id = self
-            .context
-            .window_registry()
-            .register(self.declaration.current, config);
-        let binding = WindowBinding::new::<V>(id);
-        self.declaration.window = Some(binding);
-        id
+impl<'a> DeclContext<'a, '_, ()> {
+    /// Mount with the current declaration, or apply its controlled settings to the live window.
+    pub(super) fn declare_window<V: View>(&mut self, view: &'a Window<V>) {
+        self.declaration.window = Some(WindowBinding::new::<V>());
+        let node = self.declaration.current;
+        let registry = self.context.window_registry();
+        if let Some(window) = registry.window_for_node(node) {
+            view.config.apply_updates(window);
+            window.request_redraw();
+        } else {
+            let Some(window) = self.context.open_window(&view.config) else {
+                return;
+            };
+            window.request_redraw();
+            self.context.window_registry().register(node, window);
+        }
+        self.child(&view.view);
     }
 }
 
 impl UiTree {
-    fn window_route(&self, id: WindowId, ctx: &mut Context) -> Option<(UiId, WindowBinding)> {
-        let (node_id, instance_id) = ctx.window_registry().route(id)?;
-        let node = self.node_ref(node_id)?;
-        let binding = node.window.expect("registered window node has a binding");
-        assert_eq!(binding.id(), instance_id, "registered window node matches");
-        Some((node_id, binding))
-    }
-
     fn window_content_context<'a>(
         &self,
         id: WindowId,
         ctx: &'a mut Context<'_>,
     ) -> Option<(UiId, Context<'a>)> {
-        let (node_id, _) = self.window_route(id, ctx)?;
+        let node_id = ctx.window_registry().node(id)?;
         let node = self.node_ref(node_id).expect("live window");
         let mut children = node.child_ids();
         let (Some(content), None) = (children.next(), children.next()) else {
             unreachable!("a Window declares exactly one content child");
         };
-        Some((content, node.scoped_context(ctx)))
+        Some((content, ctx.unobserved().with_window(id)))
     }
 
     /// Deliver a native window event. Unknown/deleted windows are ignored.
@@ -59,21 +54,29 @@ impl UiTree {
         event: &WindowEvent,
         ctx: &mut Context,
     ) -> Option<UpdateResult> {
-        let (node_id, binding) = self.window_route(id, ctx)?;
-        let widget = self
-            .node_ref_mut(node_id)?
-            .widget
-            .as_deref_mut()
-            .expect("live widget");
-        let flags = binding.dispatch(widget.as_widget_mut(), event);
+        let node_id = ctx.window_registry().node(id)?;
+        let node = self.node_ref(node_id).expect("live window");
+        let binding = node.window.expect("registered window boundary");
+        let widget = node.widget.as_deref().expect("live widget");
+        let flags = (binding.window_event)(widget.as_widget(), event);
         if !flags.is_empty() {
             self.invalidate_caches_from(node_id, flags);
             ctx.window_registry()
-                .get_mut(binding.id())
+                .window(id)
                 .expect("live window is registered")
                 .request_redraw();
         }
         Some(flags)
+    }
+
+    /// Release the destroyed OS window. The next declaration supplies fresh creation settings.
+    pub(crate) fn window_destroyed(&mut self, id: WindowId, ctx: &mut Context) -> bool {
+        let Some(node_id) = ctx.window_registry().node(id) else {
+            return false;
+        };
+        ctx.window_registry().unregister(id);
+        self.invalidate_caches_from(node_id, UpdateResult::LAYOUT | UpdateResult::RENDER);
+        true
     }
 
     /// Explicit environment invalidation, e.g. when a target/device change requires new drawing.
@@ -85,12 +88,12 @@ impl UiTree {
         flags: UpdateResult,
         ctx: &mut Context,
     ) -> bool {
-        let Some((node_id, binding)) = self.window_route(id, ctx) else {
+        let Some(node_id) = ctx.window_registry().node(id) else {
             return false;
         };
         self.invalidate_caches_from(node_id, flags);
         ctx.window_registry()
-            .get_mut(binding.id())
+            .window(id)
             .expect("live window is registered")
             .request_redraw();
         true

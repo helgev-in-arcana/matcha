@@ -1,7 +1,7 @@
 use super::*;
 use crate::ui_tree::env_reads::{EnvReads, ReadPhase};
 use crate::ui_tree::window::{Window, WindowRegistry};
-use std::time::Instant;
+use web_time::Instant;
 
 const PHASES: [ReadPhase; 5] = [
     ReadPhase::Build,
@@ -384,7 +384,10 @@ fn reordering_keeps_node_observations_and_replacement_starts_a_new_record() {
 fn window_setup_and_tree_bookkeeping_do_not_add_widget_reads() {
     use matcha_window::headless_interface::HeadlessEventLoop;
     let mut registry = WindowRegistry::default();
-    let mut ctx = Context::new(&mut registry);
+    let event_loop = HeadlessEventLoop::new();
+    let mut open = super::windows::headless_factory(&event_loop);
+    let mut root_ctx = Context::new(&mut registry);
+    let mut ctx = root_ctx.with_window_factory(&mut open);
     let view = Window::new(ContainerView {
         child: Window::new(ReadView::new(1, [EnvReads::DPI; 5], vec![])),
         child_position: position(Matrix4::identity()),
@@ -393,25 +396,13 @@ fn window_setup_and_tree_bookkeeping_do_not_add_widget_reads() {
     let ((), outer_reads) = ctx.observe_env_reads(|ctx| {
         tree.update(&view, ctx);
         tree.update(&view, ctx);
-        ctx.window_registry()
-            .create_pending(
-                &HeadlessEventLoop::new(),
-                &matcha_window::window::WindowConfig::default().surface_config,
-            )
-            .unwrap();
         let outer = tree.root.unwrap();
         let container = child_at(&tree, outer, 0);
         let inner = child_at(&tree, container, 0);
         for node in [outer, inner] {
-            let id = tree.node_ref(node).unwrap().window.unwrap().id();
-            let native = ctx
-                .window_registry()
-                .get_mut(id)
-                .unwrap()
-                .window_id()
-                .unwrap();
-            tree.layout_window(native, ctx);
-            tree.render_window(native, ctx).unwrap();
+            let id = super::windows::native_id(&tree, node, ctx);
+            tree.layout_window(id, ctx);
+            tree.render_window(id, ctx).unwrap();
         }
     });
     let outer = tree.root.unwrap();

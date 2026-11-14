@@ -2,6 +2,7 @@
 use std::any::{Any, TypeId};
 
 use matcha_window::event::device_event::DeviceEvent;
+use matcha_window::window::WindowError;
 use nalgebra::{Matrix4, Vector4};
 
 use self::context::Context;
@@ -56,12 +57,12 @@ impl<V: View> AnyView for V {
     ) -> UiNode {
         let label = View::label(self).map(str::to_owned);
         let key = self.ui_key();
-        let mut declaration = Declaration::new(id, old_children, None);
+        let mut declaration = Declaration::new(id, old_children);
         let ((widget, window), reads) = context.observe_env_reads(|context| {
             let widget = self.build(&mut declaration.context(context));
             let window = declaration.window;
             let mut children = Vec::with_capacity(declaration.queued.len());
-            declaration.finish(tree, &widget, context, &mut children);
+            declaration.finish(tree, context, &mut children);
             let mounted: Box<dyn AnyWidget> = Box::new(Mounted { widget, children });
             (mounted, window)
         });
@@ -88,9 +89,8 @@ struct Mounted<W: Widget> {
     children: Vec<ChildLink<<W::V as View>::ChildData>>,
 }
 
-trait AnyWidget {
+trait AnyWidget: utils::MaybeSendSync {
     fn as_widget(&self) -> &dyn Any;
-    fn as_widget_mut(&mut self) -> &mut dyn Any;
     fn child_count(&self) -> usize;
     fn child_id(&self, index: usize) -> UiId;
     fn try_update(
@@ -98,7 +98,6 @@ trait AnyWidget {
         view: &dyn AnyView,
         tree: &mut UiTree,
         id: UiId,
-        window: Option<window::WindowBinding>,
         context: &mut Context,
     ) -> Option<(UpdateResult, EnvReads)>;
     fn preview_input(
@@ -126,10 +125,6 @@ impl<W: Widget> AnyWidget for Mounted<W> {
         &self.widget
     }
 
-    fn as_widget_mut(&mut self) -> &mut dyn Any {
-        &mut self.widget
-    }
-
     fn child_count(&self) -> usize {
         self.children.len()
     }
@@ -143,16 +138,14 @@ impl<W: Widget> AnyWidget for Mounted<W> {
         view: &dyn AnyView,
         tree: &mut UiTree,
         id: UiId,
-        window: Option<window::WindowBinding>,
         context: &mut Context,
     ) -> Option<(UpdateResult, EnvReads)> {
         let view = (view as &dyn Any).downcast_ref::<W::V>()?;
         let old_children = tree.child_candidates(self);
-        let mut declaration = Declaration::new(id, old_children, window);
-        let mut scoped = window::scoped_context(window, &self.widget, context);
-        let (mut result, reads) =
-            scoped.observe_env_reads(|ctx| self.widget.update(view, &mut declaration.context(ctx)));
-        if declaration.finish(tree, &self.widget, &mut scoped, &mut self.children) {
+        let mut declaration = Declaration::new(id, old_children);
+        let (mut result, reads) = context
+            .observe_env_reads(|ctx| self.widget.update(view, &mut declaration.context(ctx)));
+        if declaration.finish(tree, context, &mut self.children) {
             result |= UpdateResult::LAYOUT;
         }
         Some((result, reads))
@@ -299,14 +292,6 @@ impl UiNode {
         }
     }
 
-    fn scoped_context<'a>(&self, parent: &'a mut Context<'_>) -> Context<'a> {
-        crate::ui_tree::window::scoped_context(
-            self.window,
-            self.widget.as_deref().expect("live widget").as_widget(),
-            parent,
-        )
-    }
-
     fn child_ids(&self) -> impl ExactSizeIterator<Item = UiId> + DoubleEndedIterator {
         self.widget.as_deref().expect("live widget").child_ids()
     }
@@ -324,14 +309,27 @@ impl UiTree {
     /// Window declarations require a registry supplied through Context. Use the
     /// same registry for this tree's lifetime; a registry serves one application tree.
     pub fn update<V: View>(&mut self, view: &V, context: &mut Context<'_>) {
-        if let Some(id) = self.root {
-            self.update_node(id, view, context);
-        } else {
-            // Clear storage explicitly before starting a fresh tree, including abandoned reservations.
-            self.nodes.clear();
-            let id = self.build_new(None, view, context);
-            self.root = Some(id);
+        if let Err(error) = self.try_update(view, context) {
+            log::error!("Opening declared window: {error}");
         }
+    }
+
+    /// Reconcile all declarations and report the first window that failed to open.
+    /// Successfully mounted siblings are retained; a subsequent update retries
+    /// any failed window using the config supplied in that update.
+    pub fn try_update<V: View>(
+        &mut self,
+        view: &V,
+        context: &mut Context<'_>,
+    ) -> Result<(), WindowError> {
+        context.capture_window_errors(|context| {
+            if let Some(id) = self.root {
+                self.update_node(id, view, context);
+            } else {
+                self.nodes.clear();
+                self.root = Some(self.build_new(None, view, context));
+            }
+        })
     }
 
     /// Remove nodes and unregister their windows using borrowed application services.
@@ -404,7 +402,7 @@ impl UiTree {
         let node = self.node_ref_mut(id).expect("live update node");
         let window = node.window;
         let mut widget = node.widget.take().expect("widget restored after callbacks");
-        if let Some((result, reads)) = widget.try_update(view, self, id, window, context) {
+        if let Some((result, reads)) = widget.try_update(view, self, id, context) {
             let node = self.node_ref_mut(id).expect("live update node");
             node.env_reads.record(ReadPhase::Update, reads);
             if node.label.as_deref() != view.label() {
@@ -416,8 +414,8 @@ impl UiTree {
             // A native window's content cannot affect its parent's size.
             result.contains(UpdateResult::LAYOUT) && window.is_none()
         } else {
-            if let Some(window) = window {
-                window.unregister(context);
+            if window.is_some() {
+                context.window_registry().remove_node(id);
             }
             // A replacement takes over child identities and declares its own typed properties.
             let old_children = self.child_candidates(widget.as_ref());
@@ -439,8 +437,8 @@ impl UiTree {
         for child in node.child_ids().rev() {
             self.remove_reverse_scan_order(child, context);
         }
-        if let Some(window) = node.window {
-            window.unregister(context);
+        if node.window.is_some() {
+            context.window_registry().remove_node(id);
         }
     }
 
@@ -499,16 +497,12 @@ struct ChildLink<P> {
 }
 
 impl<'a, P> Declaration<'a, P> {
-    fn new(
-        current: UiId,
-        old_children: Vec<(UiKey, UiId)>,
-        window: Option<window::WindowBinding>,
-    ) -> Self {
+    fn new(current: UiId, old_children: Vec<(UiKey, UiId)>) -> Self {
         Self {
             current,
             old_children,
             queued: Vec::new(),
-            window,
+            window: None,
         }
     }
 
@@ -521,17 +515,17 @@ impl<'a, P> Declaration<'a, P> {
 
     /// Reconcile into the parent's existing link buffer. The result includes both link changes
     /// and layout changes reported by retained descendants.
-    fn finish(
-        self,
-        tree: &mut UiTree,
-        widget: &dyn Any,
-        context: &mut Context,
-        links: &mut Vec<ChildLink<P>>,
-    ) -> bool
+    fn finish(self, tree: &mut UiTree, context: &mut Context, links: &mut Vec<ChildLink<P>>) -> bool
     where
         P: PartialEq,
     {
-        let mut scoped = window::scoped_context(self.window, widget, context);
+        let mut scoped = context.unobserved();
+        if self.window.is_some()
+            && let Some(window) = scoped.window_registry().window_for_node(self.current)
+        {
+            let id = window.id();
+            scoped = scoped.with_window(id);
+        }
         for (_, id) in self.old_children {
             tree.remove_reverse_scan_order(id, &mut scoped);
         }
@@ -649,7 +643,7 @@ impl Child<'_> {
         let node = self.tree.node_ref(self.id).expect("live child");
         let placement = node.placement?;
         let point = placement.local_point(point)?;
-        let mut scoped = node.scoped_context(ctx);
+        let mut scoped = ctx.unobserved();
         Some(node.widget.as_ref().expect("live widget").is_inside(
             placement.bounds,
             point,

@@ -2,7 +2,7 @@ use super::*;
 use crate::ui_tree::window::WindowRegistry;
 
 /// Each declaration creates a fresh value. Equal settings should preserve warmed caches.
-trait Allocation: PartialEq + 'static {
+trait Allocation: PartialEq + utils::MaybeSendSync + 'static {
     fn from_label(label: &str) -> Self;
     fn width(&self, measured: f32) -> f32;
 }

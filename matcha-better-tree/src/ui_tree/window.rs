@@ -1,12 +1,13 @@
 //! Windows are ordinary declarations in the application's single UI tree.
 //!
 //! The registry owns native window instances and records their arena locations and
-//! native event routes. WindowWidget owns event metrics; UiTree invalidates caches.
+//! native event routes. Window scopes read metrics from the registered OS window.
 //! UiTree's window entry points scope Context to that window; parent rendering and
 //! input stop at native window boundaries. App lifecycle scheduling is still separate.
 
 use std::any::Any;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use matcha_window::event::device_event::DeviceEvent;
 use matcha_window::event::window_event::WindowEvent;
@@ -19,70 +20,25 @@ use crate::ui_tree::{Children, DeclContext};
 
 mod registry;
 mod tree;
-pub use registry::{WindowInstance, WindowInstanceId, WindowRegistry};
+pub use registry::WindowRegistry;
 
-/// Immutable registration handle. Construction fixes both identity and the concrete widget type.
-/// Only this boundary knows how to downcast; tree traversal uses its operations.
+/// Identifies a window boundary and dispatches its widget's events. The boundary
+/// also excludes its content from parent passes while the OS window is absent.
 #[derive(Clone, Copy)]
 pub(crate) struct WindowBinding {
-    id: WindowInstanceId,
-    state: fn(&dyn Any) -> WindowState,
-    event: fn(&mut dyn Any, &WindowEvent) -> UpdateResult,
-}
-
-struct WindowState {
-    dpi: Option<f64>,
-    viewport: Option<[f32; 2]>,
-}
-
-pub(crate) fn scoped_context<'a>(
-    binding: Option<WindowBinding>,
-    widget: &dyn Any,
-    parent: &'a mut Context<'_>,
-) -> Context<'a> {
-    match binding {
-        Some(binding) => binding.scoped_context(widget, parent),
-        None => parent.unobserved(),
-    }
+    window_event: fn(&dyn Any, &WindowEvent) -> UpdateResult,
 }
 
 impl WindowBinding {
-    pub(crate) fn new<V: View>(id: WindowInstanceId) -> Self {
+    fn new<V: View>() -> Self {
         Self {
-            id,
-            state: |widget| {
-                let widget = widget
-                    .downcast_ref::<WindowWidget<V>>()
-                    .expect("registered window widget type matches");
-                WindowState {
-                    dpi: widget.dpi,
-                    viewport: widget.viewport,
-                }
-            },
-            event: |widget, event| {
+            window_event: |widget, event| {
                 widget
-                    .downcast_mut::<WindowWidget<V>>()
+                    .downcast_ref::<WindowWidget<V>>()
                     .expect("registered window widget type matches")
                     .handle_window_event(event)
             },
         }
-    }
-
-    pub(crate) fn id(self) -> WindowInstanceId {
-        self.id
-    }
-
-    fn scoped_context<'a>(self, widget: &dyn Any, parent: &'a mut Context<'_>) -> Context<'a> {
-        let state = (self.state)(widget);
-        WindowInstance::scoped_context(self.id, state.dpi, state.viewport, parent)
-    }
-
-    pub(crate) fn dispatch(self, widget: &mut dyn Any, event: &WindowEvent) -> UpdateResult {
-        (self.event)(widget, event)
-    }
-
-    pub(crate) fn unregister(self, context: &mut Context<'_>) {
-        context.window_registry().unregister(self.id);
     }
 }
 /// Declares an independent native window, with content in the same UI tree.
@@ -90,8 +46,14 @@ pub struct Window<V: View> {
     label: Option<String>,
     key: Option<u64>,
     config: WindowConfig,
+    on_close_requested: Option<Arc<CloseHandler>>,
     view: V,
 }
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+type CloseHandler = dyn Fn() + Send + Sync;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+type CloseHandler = dyn Fn();
 
 impl<V: View> Window<V> {
     pub fn new(view: V) -> Self {
@@ -99,6 +61,7 @@ impl<V: View> Window<V> {
             label: None,
             key: None,
             config: WindowConfig::default(),
+            on_close_requested: None,
             view,
         }
     }
@@ -117,6 +80,16 @@ impl<V: View> Window<V> {
         self.config = config;
         self
     }
+
+    /// Notify the model when the user asks to close this window. The native
+    /// window stays open until the model omits its declaration.
+    pub fn on_close_requested(
+        mut self,
+        callback: impl Fn() + utils::MaybeSendSync + 'static,
+    ) -> Self {
+        self.on_close_requested = Some(Arc::new(callback));
+        self
+    }
 }
 
 impl<V: View> View for Window<V> {
@@ -131,46 +104,31 @@ impl<V: View> View for Window<V> {
     }
 
     fn build<'a>(&'a self, ctx: &mut DeclContext<'a, '_>) -> impl Widget<V = Self> {
-        ctx.child(&self.view);
-        let id = ctx.register_window::<V>(self.config.clone());
+        ctx.declare_window(self);
         WindowWidget {
-            id,
+            on_close_requested: self.on_close_requested.clone(),
             view_type: PhantomData,
-            dpi: None,
-            viewport: None,
         }
     }
 }
 
-/// Owns event metrics. The registry owns OsWindow and UiTree owns content and caches.
+/// Handles events for a window declaration. The registry owns the OS window.
 pub struct WindowWidget<V: View> {
-    id: WindowInstanceId,
-    view_type: PhantomData<V>,
-    dpi: Option<f64>,
-    viewport: Option<[f32; 2]>,
+    on_close_requested: Option<Arc<CloseHandler>>,
+    view_type: PhantomData<fn() -> V>,
 }
 
 impl<V: View> WindowWidget<V> {
-    fn handle_window_event(&mut self, event: &WindowEvent) -> UpdateResult {
+    fn handle_window_event(&self, event: &WindowEvent) -> UpdateResult {
         match event {
-            WindowEvent::ScaleFactorChanged { scale_factor } => {
-                let changed = self.dpi != Some(*scale_factor);
-                self.dpi = Some(*scale_factor);
-                if changed {
-                    UpdateResult::LAYOUT | UpdateResult::RENDER
-                } else {
-                    UpdateResult::empty()
+            WindowEvent::CloseRequested => {
+                if let Some(callback) = &self.on_close_requested {
+                    callback();
                 }
+                UpdateResult::empty()
             }
-            WindowEvent::Resized { inner_size, .. } => {
-                // Backend state may already reflect this event; always invalidate the first notice.
-                let changed = self.viewport != Some(*inner_size);
-                self.viewport = Some(*inner_size);
-                if changed {
-                    UpdateResult::LAYOUT | UpdateResult::RENDER
-                } else {
-                    UpdateResult::empty()
-                }
+            WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Resized { .. } => {
+                UpdateResult::LAYOUT | UpdateResult::RENDER
             }
             WindowEvent::Theme(_) => UpdateResult::RENDER,
             _ => UpdateResult::empty(),
@@ -182,15 +140,8 @@ impl<V: View> Widget for WindowWidget<V> {
     type V = Window<V>;
 
     fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a, '_>) -> UpdateResult {
-        ctx.child(&view.view);
-        let registry = ctx.context().window_registry();
-        let instance = registry
-            .get_mut(self.id)
-            .expect("live Window widget is registered");
-        instance.update_config(view.config.clone());
-        // Descendant drawing changes are not yet summarized by UiTree::update.
-        // Schedule a window pass even when the window's own declaration is unchanged.
-        instance.request_redraw();
+        self.on_close_requested.clone_from(&view.on_close_requested);
+        ctx.declare_window(view);
         UpdateResult::empty()
     }
 
@@ -221,7 +172,6 @@ impl<V: View> Widget for WindowWidget<V> {
 pub struct WindowConfig {
     pub title: String,
     pub inner_size: Option<Apply<Size>>,
-    // Surface configuration is supplied by the application when creating pending windows.
     pub min_inner_size: Option<Apply<Size>>,
     pub max_inner_size: Option<Apply<Size>>,
     pub resizable: Apply<bool>,
@@ -232,14 +182,12 @@ pub struct WindowConfig {
     pub fullscreen: Option<Apply<Fullscreen>>,
 
     pub visible: Apply<bool>,
-    /// Currently creation-only: matcha-window has no transparency setter yet.
-    pub transparent: Apply<bool>,
+    pub transparent: bool,
     pub decorations: Apply<bool>,
     pub preferred_theme: Option<Apply<Theme>>,
 
     pub enabled_buttons: Apply<WindowButtons>,
-    /// Currently creation-only: matcha-window has no activation setter yet.
-    pub active: Apply<bool>,
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -280,11 +228,11 @@ impl Default for WindowConfig {
             maximized: Apply::Init(false),
             fullscreen: None,
             visible: Apply::Always(true),
-            transparent: Apply::Init(false),
+            transparent: false,
             decorations: Apply::Always(true),
             preferred_theme: None,
             enabled_buttons: Apply::Always(WindowButtons::default()),
-            active: Apply::Init(true),
+            active: true,
         }
     }
 }
@@ -315,11 +263,11 @@ impl WindowConfig {
             maximized: self.maximized.into_value(),
             fullscreen: self.fullscreen.map(Apply::into_value),
             visible: self.visible.into_value(),
-            transparent: self.transparent.into_value(),
+            transparent: self.transparent,
             decorations: self.decorations.into_value(),
             preferred_theme: self.preferred_theme.map(Apply::into_value),
             resize_increments: self.resize_increments.map(Apply::into_value),
-            active: self.active.into_value(),
+            active: self.active,
         }
     }
 
@@ -362,8 +310,6 @@ impl WindowConfig {
         if let Some(value) = self.enabled_buttons.update_value() {
             window.set_enabled_buttons(value);
         }
-        // TODO(matcha-window): transparent/active updates need backend setters.
-        // Both fields are still passed through at native creation time.
     }
 }
 
