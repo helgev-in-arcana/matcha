@@ -58,17 +58,9 @@ fn window_content_is_reconciled_in_the_same_arena() {
     );
     assert_eq!(child_at(&tree, root, 0), child);
     assert_eq!(registry.node(id), Some(root));
-    let _ = tree
-        .node_ref_mut(child)
-        .unwrap()
-        .widget
-        .as_mut()
-        .unwrap()
-        .input(
-            bounds(),
-            &mouse_event(5.0, 5.0),
-            &mut Context::new(&mut registry),
-        );
+    let mut ctx = Context::new(&mut registry);
+    assert!(tree.layout_window(id, &mut ctx));
+    let _ = tree.input_window(id, &mouse_event(5.0, 5.0), &mut ctx);
     assert_eq!(updated.lock().unwrap().events.len(), 1);
 }
 
@@ -129,6 +121,8 @@ fn retrying_a_failed_mount_uses_the_current_declaration_and_retains_live_windows
     let [outer]: [_; 1] = event_loop.created_window_ids().try_into().unwrap();
     assert_eq!(registry.ids(), [outer]);
     assert_eq!(registry.node(outer), tree.root);
+    let inner_node = child_at(&tree, tree.root.unwrap(), 0);
+    assert!(tree.node_ref(inner_node).unwrap().body().is_window());
 
     let mut open = headless_factory(&event_loop);
     tree.try_update(
@@ -251,7 +245,7 @@ fn replacing_a_window_at_the_same_node_unregisters_only_the_old_id() {
     assert_eq!(registry.node(new), Some(root));
     update(&mut tree, &mut registry, &probe());
     assert!(registry.ids().is_empty());
-    assert!(tree.node_ref(root).unwrap().window.is_none());
+    assert!(!tree.node_ref(root).unwrap().body().is_window());
 }
 
 struct WindowList(Vec<Window<ProbeView>>);
@@ -423,7 +417,7 @@ pub(super) fn native_id(
     node: UiId,
     ctx: &mut Context,
 ) -> matcha_window::window::WindowId {
-    assert!(tree.node_ref(node).unwrap().window.is_some());
+    assert!(tree.node_ref(node).unwrap().body().is_window());
     ctx.window_registry().window_for_node(node).unwrap().id()
 }
 

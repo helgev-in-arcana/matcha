@@ -4,29 +4,30 @@ use matcha_window::window::WindowId;
 use nalgebra::Matrix4;
 use render_interface::Scene;
 
-use super::{Window, WindowBinding};
+use super::Window;
 use crate::arena::Id as UiId;
 use crate::metrics::{Bounds, Position};
 use crate::ui_tree::context::Context;
 use crate::ui_tree::widget::{InputResult, UiError, UpdateResult, View};
-use crate::ui_tree::{DeclContext, UiTree};
+use crate::ui_tree::{DeclContext, NodeBody, UiTree};
 
 impl<'a> DeclContext<'a, '_, ()> {
     /// Mount with the current declaration, or apply its controlled settings to the live window.
     pub(super) fn declare_window<V: View>(&mut self, view: &'a Window<V>) {
-        self.declaration.window = Some(WindowBinding::new::<V>());
         let node = self.declaration.current;
         let registry = self.context.window_registry();
-        if let Some(window) = registry.window_for_node(node) {
+        let id = if let Some(window) = registry.window_for_node(node) {
             view.config.apply_updates(window);
             window.request_redraw();
+            window.id()
         } else {
             let Some(window) = self.context.open_window(&view.config) else {
                 return;
             };
             window.request_redraw();
-            self.context.window_registry().register(node, window);
-        }
+            self.context.window_registry().register(node, window)
+        };
+        self.declaration.child_window = Some(id);
         self.child(&view.view);
     }
 }
@@ -56,9 +57,10 @@ impl UiTree {
     ) -> Option<UpdateResult> {
         let node_id = ctx.window_registry().node(id)?;
         let node = self.node_ref(node_id).expect("live window");
-        let binding = node.window.expect("registered window boundary");
-        let widget = node.widget.as_deref().expect("live widget");
-        let flags = (binding.window_event)(widget.as_widget(), event);
+        let NodeBody::Window(window) = node.body() else {
+            unreachable!("a registered OS window belongs to a mounted window node");
+        };
+        let flags = window.window_event(event);
         if !flags.is_empty() {
             self.invalidate_caches_from(node_id, flags);
             ctx.window_registry()

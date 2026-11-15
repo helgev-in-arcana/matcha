@@ -64,9 +64,10 @@ impl UiTree {
             let widget = self
                 .node_ref_mut(*id)
                 .expect("input callbacks cannot remove nodes")
-                .widget
+                .body
                 .as_mut()
-                .expect("input callbacks cannot remove widgets from the tree");
+                .expect("input callbacks cannot remove widgets from the tree")
+                .as_widget_mut();
             let response = if is_preview {
                 widget.preview_input(*bounds, event, &mut scoped)
             } else {
@@ -105,9 +106,9 @@ impl UiTree {
         let node = self.node_ref(id)?;
         let mut scoped = ctx.unobserved();
         let ctx = &mut scoped;
-        if node.window.is_some() {
+        let NodeBody::Widget(widget) = node.body() else {
             return None;
-        }
+        };
         let placement = node.placement?;
         let point = placement.local_point(point)?;
 
@@ -116,9 +117,6 @@ impl UiTree {
                 return Some(target);
             }
         }
-        node.widget
-            .as_ref()?
-            .is_inside(placement.bounds, point, ctx)
-            .then_some(id)
+        widget.is_inside(placement.bounds, point, ctx).then_some(id)
     }
 }

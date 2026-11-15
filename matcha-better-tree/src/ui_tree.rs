@@ -2,7 +2,8 @@
 use std::any::{Any, TypeId};
 
 use matcha_window::event::device_event::DeviceEvent;
-use matcha_window::window::WindowError;
+use matcha_window::event::window_event::WindowEvent;
+use matcha_window::window::{WindowError, WindowId};
 use nalgebra::{Matrix4, Vector4};
 
 use self::context::Context;
@@ -58,13 +59,11 @@ impl<V: View> AnyView for V {
         let label = View::label(self).map(str::to_owned);
         let key = self.ui_key();
         let mut declaration = Declaration::new(id, old_children);
-        let ((widget, window), reads) = context.observe_env_reads(|context| {
+        let (body, reads) = context.observe_env_reads(|context| {
             let widget = self.build(&mut declaration.context(context));
-            let window = declaration.window;
             let mut children = Vec::with_capacity(declaration.queued.len());
             declaration.finish(tree, context, &mut children);
-            let mounted: Box<dyn AnyWidget> = Box::new(Mounted { widget, children });
-            (mounted, window)
+            Mounted { widget, children }.into_body()
         });
         let mut env_reads = NodeEnvReads::default();
         env_reads.record(ReadPhase::Build, reads);
@@ -77,8 +76,7 @@ impl<V: View> AnyView for V {
             layout_cache: Cache::default(),
             render_cache: Cache::default(),
             env_reads,
-            window,
-            widget: Some(widget),
+            body: Some(body),
         }
     }
 }
@@ -89,8 +87,56 @@ struct Mounted<W: Widget> {
     children: Vec<ChildLink<<W::V as View>::ChildData>>,
 }
 
+impl<W: Widget> Mounted<W> {
+    fn into_body(self) -> NodeBody {
+        (W::mount_kind().wrap)(self)
+    }
+}
+
+/// Selects how the framework stores a widget together with its reconciled children.
+/// Widget implementations inherit ordinary widget storage by default.
+pub struct MountKind<W: Widget> {
+    wrap: fn(Mounted<W>) -> NodeBody,
+}
+
+impl<W: Widget> MountKind<W> {
+    fn widget() -> Self {
+        Self {
+            wrap: |mounted| NodeBody::Widget(Box::new(mounted)),
+        }
+    }
+}
+
+enum NodeBody {
+    Widget(Box<dyn AnyWidget>),
+    Window(Box<dyn AnyWindow>),
+}
+
+impl NodeBody {
+    fn as_widget(&self) -> &dyn AnyWidget {
+        match self {
+            Self::Widget(widget) => widget.as_ref(),
+            Self::Window(window) => window.as_ref(),
+        }
+    }
+
+    fn as_widget_mut(&mut self) -> &mut dyn AnyWidget {
+        match self {
+            Self::Widget(widget) => widget.as_mut(),
+            Self::Window(window) => window.as_mut(),
+        }
+    }
+
+    fn is_window(&self) -> bool {
+        matches!(self, Self::Window(_))
+    }
+}
+
+trait AnyWindow: AnyWidget {
+    fn window_event(&self, event: &WindowEvent) -> UpdateResult;
+}
+
 trait AnyWidget: utils::MaybeSendSync {
-    fn as_widget(&self) -> &dyn Any;
     fn child_count(&self) -> usize;
     fn child_id(&self, index: usize) -> UiId;
     fn try_update(
@@ -121,10 +167,6 @@ impl dyn AnyWidget + '_ {
 }
 
 impl<W: Widget> AnyWidget for Mounted<W> {
-    fn as_widget(&self) -> &dyn Any {
-        &self.widget
-    }
-
     fn child_count(&self) -> usize {
         self.children.len()
     }
@@ -238,11 +280,8 @@ struct UiNode {
     render_cache: Cache<(), Draw>,
     env_reads: NodeEnvReads,
 
-    // Internal window hooks never become part of the public Widget trait.
-    window: Option<crate::ui_tree::window::WindowBinding>,
-
     // Taken during recursive callbacks to borrow the child links independently of the arena.
-    widget: Option<Box<dyn AnyWidget>>,
+    body: Option<NodeBody>,
 }
 
 #[derive(Clone, Copy)]
@@ -282,6 +321,10 @@ impl Placement {
 }
 
 impl UiNode {
+    fn body(&self) -> &NodeBody {
+        self.body.as_ref().expect("live node has a mounted body")
+    }
+
     fn invalidate_caches(&mut self, flags: UpdateResult) {
         if flags.contains(UpdateResult::LAYOUT) {
             self.measure_cache.invalidate();
@@ -293,7 +336,7 @@ impl UiNode {
     }
 
     fn child_ids(&self) -> impl ExactSizeIterator<Item = UiId> + DoubleEndedIterator {
-        self.widget.as_deref().expect("live widget").child_ids()
+        self.body().as_widget().child_ids()
     }
 }
 
@@ -365,7 +408,7 @@ impl UiTree {
                 .child_ids()
                 .nth(index)
                 .expect("live child");
-            if self.node_ref(child).expect("live child").window.is_none() {
+            if !self.node_ref(child).expect("live child").body().is_window() {
                 self.invalidate_caches_from(child, flags);
             }
         }
@@ -400,28 +443,28 @@ impl UiTree {
     // Return whether this subtree changed so callers invalidate ancestors on the way back up.
     fn update_node(&mut self, id: UiId, view: &dyn AnyView, context: &mut Context<'_>) -> bool {
         let node = self.node_ref_mut(id).expect("live update node");
-        let window = node.window;
-        let mut widget = node.widget.take().expect("widget restored after callbacks");
-        if let Some((result, reads)) = widget.try_update(view, self, id, context) {
+        let mut body = node.body.take().expect("body restored after callbacks");
+        let was_window = body.is_window();
+        if let Some((result, reads)) = body.as_widget_mut().try_update(view, self, id, context) {
             let node = self.node_ref_mut(id).expect("live update node");
             node.env_reads.record(ReadPhase::Update, reads);
             if node.label.as_deref() != view.label() {
                 node.label = view.label().map(str::to_owned);
             }
             node.key = view.ui_key();
-            node.widget = Some(widget);
+            node.body = Some(body);
             node.invalidate_caches(result);
             // A native window's content cannot affect its parent's size.
-            result.contains(UpdateResult::LAYOUT) && window.is_none()
+            result.contains(UpdateResult::LAYOUT) && !was_window
         } else {
-            if window.is_some() {
+            if was_window {
                 context.window_registry().remove_node(id);
             }
             // A replacement takes over child identities and declares its own typed properties.
-            let old_children = self.child_candidates(widget.as_ref());
+            let old_children = self.child_candidates(body.as_widget());
             let parent = self.node_ref(id).expect("live replacement node").parent;
             let node = view.build_node(self, parent, id, old_children, context);
-            let environment_changed = window.is_some() || node.window.is_some();
+            let environment_changed = was_window || node.body().is_window();
             *self.node_ref_mut(id).expect("live replacement node") = node;
             if environment_changed {
                 self.invalidate_caches_from(id, UpdateResult::LAYOUT | UpdateResult::RENDER);
@@ -437,7 +480,7 @@ impl UiTree {
         for child in node.child_ids().rev() {
             self.remove_reverse_scan_order(child, context);
         }
-        if node.window.is_some() {
+        if node.body().is_window() {
             context.window_registry().remove_node(id);
         }
     }
@@ -480,7 +523,8 @@ struct Declaration<'a, P> {
     current: UiId,
     old_children: Vec<(UiKey, UiId)>,
     queued: Vec<QueuedView<'a, P>>,
-    window: Option<window::WindowBinding>,
+    // Only used while reconciling this declaration's children into their native window.
+    child_window: Option<WindowId>,
 }
 
 struct QueuedView<'a, P> {
@@ -502,7 +546,7 @@ impl<'a, P> Declaration<'a, P> {
             current,
             old_children,
             queued: Vec::new(),
-            window: None,
+            child_window: None,
         }
     }
 
@@ -520,10 +564,7 @@ impl<'a, P> Declaration<'a, P> {
         P: PartialEq,
     {
         let mut scoped = context.unobserved();
-        if self.window.is_some()
-            && let Some(window) = scoped.window_registry().window_for_node(self.current)
-        {
-            let id = window.id();
+        if let Some(id) = self.child_window {
             scoped = scoped.with_window(id);
         }
         for (_, id) in self.old_children {
@@ -644,11 +685,11 @@ impl Child<'_> {
         let placement = node.placement?;
         let point = placement.local_point(point)?;
         let mut scoped = ctx.unobserved();
-        Some(node.widget.as_ref().expect("live widget").is_inside(
-            placement.bounds,
-            point,
-            &mut scoped,
-        ))
+        Some(
+            node.body()
+                .as_widget()
+                .is_inside(placement.bounds, point, &mut scoped),
+        )
     }
 }
 

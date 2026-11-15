@@ -5,7 +5,6 @@
 //! UiTree's window entry points scope Context to that window; parent rendering and
 //! input stop at native window boundaries. App lifecycle scheduling is still separate.
 
-use std::any::Any;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -16,31 +15,12 @@ use matcha_window::window::{Fullscreen, Position, Size, Theme, Window as OsWindo
 use crate::metrics::{Bounds, Constraints, Point};
 use crate::ui_tree::context::Context;
 use crate::ui_tree::widget::{Draw, InputResult, UpdateResult, View, Widget};
-use crate::ui_tree::{Children, DeclContext};
+use crate::ui_tree::{AnyWindow, Children, DeclContext, MountKind, Mounted, NodeBody};
 
 mod registry;
 mod tree;
 pub use registry::WindowRegistry;
 
-/// Identifies a window boundary and dispatches its widget's events. The boundary
-/// also excludes its content from parent passes while the OS window is absent.
-#[derive(Clone, Copy)]
-pub(crate) struct WindowBinding {
-    window_event: fn(&dyn Any, &WindowEvent) -> UpdateResult,
-}
-
-impl WindowBinding {
-    fn new<V: View>() -> Self {
-        Self {
-            window_event: |widget, event| {
-                widget
-                    .downcast_ref::<WindowWidget<V>>()
-                    .expect("registered window widget type matches")
-                    .handle_window_event(event)
-            },
-        }
-    }
-}
 /// Declares an independent native window, with content in the same UI tree.
 pub struct Window<V: View> {
     label: Option<String>,
@@ -118,11 +98,19 @@ pub struct WindowWidget<V: View> {
     view_type: PhantomData<fn() -> V>,
 }
 
-impl<V: View> WindowWidget<V> {
-    fn handle_window_event(&self, event: &WindowEvent) -> UpdateResult {
+impl<V: View> MountKind<WindowWidget<V>> {
+    fn window() -> Self {
+        Self {
+            wrap: |mounted| NodeBody::Window(Box::new(mounted)),
+        }
+    }
+}
+
+impl<V: View> AnyWindow for Mounted<WindowWidget<V>> {
+    fn window_event(&self, event: &WindowEvent) -> UpdateResult {
         match event {
             WindowEvent::CloseRequested => {
-                if let Some(callback) = &self.on_close_requested {
+                if let Some(callback) = &self.widget.on_close_requested {
                     callback();
                 }
                 UpdateResult::empty()
@@ -138,6 +126,10 @@ impl<V: View> WindowWidget<V> {
 
 impl<V: View> Widget for WindowWidget<V> {
     type V = Window<V>;
+
+    fn mount_kind() -> MountKind<Self> {
+        MountKind::window()
+    }
 
     fn update<'a>(&mut self, view: &'a Self::V, ctx: &mut DeclContext<'a, '_>) -> UpdateResult {
         self.on_close_requested.clone_from(&view.on_close_requested);

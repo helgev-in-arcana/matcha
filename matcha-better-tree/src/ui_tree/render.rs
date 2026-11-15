@@ -28,7 +28,7 @@ impl UiTree {
 
     fn check_render_layout(&self, id: UiId) -> Result<(), UiError> {
         let node = self.node_ref(id).expect("live render tree");
-        if node.window.is_some() {
+        if node.body().is_window() {
             return Ok(());
         }
         if node
@@ -55,11 +55,11 @@ impl UiTree {
         let node = self.node_ref_mut(id).expect("live render tree");
         let mut scoped = ctx.unobserved();
         let ctx = &mut scoped;
-        if node.window.is_some() {
+        let NodeBody::Widget(widget) = node.body.as_ref().expect("widget restored after layout")
+        else {
             return Ok(());
-        }
+        };
         let placement = node.placement.expect("layout validated before rendering");
-        let widget = node.widget.as_ref().expect("widget restored after layout");
         let backdrop = inherited_backdrop || widget.uses_backdrop();
         let world = parent_transform * placement.affine;
         let child_count = node.child_ids().len();

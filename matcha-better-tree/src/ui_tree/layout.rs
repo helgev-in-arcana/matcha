@@ -37,15 +37,13 @@ impl UiTree {
             return;
         }
 
-        let widget = node
-            .widget
-            .take()
-            .expect("writing back the widget into ui_node has been forgotten somewhere");
-        let ((), reads) = ctx.observe_env_reads(|ctx| widget.layout(position.bounds, self, ctx));
+        let body = node.body.take().expect("live node during layout");
+        let ((), reads) =
+            ctx.observe_env_reads(|ctx| body.as_widget().layout(position.bounds, self, ctx));
         let node = self
             .node_ref_mut(id)
             .expect("tree cannot be changed during layout");
-        node.widget = Some(widget);
+        node.body = Some(body);
         node.env_reads.record(ReadPhase::Layout, reads);
         node.layout_cache.store(position.bounds, ());
     }
@@ -64,13 +62,13 @@ impl UiTree {
             return cached_bounds;
         }
 
-        let widget = std::mem::take(&mut node.widget)
-            .expect("writing back the widget into ui_node has been forgotten somewhere");
-        let (bounds, reads) = ctx.observe_env_reads(|ctx| widget.measure(constraints, self, ctx));
+        let body = node.body.take().expect("live node during measurement");
+        let (bounds, reads) =
+            ctx.observe_env_reads(|ctx| body.as_widget().measure(constraints, self, ctx));
         let node = self
             .node_ref_mut(id)
             .expect("tree cannot be changed during measurement");
-        node.widget = Some(widget);
+        node.body = Some(body);
         node.env_reads.record(ReadPhase::Measure, reads);
         node.measure_cache.store(constraints, bounds);
 

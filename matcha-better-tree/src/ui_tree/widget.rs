@@ -6,8 +6,8 @@ use smallvec::SmallVec;
 
 use crate::metrics::{Bounds, Constraints, Point};
 use crate::ui_tree::Children;
-pub use crate::ui_tree::DeclContext;
 use crate::ui_tree::context::Context;
+pub use crate::ui_tree::{DeclContext, MountKind};
 
 const COLOR_SMALLVEC: usize = 2;
 
@@ -27,6 +27,14 @@ pub trait View: Any {
 
 pub trait Widget: Any + utils::MaybeSendSync {
     type V: View;
+
+    /// Used by the framework when it mounts this widget with its child links.
+    fn mount_kind() -> MountKind<Self>
+    where
+        Self: Sized,
+    {
+        MountKind::widget()
+    }
 
     /// Update this widget and declare every child, even when returning empty flags.
     /// Report LAYOUT for changes affecting measurement/child layout, RENDER for changes to
