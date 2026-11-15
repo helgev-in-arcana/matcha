@@ -7,7 +7,7 @@ use std::num::NonZeroUsize;
 pub use async_channel::TrySendError as TryEmitError;
 use async_channel::{Receiver, Sender};
 
-use crate::app::{Model, ModelContext, UpdateView};
+use crate::app::{Model, ModelContext, ViewUpdateHandle};
 use crate::ui_tree::widget::View;
 
 /// A stateful part of the UI, driven when its parent evaluates its view.
@@ -53,14 +53,14 @@ pub enum EmitError<M> {
 /// Sends messages to one component instance from widget callbacks or tasks.
 pub struct EventSender<M> {
     sender: Sender<M>,
-    update_view: UpdateView,
+    view_update_handle: ViewUpdateHandle,
 }
 
 impl<M> Clone for EventSender<M> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
-            update_view: self.update_view.clone(),
+            view_update_handle: self.view_update_handle.clone(),
         }
     }
 }
@@ -70,7 +70,7 @@ impl<M> EventSender<M> {
     /// pod returns the original message to the caller.
     pub fn try_emit(&self, message: M) -> Result<(), TryEmitError<M>> {
         self.sender.try_send(message)?;
-        self.update_view.request();
+        self.view_update_handle.request();
         Ok(())
     }
 
@@ -82,7 +82,7 @@ impl<M> EventSender<M> {
             .send(message)
             .await
             .map_err(|error| EmitError::Closed(error.0))?;
-        self.update_view.request();
+        self.view_update_handle.request();
         Ok(())
     }
 }
@@ -130,7 +130,7 @@ impl<C: Component> Model for ComponentPod<C> {
     fn view(&mut self, ctx: &ModelContext<'_>) -> impl View {
         let events = EventSender {
             sender: self.sender.clone(),
-            update_view: ctx.update_view().clone(),
+            view_update_handle: ctx.view_update_handle().clone(),
         };
         if self.initialized {
             self.apply_messages(ctx, &events);

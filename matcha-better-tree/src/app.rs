@@ -44,7 +44,7 @@ pub trait Model {
 /// The caller's runtime context is restored before widget reconciliation.
 pub struct ModelContext<'a> {
     runtime: &'a Runtime,
-    update_view: UpdateView,
+    view_update_handle: ViewUpdateHandle,
 }
 
 impl ModelContext<'_> {
@@ -55,9 +55,10 @@ impl ModelContext<'_> {
         self.runtime.spawn(future);
     }
 
-    /// Clone this handle to request a new view from a widget callback or task.
-    pub fn update_view(&self) -> &UpdateView {
-        &self.update_view
+    /// Borrow the handle for requesting a root view evaluation.
+    /// Clone it to keep it in a widget callback or task.
+    pub fn view_update_handle(&self) -> &ViewUpdateHandle {
+        &self.view_update_handle
     }
 }
 
@@ -74,13 +75,13 @@ impl ViewRequest {
     }
 }
 
-/// Schedules a root view evaluation. Clones can be retained by widgets or tasks.
+/// A handle for scheduling a root view evaluation with [`request`](Self::request).
 #[derive(Clone)]
-pub struct UpdateView {
+pub struct ViewUpdateHandle {
     request: Weak<ViewRequest>,
 }
 
-impl UpdateView {
+impl ViewUpdateHandle {
     /// Coalesces requests until the host consumes them. The weak handle allows
     /// a task holding it to outlive the app.
     pub fn request(&self) {
@@ -143,7 +144,7 @@ impl<M: Model + utils::MaybeSendSync + 'static> App<M> {
         }
         let ctx = ModelContext {
             runtime: &self.runtime,
-            update_view: UpdateView {
+            view_update_handle: ViewUpdateHandle {
                 request: Shared::downgrade(request),
             },
         };

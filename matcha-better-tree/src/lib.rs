@@ -6,6 +6,6 @@ pub mod component;
 pub mod metrics;
 pub mod ui_tree;
 
-pub use app::{App, Model, ModelContext, UpdateView};
+pub use app::{App, Model, ModelContext, ViewUpdateHandle};
 pub use render_interface;
 pub use ui_tree::UiTree;
