@@ -19,6 +19,7 @@ wgpu = { workspace = true }
 nalgebra = { features = ["bytemuck"], workspace = true }
 
 # other
+async-channel = { workspace = true }
 bitflags = { workspace = true }
 log = { workspace = true }
 smallvec = { workspace = true }

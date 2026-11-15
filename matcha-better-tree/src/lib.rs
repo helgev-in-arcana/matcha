@@ -2,6 +2,7 @@
 //! [`App`] drives the root model and its windows through the matcha-window event loop.
 pub mod app;
 mod arena;
+pub mod component;
 pub mod metrics;
 pub mod ui_tree;
 
