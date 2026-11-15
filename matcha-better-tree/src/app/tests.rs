@@ -6,7 +6,7 @@ use matcha_window::event::device_event::{DeviceEvent, DeviceEventData, MouseInpu
 use matcha_window::event::window_event::WindowEvent;
 use matcha_window::headless_interface::{HeadlessEventLoop, HeadlessEventLoopProxy};
 
-use super::{App, Model, UpdateView};
+use super::{App, Model, ModelContext, UpdateView};
 use crate::metrics::{Bounds, Constraints};
 use crate::ui_tree::context::Context;
 use crate::ui_tree::widget::{Draw, InputResult, UpdateResult, View, Widget};
@@ -163,7 +163,7 @@ impl Counter {
 }
 
 impl Model for Counter {
-    fn view(&mut self, update_view: &UpdateView) -> impl View {
+    fn view(&mut self, ctx: &ModelContext<'_>) -> impl View {
         for action in self.pending.get_mut().unwrap().try_iter() {
             match action {
                 Action::Increment => self.value += 1,
@@ -175,7 +175,7 @@ impl Model for Counter {
             return WindowRoot(None);
         }
         let sender = self.sender.clone();
-        let button_update = update_view.clone();
+        let button_update = ctx.update_view().clone();
         let window = Window::new(Button {
             value: self.value,
             on_input: Arc::new(move || {
@@ -189,7 +189,7 @@ impl Model for Counter {
             ..WindowConfig::default()
         });
         let sender = self.sender.clone();
-        let update_view = update_view.clone();
+        let update_view = ctx.update_view().clone();
         let observed = self.observed.clone();
         WindowRoot(Some(window.on_close_requested(move || {
             observed.send(Observed::CloseRequested).unwrap();
@@ -351,13 +351,13 @@ fn requests_during_view_are_delivered_on_the_next_dispatch() {
     }
 
     impl Model for RequestTwice {
-        fn view(&mut self, update_view: &UpdateView) -> impl View {
-            self.handle.get_or_init(|| update_view.clone());
+        fn view(&mut self, ctx: &ModelContext<'_>) -> impl View {
+            self.handle.get_or_init(|| ctx.update_view().clone());
             if self.requests_left > 0 {
                 self.requests_left -= 1;
-                update_view.request();
+                ctx.update_view().request();
             }
-            self.counter.view(update_view)
+            self.counter.view(ctx)
         }
     }
 

@@ -10,7 +10,7 @@ use matcha_window::event::{device_event::DeviceEvent, window_event::WindowEvent}
 use matcha_window::headless_interface::{HeadlessEventLoop, HeadlessEventLoopProxy};
 
 use super::{Component, ComponentPod, EmitError, EventSender, TryEmitError};
-use crate::app::{App, Gpu, GpuDescriptor, Model, UpdateView};
+use crate::app::{App, Gpu, GpuDescriptor, Model, ModelContext};
 use crate::metrics::{Bounds, Constraints};
 use crate::ui_tree::context::Context;
 use crate::ui_tree::widget::{Draw, InputResult, UpdateResult, View, Widget};
@@ -111,12 +111,12 @@ fn tab() -> (Tab, TabProbe) {
 impl Component for Tab {
     type Message = Edit;
 
-    fn init(&mut self, events: &EventSender<Edit>) {
+    fn init(&mut self, _: &ModelContext<'_>, events: &EventSender<Edit>) {
         events.try_emit(Edit::Append(5)).unwrap();
         self.initialized.send(events.clone()).unwrap();
     }
 
-    fn update(&mut self, edit: Edit, events: &EventSender<Edit>) {
+    fn update(&mut self, edit: Edit, _: &ModelContext<'_>, events: &EventSender<Edit>) {
         match edit {
             Edit::Append(digit) => self.value = self.value * 10 + digit,
             Edit::AppendLater(digit) => events.try_emit(Edit::Append(digit)).unwrap(),
@@ -124,7 +124,7 @@ impl Component for Tab {
         }
     }
 
-    fn view(&mut self, _: &UpdateView, events: EventSender<Edit>) -> impl View {
+    fn view(&mut self, _: &ModelContext<'_>, events: EventSender<Edit>) -> impl View {
         self.values.send(self.value).unwrap();
         Window::new(Empty).on_close_requested(move || events.try_emit(Edit::Append(1)).unwrap())
     }
@@ -157,6 +157,79 @@ fn widget_and_task_messages_are_batched_in_order_and_self_sends_wait() {
     assert_eq!(probe.values.try_iter().collect::<Vec<_>>(), [51234]);
     assert!(host.proxy.drain_commands().is_empty());
     assert!(probe.initialized.try_recv().is_err());
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#[tokio::test]
+async fn child_init_spawns_on_the_app_runtime_and_wakes_its_model() {
+    use std::time::Duration;
+    use tokio::runtime::{Handle, Id};
+
+    struct Child {
+        sent: mpsc::Sender<()>,
+        updates: mpsc::Sender<(Id, Id)>,
+    }
+
+    impl Component for Child {
+        type Message = Id;
+
+        fn init(&mut self, ctx: &ModelContext<'_>, events: &EventSender<Id>) {
+            let task = || {
+                let events = events.clone();
+                let sent = self.sent.clone();
+                async move {
+                    tokio::time::sleep(Duration::ZERO).await;
+                    events.emit_async(Handle::current().id()).await.unwrap();
+                    sent.send(()).unwrap();
+                }
+            };
+            ctx.spawn(task());
+            tokio::spawn(task());
+        }
+
+        fn update(&mut self, task_id: Id, _: &ModelContext<'_>, _: &EventSender<Id>) {
+            self.updates
+                .send((task_id, Handle::current().id()))
+                .unwrap();
+        }
+
+        fn view(&mut self, _: &ModelContext<'_>, _: EventSender<Id>) -> impl View {
+            Empty
+        }
+    }
+
+    struct Parent {
+        child: ComponentPod<Child>,
+        evaluations: mpsc::Sender<Id>,
+    }
+
+    impl Model for Parent {
+        fn view(&mut self, ctx: &ModelContext<'_>) -> impl View {
+            self.evaluations.send(Handle::current().id()).unwrap();
+            self.child.view(ctx)
+        }
+    }
+
+    let outer = Handle::current().id();
+    let (sent, completed) = mpsc::channel();
+    let (updates, received) = mpsc::channel();
+    let (evaluations, evaluated) = mpsc::channel();
+    let mut host = Host::mount(Parent {
+        child: ComponentPod::new(Child { sent, updates }),
+        evaluations,
+    });
+    let app = evaluated.try_recv().unwrap();
+    assert_ne!(app, outer);
+    assert_eq!(Handle::current().id(), outer);
+    for _ in 0..2 {
+        completed.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    assert!(received.try_recv().is_err());
+
+    host.dispatch();
+    assert_eq!(evaluated.try_recv().unwrap(), app);
+    assert_eq!(received.try_iter().collect::<Vec<_>>(), [(app, app); 2]);
+    assert_eq!(Handle::current().id(), outer);
 }
 
 fn start_waiting_send(
@@ -211,11 +284,11 @@ struct Tabs {
 impl Component for Tabs {
     type Message = TabAction;
 
-    fn init(&mut self, events: &EventSender<TabAction>) {
+    fn init(&mut self, _: &ModelContext<'_>, events: &EventSender<TabAction>) {
         self.initialized.send(events.clone()).unwrap();
     }
 
-    fn update(&mut self, action: TabAction, _: &EventSender<TabAction>) {
+    fn update(&mut self, action: TabAction, _: &ModelContext<'_>, _: &EventSender<TabAction>) {
         match action {
             TabAction::Select(index) => self.selected = index,
             TabAction::RemoveFirst => {
@@ -225,8 +298,8 @@ impl Component for Tabs {
         }
     }
 
-    fn view(&mut self, update: &UpdateView, _: EventSender<TabAction>) -> impl View {
-        self.children[self.selected].view(update)
+    fn view(&mut self, ctx: &ModelContext<'_>, _: EventSender<TabAction>) -> impl View {
+        self.children[self.selected].view(ctx)
     }
 }
 

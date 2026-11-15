@@ -7,23 +7,40 @@ use std::num::NonZeroUsize;
 pub use async_channel::TrySendError as TryEmitError;
 use async_channel::{Receiver, Sender};
 
-use crate::app::{Model, UpdateView};
+use crate::app::{Model, ModelContext, UpdateView};
 use crate::ui_tree::widget::View;
 
 /// A stateful part of the UI, driven when its parent evaluates its view.
 pub trait Component {
     type Message: utils::MaybeSend + 'static;
 
-    /// Called once, the first time this component is evaluated. A task started
-    /// here can keep a clone of `events` to deliver its result.
-    fn init(&mut self, _events: &EventSender<Self::Message>) {}
+    /// Called on the first evaluation. Use [`ModelContext::spawn`] and a clone
+    /// of `events` to deliver a task's result to this component.
+    ///
+    /// ```
+    /// # use matcha_better_tree::{ModelContext, component::EventSender};
+    /// # async fn load_title() -> String { String::from("Matcha") }
+    /// # fn init(ctx: &ModelContext<'_>, events: &EventSender<String>) {
+    /// let events = events.clone();
+    /// ctx.spawn(async move {
+    ///     let title = load_title().await;
+    ///     let _ = events.emit_async(title).await;
+    /// });
+    /// # }
+    /// ```
+    fn init(&mut self, _ctx: &ModelContext<'_>, _events: &EventSender<Self::Message>) {}
 
     /// Apply one queued message before building the view. Messages emitted to
     /// this component from this method are processed on its next evaluation.
-    fn update(&mut self, message: Self::Message, events: &EventSender<Self::Message>);
+    fn update(
+        &mut self,
+        message: Self::Message,
+        ctx: &ModelContext<'_>,
+        events: &EventSender<Self::Message>,
+    );
 
-    /// Pass `update_view` to children and move `events` into widget callbacks.
-    fn view(&mut self, update_view: &UpdateView, events: EventSender<Self::Message>) -> impl View;
+    /// Pass `ctx` to children and move `events` into widget callbacks.
+    fn view(&mut self, ctx: &ModelContext<'_>, events: EventSender<Self::Message>) -> impl View;
 }
 
 /// The component was dropped before it could accept an asynchronous send.
@@ -97,31 +114,31 @@ impl<C: Component> ComponentPod<C> {
         }
     }
 
-    fn apply_messages(&mut self, events: &EventSender<C::Message>) {
+    fn apply_messages(&mut self, ctx: &ModelContext<'_>, events: &EventSender<C::Message>) {
         // This pod is the sole receiver. Later sends follow this batch in FIFO order.
         let count = self.receiver.len();
         for _ in 0..count {
             let Ok(message) = self.receiver.try_recv() else {
                 break;
             };
-            self.component.update(message, events);
+            self.component.update(message, ctx, events);
         }
     }
 }
 
 impl<C: Component> Model for ComponentPod<C> {
-    fn view(&mut self, update_view: &UpdateView) -> impl View {
+    fn view(&mut self, ctx: &ModelContext<'_>) -> impl View {
         let events = EventSender {
             sender: self.sender.clone(),
-            update_view: update_view.clone(),
+            update_view: ctx.update_view().clone(),
         };
         if self.initialized {
-            self.apply_messages(&events);
+            self.apply_messages(ctx, &events);
         } else {
             self.initialized = true;
-            self.component.init(&events);
+            self.component.init(ctx, &events);
         }
-        self.component.view(update_view, events)
+        self.component.view(ctx, events)
     }
 }
 

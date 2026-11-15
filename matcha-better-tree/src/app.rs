@@ -1,4 +1,5 @@
 //! A matcha-window application driving one model and its declared native windows.
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use matcha_window::adapter::{EventLoop, EventLoopProxy};
@@ -15,7 +16,9 @@ use crate::ui_tree::{
 pub use gpu_utils::gpu::{Gpu, GpuDescriptor};
 
 mod presentation;
+mod runtime;
 use presentation::Presentation;
+use runtime::Runtime;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use std::rc::{Rc as Shared, Weak};
@@ -28,10 +31,34 @@ type Wake = dyn Fn() + Send + Sync;
 type Wake = dyn Fn();
 
 /// Produces a view on the UI thread. A parent can drive a child model by calling
-/// its `view` with the same handle wherever the child's output is needed.
+/// its `view` with the same context wherever the child's output is needed.
 pub trait Model {
     /// Apply any pending model input and return the current UI declaration.
-    fn view(&mut self, update_view: &UpdateView) -> impl View;
+    fn view(&mut self, ctx: &ModelContext<'_>) -> impl View;
+}
+
+/// App services available while evaluating the root model and its children.
+///
+/// On native targets the app enters its Tokio runtime for the duration of
+/// [`Model::view`], including synchronous calls to child models and components.
+/// The caller's runtime context is restored before widget reconciliation.
+pub struct ModelContext<'a> {
+    runtime: &'a Runtime,
+    update_view: UpdateView,
+}
+
+impl ModelContext<'_> {
+    /// Spawn a detached task on the app's Tokio runtime (native) or the browser's
+    /// microtask queue (Web). Native futures must be `Send`. Dropping the app
+    /// shuts down its native runtime. Browser tasks may outlive the app.
+    pub fn spawn(&self, future: impl Future<Output = ()> + utils::MaybeSend + 'static) {
+        self.runtime.spawn(future);
+    }
+
+    /// Clone this handle to request a new view from a widget callback or task.
+    pub fn update_view(&self) -> &UpdateView {
+        &self.update_view
+    }
 }
 
 struct ViewRequest {
@@ -72,6 +99,7 @@ pub struct App<M> {
     request: Option<Shared<ViewRequest>>,
     presentation: Presentation,
     surfaces_allowed: bool,
+    runtime: Runtime,
 }
 
 impl<M: Model + utils::MaybeSendSync + 'static> App<M> {
@@ -89,6 +117,9 @@ impl<M: Model + utils::MaybeSendSync + 'static> App<M> {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// # Panics
+    /// On native targets, panics if the Tokio runtime cannot be created.
     pub fn new(model: M, gpu: Gpu) -> Self {
         Self {
             model,
@@ -98,6 +129,7 @@ impl<M: Model + utils::MaybeSendSync + 'static> App<M> {
             request: None,
             presentation: Presentation::new(gpu),
             surfaces_allowed: false,
+            runtime: Runtime::new(),
         }
     }
 
@@ -109,10 +141,17 @@ impl<M: Model + utils::MaybeSendSync + 'static> App<M> {
         if !request.pending.swap(false, Ordering::AcqRel) && !resuming {
             return false;
         }
-        let update_view = UpdateView {
-            request: Shared::downgrade(request),
+        let ctx = ModelContext {
+            runtime: &self.runtime,
+            update_view: UpdateView {
+                request: Shared::downgrade(request),
+            },
         };
-        let view = self.model.view(&update_view);
+        let view = {
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            let _guard = self.runtime.enter();
+            self.model.view(&ctx)
+        };
         let mut open = |declaration: &WindowConfig| {
             let config = declaration
                 .clone()

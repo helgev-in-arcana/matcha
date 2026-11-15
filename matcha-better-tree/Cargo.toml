@@ -26,6 +26,12 @@ smallvec = { workspace = true }
 thiserror = { workspace = true }
 web-time = { workspace = true }
 
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen-futures = { workspace = true }
+
 [dev-dependencies]
 matcha-window = { path = "../matcha-window", default-features = false, features = ["headless"] }
 futures = { workspace = true }
