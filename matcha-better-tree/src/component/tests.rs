@@ -53,18 +53,23 @@ struct Host<M: Model + utils::MaybeSendSync + 'static> {
 }
 
 impl<M: Model + utils::MaybeSendSync + 'static> Host<M> {
-    fn mount(model: M) -> Self {
+    fn init(model: M) -> Self {
         let gpu = futures::executor::block_on(Gpu::new(GpuDescriptor::noop())).unwrap();
         let mut adapter = Adapter::new(App::new(model, gpu));
         let event_loop = HeadlessEventLoop::new();
         let proxy = HeadlessEventLoopProxy::new();
         adapter.init(Box::new(proxy.clone()), &event_loop);
-        adapter.create_surface(&event_loop);
         Self {
             adapter,
             event_loop,
             proxy,
         }
+    }
+
+    fn mount(model: M) -> Self {
+        let mut host = Self::init(model);
+        host.adapter.create_surface(&host.event_loop);
+        host
     }
 
     fn dispatch(&mut self) {
@@ -308,7 +313,7 @@ fn hidden_child_retains_messages_and_a_removed_child_stops_waking_the_app() {
     let (left, left_probe) = tab();
     let (right, right_probe) = tab();
     let (initialized, control) = mpsc::channel();
-    let mut host = Host::mount(ComponentPod::new(Tabs {
+    let mut host = Host::init(ComponentPod::new(Tabs {
         children: vec![
             ComponentPod::with_capacity(left, NonZeroUsize::MIN),
             ComponentPod::new(right),
@@ -316,6 +321,10 @@ fn hidden_child_retains_messages_and_a_removed_child_stops_waking_the_app() {
         selected: 0,
         initialized,
     }));
+    host.adapter.resumed(&host.event_loop);
+    assert!(control.try_recv().is_err());
+    assert!(left_probe.initialized.try_recv().is_err());
+    host.adapter.create_surface(&host.event_loop);
     let tabs = control.try_recv().unwrap();
     let left = left_probe.initialized.try_recv().unwrap();
     assert_eq!(left_probe.values.try_recv().unwrap(), 0);

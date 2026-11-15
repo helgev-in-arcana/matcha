@@ -199,6 +199,87 @@ impl Model for Counter {
     }
 }
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#[tokio::test]
+async fn root_lifecycle_uses_the_model_runtime_and_defers_view_until_surfaces_are_allowed() {
+    use tokio::runtime::{Handle, Id};
+
+    struct Probe(mpsc::Sender<(&'static str, Id)>);
+
+    impl Probe {
+        fn record(&self, event: &'static str) {
+            self.0.send((event, Handle::current().id())).unwrap();
+        }
+
+        fn notify(&self, event: &'static str, ctx: &ModelContext<'_>) {
+            self.record(event);
+            ctx.view_update_handle().request();
+        }
+    }
+
+    impl Model for Probe {
+        fn init(&mut self, ctx: &ModelContext<'_>) {
+            self.notify("init", ctx);
+        }
+
+        fn resumed(&mut self, ctx: &ModelContext<'_>) {
+            self.notify("resumed", ctx);
+        }
+
+        fn suspended(&mut self, ctx: &ModelContext<'_>) {
+            self.notify("suspended", ctx);
+        }
+
+        fn exiting(&mut self, ctx: &ModelContext<'_>) {
+            self.notify("exiting", ctx);
+        }
+
+        fn view(&mut self, _: &ModelContext<'_>) -> impl View {
+            self.record("view");
+            WindowRoot(None)
+        }
+    }
+
+    let outer = Handle::current().id();
+    let (events, observed) = mpsc::channel();
+    let event_loop = HeadlessEventLoop::new();
+    let proxy = HeadlessEventLoopProxy::new();
+    let mut adapter = Adapter::new(App::new(Probe(events), noop_gpu()));
+    adapter.init(Box::new(proxy.clone()), &event_loop);
+    let (first, app) = observed.try_recv().unwrap();
+    assert_eq!(first, "init");
+    assert_ne!(app, outer);
+    assert_eq!(Handle::current().id(), outer);
+    assert_eq!(proxy.drain_commands(), [()]);
+
+    let expect = |event| {
+        assert_eq!(observed.try_recv().unwrap(), (event, app));
+        assert!(observed.try_recv().is_err());
+        assert_eq!(Handle::current().id(), outer);
+    };
+    adapter.resumed(&event_loop);
+    expect("resumed");
+    assert!(proxy.drain_commands().is_empty());
+    adapter.create_surface(&event_loop);
+    expect("view");
+
+    adapter.destroy_surface(&event_loop);
+    adapter.suspended(&event_loop);
+    expect("suspended");
+    assert_eq!(proxy.drain_commands(), [()]);
+    adapter.ui_command(&event_loop, ());
+    assert!(observed.try_recv().is_err());
+    adapter.resumed(&event_loop);
+    expect("resumed");
+    assert!(proxy.drain_commands().is_empty());
+    adapter.create_surface(&event_loop);
+    expect("view");
+
+    adapter.exiting(&event_loop);
+    expect("exiting");
+    assert!(proxy.drain_commands().is_empty());
+}
+
 #[test]
 fn close_requests_reach_the_model_until_it_removes_the_window() {
     let (model, observed) = Counter::new();

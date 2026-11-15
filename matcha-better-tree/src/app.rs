@@ -32,22 +32,47 @@ type Wake = dyn Fn();
 
 /// Produces a view on the UI thread. A parent can drive a child model by calling
 /// its `view` with the same context wherever the child's output is needed.
+/// The app delivers lifecycle callbacks synchronously to its root model.
 pub trait Model {
+    /// Called when the event loop initializes, with a live view update handle.
+    /// Each [`Component`](crate::component::Component) has its own initialization
+    /// callback on its pod's first view evaluation.
+    fn init(&mut self, _ctx: &ModelContext<'_>) {}
+
+    /// Called when the application resumes, before the host creates surfaces.
+    fn resumed(&mut self, _ctx: &ModelContext<'_>) {}
+
+    /// Called when the application is suspended.
+    fn suspended(&mut self, _ctx: &ModelContext<'_>) {}
+
+    /// Called before the app clears its widget tree. View update requests have
+    /// already been disabled, and the app does not wait for spawned tasks.
+    fn exiting(&mut self, _ctx: &ModelContext<'_>) {}
+
     /// Apply any pending model input and return the current UI declaration.
     fn view(&mut self, ctx: &ModelContext<'_>) -> impl View;
 }
 
-/// App services available while evaluating the root model and its children.
+/// App services available during model callbacks.
 ///
-/// On native targets the app enters its Tokio runtime for the duration of
-/// [`Model::view`], including synchronous calls to child models and components.
-/// The caller's runtime context is restored before widget reconciliation.
+/// On native targets the app enters its Tokio runtime for lifecycle callbacks
+/// and [`Model::view`], including synchronous calls to children. It restores
+/// the caller's runtime context when each callback returns.
 pub struct ModelContext<'a> {
     runtime: &'a Runtime,
     view_update_handle: ViewUpdateHandle,
 }
 
-impl ModelContext<'_> {
+impl<'a> ModelContext<'a> {
+    fn new(runtime: &'a Runtime, request: Option<&Shared<ViewRequest>>) -> Self {
+        Self {
+            runtime,
+            view_update_handle: ViewUpdateHandle {
+                request: request.map(Shared::downgrade).unwrap_or_default(),
+            },
+        }
+    }
+
     /// Spawn a detached task on the app's Tokio runtime (native) or the browser's
     /// microtask queue (Web). Native futures must be `Send`. Dropping the app
     /// shuts down its native runtime. Browser tasks may outlive the app.
@@ -134,6 +159,12 @@ impl<M: Model + utils::MaybeSendSync + 'static> App<M> {
         }
     }
 
+    fn with_model_context(&mut self, callback: impl FnOnce(&mut M, &ModelContext<'_>)) {
+        let ctx = ModelContext::new(&self.runtime, self.request.as_ref());
+        self.runtime
+            .with_context(|| callback(&mut self.model, &ctx));
+    }
+
     fn update_view(&mut self, event_loop: &impl EventLoop, resuming: bool) -> bool {
         let Some(request) = &self.request else {
             return false;
@@ -142,17 +173,8 @@ impl<M: Model + utils::MaybeSendSync + 'static> App<M> {
         if !request.pending.swap(false, Ordering::AcqRel) && !resuming {
             return false;
         }
-        let ctx = ModelContext {
-            runtime: &self.runtime,
-            view_update_handle: ViewUpdateHandle {
-                request: Shared::downgrade(request),
-            },
-        };
-        let view = {
-            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-            let _guard = self.runtime.enter();
-            self.model.view(&ctx)
-        };
+        let ctx = ModelContext::new(&self.runtime, Some(request));
+        let view = self.runtime.with_context(|| self.model.view(&ctx));
         let mut open = |declaration: &WindowConfig| {
             let config = declaration
                 .clone()
@@ -187,10 +209,11 @@ impl<M: Model + utils::MaybeSendSync + 'static> Application for App<M> {
             pending: AtomicBool::new(false),
             wake: Box::new(move || proxy.send_command(())),
         }));
+        self.with_model_context(M::init);
     }
 
     fn resumed(&mut self, _: &impl EventLoop) {
-        // nothing to do
+        self.with_model_context(M::resumed);
     }
 
     fn create_surface(&mut self, event_loop: &impl EventLoop) {
@@ -209,12 +232,13 @@ impl<M: Model + utils::MaybeSendSync + 'static> Application for App<M> {
     }
 
     fn suspended(&mut self, _: &impl EventLoop) {
-        // nothing to do
+        self.with_model_context(M::suspended);
     }
 
     fn exiting(&mut self, _: &impl EventLoop) {
         self.request = None;
         self.surfaces_allowed = false;
+        self.with_model_context(M::exiting);
         self.tree.clear(&mut Context::with_services(
             &mut self.windows,
             &mut self.services,
