@@ -187,6 +187,69 @@ fn leaf_change_invalidates_all_ancestors_but_preserves_sibling_and_placement() {
 }
 
 #[test]
+fn node_invalidation_keeps_drawing_local_and_stops_layout_at_the_window() {
+    use crate::ui_tree::window::{Window, WindowRegistry};
+    use matcha_window::headless_interface::HeadlessEventLoop;
+
+    let view = ContainerView {
+        child: Window::new(NodeView::new(
+            0,
+            0.0,
+            vec![
+                NodeView::new(1, 10.0, vec![]),
+                NodeView::new(2, 5.0, vec![]),
+            ],
+        )),
+        child_position: position(Matrix4::identity()),
+    };
+    let mut tree = UiTree::new();
+    let mut registry = WindowRegistry::default();
+    let event_loop = HeadlessEventLoop::new();
+    let mut open = windows::headless_factory(&event_loop);
+    let mut ctx = Context::new(&mut registry);
+    tree.try_update(&view, &mut ctx.with_window_factory(&mut open))
+        .unwrap();
+    let outside = tree.root.unwrap();
+    let window = child_at(&tree, outside, 0);
+    let parent = child_at(&tree, window, 0);
+    let leaf = child_at(&tree, parent, 0);
+    let sibling = child_at(&tree, parent, 1);
+    let native = windows::native_id(&tree, window, &mut ctx);
+
+    // The outer pass measures and places the Window. The native pass visits its content.
+    tree.measure_node(outside, Constraints::default(), &mut ctx);
+    tree.layout(bounds(), &mut ctx);
+    tree.render(&mut ctx).unwrap();
+    tree.measure_node(
+        parent,
+        Constraints::default(),
+        &mut ctx.unobserved().with_window(native),
+    );
+    tree.layout_window(native, &mut ctx);
+    tree.render_window(native, &mut ctx).unwrap().unwrap();
+
+    tree.invalidate_node(leaf, UpdateResult::RENDER);
+    for id in [outside, window, parent, leaf, sibling] {
+        assert_cached(&tree, id, true);
+    }
+    let has_draw = |tree: &UiTree, id| tree.node_ref(id).unwrap().render_cache.get(&()).is_some();
+    assert!(!has_draw(&tree, leaf));
+    for id in [outside, parent, sibling] {
+        assert!(has_draw(&tree, id));
+    }
+
+    tree.render_window(native, &mut ctx).unwrap().unwrap();
+    tree.invalidate_node(leaf, UpdateResult::LAYOUT);
+    for id in [leaf, parent, window] {
+        assert_cached(&tree, id, false);
+    }
+    for id in [outside, sibling] {
+        assert_cached(&tree, id, true);
+    }
+    assert!(has_draw(&tree, leaf));
+}
+
+#[test]
 fn parent_change_retains_descendant_caches_until_bounds_change() {
     let mut view = NodeView::new(0, 0.0, vec![NodeView::new(1, 10.0, vec![])]);
     let (mut tree, _, parent) = setup(view.clone());

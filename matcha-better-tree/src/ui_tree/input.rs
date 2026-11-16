@@ -75,9 +75,7 @@ impl UiTree {
             };
             result.update |= response.update;
             if response.update.contains(UpdateResult::RENDER) {
-                self.node_ref_mut(*id)
-                    .expect("input callbacks cannot remove nodes")
-                    .invalidate_caches(UpdateResult::RENDER);
+                self.invalidate_node(*id, UpdateResult::RENDER);
             }
             if response.update.contains(UpdateResult::LAYOUT) {
                 deepest_changed = Some(deepest_changed.map_or(index, |old| old.max(index)));
@@ -88,13 +86,10 @@ impl UiTree {
             }
         }
 
-        // All changed nodes lie on one path. Invalidate its prefix once, including ancestors
-        // whose normal input callback was skipped by Stop. Keep placement and other subtrees.
+        // All layout requests lie on the hit path, so the deepest one covers them all,
+        // including ancestors whose input callback was skipped by Stop.
         if let Some(last) = deepest_changed {
-            for (id, _, _) in &path[..=last] {
-                let node = self.node_ref_mut(*id).expect("hit path remains live");
-                node.invalidate_caches(UpdateResult::LAYOUT);
-            }
+            self.invalidate_node(path[last].0, UpdateResult::LAYOUT);
         }
         result
     }

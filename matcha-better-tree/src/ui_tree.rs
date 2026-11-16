@@ -393,6 +393,21 @@ impl UiTree {
         }
     }
 
+    /// Apply a mounted widget's update outside reconciliation. Drawing is local;
+    /// measurement and layout propagate to the nearest native window or the root.
+    fn invalidate_node(&mut self, id: UiId, mut flags: UpdateResult) {
+        let mut current = Some(id);
+        while let Some(id) = current {
+            let node = self.node_ref_mut(id).expect("live invalidation target");
+            node.invalidate_caches(flags);
+            if !flags.contains(UpdateResult::LAYOUT) || node.body().is_window() {
+                break;
+            }
+            current = node.parent;
+            flags = UpdateResult::LAYOUT;
+        }
+    }
+
     /// Invalidate one environment scope, stopping at nested native windows.
     fn invalidate_caches_from(&mut self, id: UiId, flags: UpdateResult) {
         if flags.is_empty() {
