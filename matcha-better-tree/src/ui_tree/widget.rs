@@ -1,5 +1,6 @@
 use std::any::Any;
 
+pub use matcha_window::adapter::ControlFlow;
 use matcha_window::event::device_event::DeviceEvent;
 use nalgebra::Matrix4;
 use smallvec::SmallVec;
@@ -45,6 +46,17 @@ pub trait Widget: Any + utils::MaybeSendSync {
         view: &'a Self::V,
         ctx: &mut DeclContext<'a, '_, <Self::V as View>::ChildData>,
     ) -> UpdateResult;
+
+    /// Advance local state before measurement, layout, and rendering.
+    /// The framework polls every widget in the current window, children first, including
+    /// widgets with valid caches. Read the shared pass time through `ctx.frame_time()`.
+    /// Return invalidation requests for this widget and the next requested poll time.
+    /// Each full pass replaces previous requests, so an early poll must repeat any deadline
+    /// that still matters. `WaitUntil` requests a wakeup; execution may occur later.
+    fn poll(&mut self, ctx: &mut Context) -> PollResult {
+        let _ = ctx;
+        PollResult::default()
+    }
 
     /// Observe or intercept an event from root to target (inclusive), before normal input.
     /// `mouse_position()` is widget-local. Stop cancels the rest of preview and normal input.
@@ -115,6 +127,25 @@ bitflags::bitflags! {
         const LAYOUT = 1 << 0;
         /// Invalidate this widget's local drawing without invalidating measurement/layout.
         const RENDER = 1 << 1;
+    }
+}
+
+/// Cache invalidation and the requested timing of the next full polling pass.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[must_use]
+pub struct PollResult {
+    pub update: UpdateResult,
+    /// `Wait` requests no further pass, `Poll` requests the next event-loop iteration,
+    /// and `WaitUntil` requests a pass at or after the given time.
+    pub next_poll: ControlFlow,
+}
+
+impl Default for PollResult {
+    fn default() -> Self {
+        Self {
+            update: UpdateResult::empty(),
+            next_poll: ControlFlow::Wait,
+        }
     }
 }
 

@@ -1,16 +1,18 @@
 //! A matcha-window application driving one model and its declared native windows.
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use matcha_window::adapter::{EventLoop, EventLoopProxy};
+use matcha_window::adapter::{ControlFlow, EventLoop, EventLoopProxy};
 use matcha_window::application::Application;
 use matcha_window::event::{device_event::DeviceEvent, window_event::WindowEvent};
 use matcha_window::window::{Window as OsWindow, WindowId};
+use web_time::Instant;
 
 use crate::ui_tree::context::{Context, Services};
 use crate::ui_tree::{
     UiTree,
-    widget::View,
+    widget::{UpdateResult, View},
     window::{WindowConfig, WindowRegistry},
 };
 pub use gpu_utils::gpu::{Gpu, GpuDescriptor};
@@ -125,6 +127,8 @@ pub struct App<M> {
     request: Option<Shared<ViewRequest>>,
     presentation: Presentation,
     surfaces_allowed: bool,
+    // Each full window traversal replaces its request. No widget identities are retained here.
+    poll_requests: HashMap<WindowId, ControlFlow>,
     runtime: Runtime,
 }
 
@@ -155,6 +159,7 @@ impl<M: Model + utils::MaybeSendSync + 'static> App<M> {
             request: None,
             presentation: Presentation::new(gpu),
             surfaces_allowed: false,
+            poll_requests: HashMap::new(),
             runtime: Runtime::new(),
         }
     }
@@ -188,7 +193,71 @@ impl<M: Model + utils::MaybeSendSync + 'static> App<M> {
         {
             log::error!("Mounting window: {error}");
         }
+        self.poll_requests
+            .retain(|id, _| self.windows.window(*id).is_some());
+        // A declaration can start an animation even if the OS has not delivered a redraw yet.
+        // Re-evaluating every live window also discards requests from replaced widgets.
+        let now = Instant::now();
+        for id in self.windows.ids() {
+            let _ = self.poll_window(id, now);
+        }
         true
+    }
+
+    fn poll_window(&mut self, id: WindowId, now: Instant) -> UpdateResult {
+        let mut ctx =
+            Context::with_services(&mut self.windows, &mut self.services).with_frame_time(now);
+        let Some(result) = self.tree.poll_window(id, &mut ctx) else {
+            self.poll_requests.remove(&id);
+            return UpdateResult::empty();
+        };
+        if result.next_poll == ControlFlow::Wait {
+            self.poll_requests.remove(&id);
+        } else {
+            self.poll_requests.insert(id, result.next_poll);
+        }
+        self.windows.sync_to_window(id);
+        result.update
+    }
+
+    fn poll_ready(&mut self, event_loop: &impl EventLoop, now: Instant) {
+        if !self.surfaces_allowed {
+            return;
+        }
+        // Consume at most one full traversal per window in this callback. Requests returned
+        // during it, including already-due times, belong to the next event-loop iteration.
+        let ready: Vec<_> = self
+            .poll_requests
+            .iter()
+            .filter_map(|(&id, &request)| {
+                let ready = match request {
+                    ControlFlow::Poll => true,
+                    ControlFlow::WaitUntil(deadline) => deadline <= now,
+                    ControlFlow::Wait => false,
+                };
+                ready.then_some(id)
+            })
+            .collect();
+        for id in ready {
+            if !self.poll_window(id, now).is_empty()
+                && let Some(window) = self.windows.window(id)
+            {
+                window.request_redraw();
+            }
+        }
+        self.set_poll_control_flow(event_loop);
+    }
+
+    fn set_poll_control_flow(&self, event_loop: &impl EventLoop) {
+        let flow = if self.surfaces_allowed {
+            self.poll_requests
+                .values()
+                .copied()
+                .fold(ControlFlow::Wait, ControlFlow::merge)
+        } else {
+            ControlFlow::Wait
+        };
+        event_loop.set_control_flow(flow);
     }
 
     fn attach_surfaces(&mut self) {
@@ -224,8 +293,10 @@ impl<M: Model + utils::MaybeSendSync + 'static> Application for App<M> {
         self.attach_surfaces();
     }
 
-    fn destroy_surface(&mut self, _: &impl EventLoop) {
+    fn destroy_surface(&mut self, event_loop: &impl EventLoop) {
         self.surfaces_allowed = false;
+        self.poll_requests.clear();
+        self.set_poll_control_flow(event_loop);
         for (window, _) in self.windows.live_windows_mut() {
             window.destroy_surface();
         }
@@ -235,9 +306,11 @@ impl<M: Model + utils::MaybeSendSync + 'static> Application for App<M> {
         self.with_model_context(M::suspended);
     }
 
-    fn exiting(&mut self, _: &impl EventLoop) {
+    fn exiting(&mut self, event_loop: &impl EventLoop) {
         self.request = None;
         self.surfaces_allowed = false;
+        self.poll_requests.clear();
+        self.set_poll_control_flow(event_loop);
         self.with_model_context(M::exiting);
         self.tree.clear(&mut Context::with_services(
             &mut self.windows,
@@ -249,7 +322,10 @@ impl<M: Model + utils::MaybeSendSync + 'static> Application for App<M> {
         if !self.surfaces_allowed {
             return;
         }
-        let mut ctx = Context::with_services(&mut self.windows, &mut self.services);
+        let now = Instant::now();
+        let _ = self.poll_window(id, now);
+        let mut ctx =
+            Context::with_services(&mut self.windows, &mut self.services).with_frame_time(now);
         if let Err(error) = self.presentation.render(id, &mut self.tree, &mut ctx) {
             log::error!("Rendering window {id:?}: {error}");
         }
@@ -272,6 +348,7 @@ impl<M: Model + utils::MaybeSendSync + 'static> Application for App<M> {
     }
 
     fn window_destroyed(&mut self, event_loop: &impl EventLoop, id: WindowId) {
+        self.poll_requests.remove(&id);
         let was_declared = self.tree.window_destroyed(
             id,
             &mut Context::with_services(&mut self.windows, &mut self.services),
@@ -284,17 +361,23 @@ impl<M: Model + utils::MaybeSendSync + 'static> Application for App<M> {
         {
             request.request();
         }
+        self.set_poll_control_flow(event_loop);
     }
 
     fn device_event(&mut self, _: &impl EventLoop, id: WindowId, event: DeviceEvent) {
         if !self.surfaces_allowed {
             return;
         }
-        let mut ctx = Context::with_services(&mut self.windows, &mut self.services);
+        let now = Instant::now();
+        let polled_update = self.poll_window(id, now);
+        let mut ctx =
+            Context::with_services(&mut self.windows, &mut self.services).with_frame_time(now);
         // The hit path depends on the latest reconciliation and native viewport.
         self.tree.layout_window(id, &mut ctx);
         let result = self.tree.input_window(id, &event, &mut ctx);
-        if !result.update.is_empty()
+        // Input may start a delayed animation before it changes any layout or drawing.
+        let update = polled_update | result.update | self.poll_window(id, now);
+        if !update.is_empty()
             && let Some(window) = self.windows.window(id)
         {
             window.request_redraw();
@@ -321,33 +404,29 @@ impl<M: Model + utils::MaybeSendSync + 'static> Application for App<M> {
     }
 
     fn poll(&mut self, event_loop: &impl EventLoop) {
-        let _ = event_loop;
+        self.poll_ready(event_loop, Instant::now());
     }
 
     fn resume_time_reached(
         &mut self,
         event_loop: &impl EventLoop,
-        start: web_time::Instant,
-        requested_resume: web_time::Instant,
+        _start: Instant,
+        _requested_resume: Instant,
     ) {
-        let _ = event_loop;
-        let _ = start;
-        let _ = requested_resume;
+        self.poll_ready(event_loop, Instant::now());
     }
 
     fn wait_cancelled(
         &mut self,
         event_loop: &impl EventLoop,
-        start: web_time::Instant,
-        requested_resume: Option<web_time::Instant>,
+        _start: Instant,
+        _requested_resume: Option<Instant>,
     ) {
-        let _ = event_loop;
-        let _ = start;
-        let _ = requested_resume;
+        self.poll_ready(event_loop, Instant::now());
     }
 
     fn about_to_wait(&mut self, event_loop: &impl EventLoop) {
-        let _ = event_loop;
+        self.set_poll_control_flow(event_loop);
     }
 
     fn memory_warning(&mut self, event_loop: &impl EventLoop) {

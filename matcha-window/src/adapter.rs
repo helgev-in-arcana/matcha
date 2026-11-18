@@ -243,6 +243,19 @@ pub enum ControlFlow {
     WaitUntil(web_time::Instant),
 }
 
+impl ControlFlow {
+    /// Combine independent wake requests. Poll takes precedence over waiting,
+    /// Wait leaves the other request unchanged, and deadlines use the earlier time.
+    #[must_use]
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Poll, _) | (_, Self::Poll) => Self::Poll,
+            (Self::Wait, next) | (next, Self::Wait) => next,
+            (Self::WaitUntil(a), Self::WaitUntil(b)) => Self::WaitUntil(a.min(b)),
+        }
+    }
+}
+
 pub trait EventLoopProxy<App: Application>: utils::MaybeSendSync {
     fn clone_box(&self) -> Box<dyn EventLoopProxy<App>>;
     fn send_command(&self, command: App::Command);

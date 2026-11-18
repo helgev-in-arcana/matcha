@@ -13,6 +13,8 @@ use crate::ui_tree::widget::{Draw, InputResult, UpdateResult, View, Widget};
 use crate::ui_tree::window::{Apply, Window, WindowConfig};
 use crate::ui_tree::{Children, DeclContext};
 
+mod polling;
+
 fn noop_gpu() -> Gpu {
     futures::executor::block_on(Gpu::new(GpuDescriptor::noop())).unwrap()
 }

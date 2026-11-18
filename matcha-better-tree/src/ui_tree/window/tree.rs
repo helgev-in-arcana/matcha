@@ -8,7 +8,7 @@ use super::Window;
 use crate::arena::Id as UiId;
 use crate::metrics::{Bounds, Position};
 use crate::ui_tree::context::Context;
-use crate::ui_tree::widget::{InputResult, UiError, UpdateResult, View};
+use crate::ui_tree::widget::{InputResult, PollResult, UiError, UpdateResult, View};
 use crate::ui_tree::{DeclContext, NodeBody, UiTree};
 
 impl<'a> DeclContext<'a, '_, ()> {
@@ -99,6 +99,14 @@ impl UiTree {
             .expect("live window is registered")
             .request_redraw();
         true
+    }
+
+    /// Poll one window's content before its measurement/layout/rendering passes.
+    /// Nested native windows are polled separately. All callbacks share this Context's
+    /// frame time and receive the target window's environment.
+    pub fn poll_window(&mut self, id: WindowId, ctx: &mut Context) -> Option<PollResult> {
+        let (child, mut scoped) = self.window_content_context(id, ctx)?;
+        Some(self.poll_from(child, &mut scoped))
     }
 
     /// Lay out one native window's content in its own viewport, independently of parent placement.

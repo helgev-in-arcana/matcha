@@ -7,7 +7,9 @@ use matcha_window::window::{WindowError, WindowId};
 use nalgebra::{Matrix4, Vector4};
 
 use self::context::Context;
-use self::widget::{Draw, InputPropagation, InputResult, UiError, UpdateResult, View, Widget};
+use self::widget::{
+    Draw, InputPropagation, InputResult, PollResult, UiError, UpdateResult, View, Widget,
+};
 use crate::arena::{Arena, Id as UiId};
 use crate::metrics::{Bounds, Constraints, Point};
 
@@ -16,6 +18,7 @@ pub mod context;
 mod env_reads;
 mod input;
 mod layout;
+mod poll;
 mod render;
 pub mod widget;
 pub mod window;
@@ -153,6 +156,7 @@ trait AnyWidget: utils::MaybeSendSync {
         ctx: &mut Context,
     ) -> InputResult;
     fn input(&mut self, bounds: Bounds, event: &DeviceEvent, ctx: &mut Context) -> InputResult;
+    fn poll(&mut self, ctx: &mut Context) -> PollResult;
     fn is_inside(&self, b: Bounds, p: Point, ctx: &mut Context) -> bool;
     fn measure(&self, constraints: Constraints, tree: &mut UiTree, ctx: &mut Context) -> Bounds;
     fn layout(&self, bounds: Bounds, tree: &mut UiTree, ctx: &mut Context);
@@ -204,6 +208,10 @@ impl<W: Widget> AnyWidget for Mounted<W> {
 
     fn input(&mut self, bounds: Bounds, event: &DeviceEvent, ctx: &mut Context) -> InputResult {
         self.widget.input(bounds, event, ctx)
+    }
+
+    fn poll(&mut self, ctx: &mut Context) -> PollResult {
+        self.widget.poll(ctx)
     }
 
     fn is_inside(&self, b: Bounds, p: Point, ctx: &mut Context) -> bool {
