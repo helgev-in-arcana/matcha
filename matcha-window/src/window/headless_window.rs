@@ -5,6 +5,7 @@
 //! path. Intended for driving the full app pipeline (input dispatch, layout,
 //! model updates) in tests without a display or GPU.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::surface::{NativeWindow, WindowSurface, WindowSurfaceError};
@@ -23,14 +24,14 @@ pub(crate) struct HeadlessWindow {
     inner_size: parking_lot::Mutex<[u32; 2]>,
     config: WindowConfig,
     /// Number of `request_redraw` calls, observable by tests.
-    redraw_requests: AtomicUsize,
+    redraw_requests: Arc<AtomicUsize>,
 }
 
 /// Headless constructor
 impl WindowSurface {
     /// Creates a surfaceless in-memory window. `create_surface` is a no-op on
     /// it; rendering skips every frame.
-    pub(crate) fn new_headless(config: &WindowConfig) -> Self {
+    pub(crate) fn new_headless(config: &WindowConfig, redraw_requests: Arc<AtomicUsize>) -> Self {
         let inner_size = match config.inner_size {
             Some(Size::Physical { width, height }) => [width, height],
             // Headless DPI is fixed at 1.0, so logical == physical.
@@ -45,7 +46,7 @@ impl WindowSurface {
             title: parking_lot::Mutex::new(config.title.clone()),
             inner_size: parking_lot::Mutex::new(inner_size),
             config: config.clone(),
-            redraw_requests: AtomicUsize::new(0),
+            redraw_requests,
         };
 
         Self::from_native(Box::new(window), config)

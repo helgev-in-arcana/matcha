@@ -9,6 +9,7 @@ use crate::ui_tree::widget::PollResult;
 
 struct State {
     next_poll: ControlFlow,
+    deadline_update: UpdateResult,
     update: UpdateResult,
     input_request: Option<ControlFlow>,
     polls: Vec<Instant>,
@@ -21,6 +22,7 @@ impl State {
     fn new(next_poll: ControlFlow) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             next_poll,
+            deadline_update: UpdateResult::RENDER,
             update: UpdateResult::empty(),
             input_request: None,
             polls: Vec::new(),
@@ -61,7 +63,7 @@ impl Widget for Probe {
         let mut update = std::mem::take(&mut state.update);
         if matches!(state.next_poll, ControlFlow::WaitUntil(deadline) if deadline <= now) {
             state.next_poll = ControlFlow::Wait;
-            update |= UpdateResult::RENDER;
+            update |= state.deadline_update;
         }
         PollResult {
             update,
@@ -229,6 +231,42 @@ fn deadlines_are_replaced_and_only_due_windows_are_polled() {
     first.lock().unwrap().next_poll = ControlFlow::Wait;
     assert!(app.poll_window(windows[0], now).is_empty());
     app.about_to_wait(&event_loop);
+    assert_eq!(event_loop.control_flow(), ControlFlow::Wait);
+}
+
+#[test]
+fn shared_deadline_only_requests_redraw_for_the_changed_window() {
+    let deadline = Instant::now() + Duration::from_secs(3_600);
+    let changed = State::new(ControlFlow::WaitUntil(deadline));
+    let unchanged = State::new(ControlFlow::WaitUntil(deadline));
+    unchanged.lock().unwrap().deadline_update = UpdateResult::empty();
+    let (mut app, event_loop) = setup(&[changed.clone(), unchanged.clone()]);
+    let windows: [_; 2] = event_loop.created_window_ids().try_into().unwrap();
+    let redraw_counts = || windows.map(|id| event_loop.redraw_request_count(id).unwrap());
+
+    // Service initial redraws so both windows start with a cached frame.
+    for id in windows {
+        app.render(id);
+    }
+    app.about_to_wait(&event_loop);
+    assert_eq!(event_loop.control_flow(), ControlFlow::WaitUntil(deadline));
+    let [first, second] = redraw_counts();
+
+    app.poll_ready(&event_loop, deadline);
+    for state in [&changed, &unchanged] {
+        let state = state.lock().unwrap();
+        assert_eq!(state.polls.last(), Some(&deadline));
+        assert_eq!(state.renders.len(), 1, "waking must not render inline");
+    }
+    assert_eq!(redraw_counts(), [first + 1, second]);
+    assert_eq!(event_loop.control_flow(), ControlFlow::Wait);
+
+    // Deliver the one redraw requested by the wake.
+    app.render(windows[0]);
+    app.about_to_wait(&event_loop);
+    assert_eq!(changed.lock().unwrap().renders.len(), 2);
+    assert_eq!(unchanged.lock().unwrap().renders.len(), 1);
+    assert_eq!(redraw_counts(), [first + 1, second]);
     assert_eq!(event_loop.control_flow(), ControlFlow::Wait);
 }
 

@@ -34,8 +34,13 @@ wasm-bindgen-futures = { workspace = true }
 
 [dev-dependencies]
 matcha-window = { path = "../matcha-window", default-features = false, features = ["headless"] }
+render-interface = { workspace = true, features = ["scene-builder"] }
 futures = { workspace = true }
 bytemuck = { workspace = true }
+
+[[example]]
+name = "poll_animation"
+required-features = ["winit"]
 
 [features]
 default = ["winit"]

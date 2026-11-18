@@ -9,7 +9,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::{
     adapter::{ControlFlow, EventLoop, EventLoopCommand, EventLoopProxy},
@@ -24,7 +24,7 @@ use crate::{
 /// [`EventLoop`] implementation that creates in-memory windows and records
 /// state instead of talking to an OS.
 pub struct HeadlessEventLoop {
-    created: parking_lot::Mutex<Vec<WindowId>>,
+    created: parking_lot::Mutex<Vec<(WindowId, Arc<AtomicUsize>)>>,
     control_flow: parking_lot::Mutex<ControlFlow>,
     exit_requested: AtomicBool,
 }
@@ -40,7 +40,17 @@ impl HeadlessEventLoop {
 
     /// Ids of every window created through this loop, in creation order.
     pub fn created_window_ids(&self) -> Vec<WindowId> {
-        self.created.lock().clone()
+        self.created.lock().iter().map(|(id, _)| *id).collect()
+    }
+
+    /// Number of redraw requests made for a window created through this loop.
+    /// The count remains available after the window is dropped.
+    pub fn redraw_request_count(&self, id: WindowId) -> Option<usize> {
+        self.created
+            .lock()
+            .iter()
+            .find(|(window, _)| *window == id)
+            .map(|(_, count)| count.load(Ordering::Relaxed))
     }
 }
 
@@ -52,8 +62,11 @@ impl Default for HeadlessEventLoop {
 
 impl EventLoop for HeadlessEventLoop {
     fn create_window(&self, config: &WindowConfig) -> Result<WindowSurface, WindowError> {
-        let window_surface = WindowSurface::new_headless(config);
-        self.created.lock().push(window_surface.id());
+        let redraw_requests = Arc::new(AtomicUsize::new(0));
+        let window_surface = WindowSurface::new_headless(config, Arc::clone(&redraw_requests));
+        self.created
+            .lock()
+            .push((window_surface.id(), redraw_requests));
         Ok(window_surface)
     }
 
