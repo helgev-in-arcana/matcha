@@ -1,5 +1,5 @@
 use super::*;
-use crate::ui_tree::widget::{ControlFlow, PollInfo, Lifecycle};
+use crate::ui_tree::widget::{ControlFlow, Lifecycle, PollInfo};
 use crate::ui_tree::window::{Apply, Window, WindowConfig, WindowRegistry};
 use matcha_window::headless_interface::HeadlessEventLoop;
 use std::time::Duration;
@@ -73,7 +73,10 @@ impl Widget for PollWidget {
         UpdateResult::empty()
     }
 
-    fn poll(&mut self, _: PollInfo, ctx: &mut Context) -> Lifecycle {
+    fn poll(&mut self, info: PollInfo, ctx: &mut Context) -> Lifecycle {
+        if info.phase != WidgetPhase::Active {
+            return info.phase.default_lifecycle();
+        }
         self.order.lock().unwrap().push(self.name);
         let mut state = self.state.lock().unwrap();
         self.width = state.width;

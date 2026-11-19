@@ -1,6 +1,6 @@
 use super::*;
 use crate::metrics::Position;
-use crate::ui_tree::widget::{ControlFlow, WidgetPhase, PollInfo, Lifecycle, Removal};
+use crate::ui_tree::widget::{ControlFlow, Lifecycle, PollInfo, WidgetPhase};
 use matcha_window::application::Application;
 use std::{marker::PhantomData, time::Duration};
 use web_time::Instant;
@@ -55,26 +55,20 @@ impl<V: View> Widget for BranchWidget<V> {
         view.declare(ctx);
         UpdateResult::empty()
     }
-    fn removal_requested(&mut self, _: &mut Context) -> Removal {
-        Removal::Retain
-    }
     fn poll(&mut self, info: PollInfo, ctx: &mut Context) -> Lifecycle {
         let next_poll = match info.phase {
             WidgetPhase::PendingEnter => {
                 let t = self.enter_at.unwrap();
                 if ctx.frame_time() >= t {
-                    return Lifecycle::Enter {
-                        update: UpdateResult::empty(),
-                        next_poll: ControlFlow::Wait,
-                    };
+                    return info.phase.default_lifecycle();
                 }
                 ControlFlow::WaitUntil(t)
             }
             WidgetPhase::Exiting if ctx.frame_time() >= self.exit_at => {
-                return Lifecycle::FinishExit;
+                return info.phase.default_lifecycle();
             }
             WidgetPhase::Exiting => ControlFlow::WaitUntil(self.exit_at),
-            WidgetPhase::Active => ControlFlow::Wait,
+            WidgetPhase::Active => return info.phase.default_lifecycle(),
         };
         Lifecycle::Keep {
             next_poll,
@@ -192,6 +186,46 @@ fn presence_wakes_and_reflows_its_window_and_app_removes_undriven_hosts() {
     assert!(
         app.windows.ids().is_empty(),
         "App only polls native window contents; an outside host cannot wait for an exit poll"
+    );
+}
+
+#[test]
+fn a_view_update_finishes_a_default_exit_before_any_redraw() {
+    struct Buttons(Option<Button>);
+    impl Model for Buttons {
+        fn view(&mut self, _: &ModelContext<'_>) -> impl View {
+            Window::new(Branch {
+                child: self.0.clone(),
+                enter_at: None,
+                exit_at: Instant::now(),
+                layout_counts: None,
+            })
+        }
+    }
+
+    let (observed, _events) = mpsc::channel();
+    let on_input: Arc<ButtonInput> = Arc::new(|| {});
+    let mounted = Arc::downgrade(&on_input);
+    let button = Button {
+        value: 0,
+        on_input,
+        observed,
+    };
+    let mut app = App::new(Buttons(Some(button)), noop_gpu());
+    let event_loop = HeadlessEventLoop::new();
+    app.init(Box::new(HeadlessEventLoopProxy::new()), &event_loop);
+    app.create_surface(&event_loop);
+
+    app.model.0 = None;
+    assert!(
+        mounted.upgrade().is_some(),
+        "the mounted widget still owns the callback"
+    );
+    app.request.as_ref().unwrap().request();
+    app.ui_command(&event_loop, ());
+    assert!(
+        mounted.upgrade().is_none(),
+        "the update's poll finished the exit"
     );
 }
 

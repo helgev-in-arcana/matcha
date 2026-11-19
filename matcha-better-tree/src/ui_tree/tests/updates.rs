@@ -284,14 +284,20 @@ fn adding_and_removing_children_invalidates_unchanged_parent() {
     assert_eq!(warm(&mut tree, parent).x, 15.0);
     let removed = child_at(&tree, parent, 1);
     assert!(tree.node_ref(removed).unwrap().placement.is_some());
-    // Removing the last child is detected at finish, with no out-of-order child declarations.
+    // Reconciliation keeps the omitted child until its default poll completes the exit.
+    let mut registry = crate::ui_tree::window::WindowRegistry::default();
+    let mut ctx = Context::new(&mut registry);
     view.children.pop();
     refresh(&mut tree, &view);
+    assert_eq!(tree.node_ref(removed).unwrap().phase, WidgetPhase::Exiting);
+    assert_cached(&tree, parent, true);
+    assert!(tree.poll(&mut ctx).update.contains(UpdateResult::LAYOUT));
     assert_cached(&tree, parent, false);
     assert!(tree.node_ref(removed).is_none());
     assert_eq!(warm(&mut tree, parent).x, 10.0);
     view.children.clear();
     refresh(&mut tree, &view);
+    assert!(tree.poll(&mut ctx).update.contains(UpdateResult::LAYOUT));
     assert_cached(&tree, parent, false);
     assert_eq!(warm(&mut tree, parent).x, 0.0);
 }

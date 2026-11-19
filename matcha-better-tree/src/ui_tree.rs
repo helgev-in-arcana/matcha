@@ -9,8 +9,8 @@ use nalgebra::{Matrix4, Vector4};
 
 use self::context::Context;
 use self::widget::{
-    Draw, InputPropagation, InputResult, WidgetPhase, PollInfo, Lifecycle, Removal, UiError,
-    UpdateResult, View, Widget,
+    Draw, InputPropagation, InputResult, Lifecycle, PollInfo, UiError, UpdateResult, View, Widget,
+    WidgetPhase,
 };
 use crate::arena::{Arena, Id as UiId};
 use crate::metrics::{Bounds, Constraints, Point};
@@ -166,7 +166,6 @@ trait AnyWidget: utils::MaybeSendSync {
     ) -> InputResult;
     fn input(&mut self, bounds: Bounds, event: &DeviceEvent, ctx: &mut Context) -> InputResult;
     fn poll(&mut self, info: PollInfo, ctx: &mut Context) -> Lifecycle;
-    fn removal_requested(&mut self, ctx: &mut Context) -> Removal;
     fn is_inside(&self, b: Bounds, p: Point, ctx: &mut Context) -> bool;
     fn measure(&self, constraints: Constraints, tree: &mut UiTree, ctx: &mut Context) -> Bounds;
     fn layout(&self, bounds: Bounds, tree: &mut UiTree, ctx: &mut Context);
@@ -226,10 +225,6 @@ impl<W: Widget> AnyWidget for Mounted<W> {
 
     fn poll(&mut self, info: PollInfo, ctx: &mut Context) -> Lifecycle {
         self.widget.poll(info, ctx)
-    }
-
-    fn removal_requested(&mut self, ctx: &mut Context) -> Removal {
-        self.widget.removal_requested(ctx)
     }
 
     fn is_inside(&self, b: Bounds, p: Point, ctx: &mut Context) -> bool {
@@ -379,6 +374,9 @@ impl UiTree {
     /// Reconcile using application services borrowed for this operation.
     /// Window declarations require a registry supplied through Context. Use the
     /// same registry for this tree's lifetime; a registry serves one application tree.
+    /// Call [`Self::poll`] (or [`Self::poll_window`] for window content) before the
+    /// next layout, render or input pass to resolve widget entry and exit. Several
+    /// updates may precede one poll: an exiting keyed child can still be reclaimed.
     pub fn update<V: View>(&mut self, view: &V, context: &mut Context<'_>) {
         if let Err(error) = self.try_update(view, context) {
             log::error!("Opening declared window: {error}");
@@ -552,24 +550,6 @@ impl UiTree {
         }
     }
 
-    fn request_removal(&mut self, id: UiId, ctx: &mut Context) -> Removal {
-        let node = self.node_ref_mut(id).expect("live omitted child");
-        match node.phase {
-            WidgetPhase::Exiting => Removal::Retain,
-            WidgetPhase::PendingEnter => Removal::RemoveNow,
-            WidgetPhase::Active => {
-                let Some(NodeBody::Widget(widget)) = &mut node.body else {
-                    return Removal::RemoveNow;
-                };
-                let decision = widget.removal_requested(ctx);
-                if matches!(decision, Removal::Retain) {
-                    node.phase = WidgetPhase::Exiting;
-                }
-                decision
-            }
-        }
-    }
-
     // A native window has its own input, polling, and drawing lifetime. Close it when
     // its declaration disappears, even if an ordinary ancestor stays for its exit.
     fn remove_nested_windows(&mut self, id: UiId, ctx: &mut Context) -> bool {
@@ -703,7 +683,11 @@ struct ChildLink<P> {
 }
 
 impl<'a, P> Declaration<'a, P> {
-    fn new(current: UiId, old_children: Vec<Candidate>, initial_phase: Option<WidgetPhase>) -> Self {
+    fn new(
+        current: UiId,
+        old_children: Vec<Candidate>,
+        initial_phase: Option<WidgetPhase>,
+    ) -> Self {
         Self {
             current,
             old_children,
@@ -733,20 +717,21 @@ impl<'a, P> Declaration<'a, P> {
         let previous_active: Vec<_> = tree.participating_ids(links).collect();
         let mut retained_exits = false;
         let mut layout_changed = false;
+        // Only a surviving parent's ordinary child links can be kept until poll.
+        // A replaced parent loses its typed links; a native Window has one content slot.
+        let can_exit = self.initial_phase.is_none()
+            && matches!(self.child_scope, ChildScope::Inherited)
+            && scoped.can_poll_widgets();
         for old in self.old_children {
-            // A rebuilt parent has a new ChildData type. A native window has exactly one
-            // content slot. Neither can keep an omitted link from the old declaration.
-            if self.initial_phase.is_none()
-                && matches!(self.child_scope, ChildScope::Inherited)
-                && scoped.can_poll_widgets()
-                && matches!(tree.request_removal(old.node, &mut scoped), Removal::Retain)
-            {
-                retained_exits = true;
-                if !old.exiting {
-                    layout_changed |= tree.remove_nested_windows(old.node, &mut scoped);
-                }
-            } else {
+            let node = tree.node_ref_mut(old.node).expect("live omitted child");
+            if !can_exit || node.body().is_window() || node.phase == WidgetPhase::PendingEnter {
                 tree.remove_reverse_scan_order(old.node, &mut scoped);
+                continue;
+            }
+            retained_exits = true;
+            if node.phase != WidgetPhase::Exiting {
+                node.phase = WidgetPhase::Exiting;
+                layout_changed |= tree.remove_nested_windows(old.node, &mut scoped);
             }
         }
 
@@ -816,7 +801,7 @@ impl<'a, 'env, P> DeclContext<'a, 'env, P> {
     }
 
     /// Build this widget in `PendingEnter`: it can poll but takes no part in layout, drawing,
-    /// or input until it returns `PollResult::Enter`. Has no effect in `Widget::update`.
+    /// or input until it returns [`Lifecycle::Enter`]. Has no effect in `Widget::update`.
     pub fn start_inactive(&mut self) {
         if self.context.can_poll_widgets()
             && let Some(phase) = &mut self.declaration.initial_phase

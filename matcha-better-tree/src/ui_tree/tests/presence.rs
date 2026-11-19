@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use super::*;
-use crate::ui_tree::widget::{ControlFlow, WidgetPhase, PollInfo, Lifecycle, Removal};
+use crate::ui_tree::widget::{ControlFlow, Lifecycle, PollInfo, WidgetPhase};
 use crate::ui_tree::window::WindowRegistry;
 use web_time::Instant;
 
@@ -14,7 +14,6 @@ struct Slot(u16);
 #[derive(Default)]
 struct Trace {
     builds: usize,
-    removals: usize,
     drops: usize,
     polls: Vec<(WidgetPhase, bool)>,
     layouts: Vec<Vec<u16>>,
@@ -94,18 +93,10 @@ impl Widget for ItemWidget {
     type V = Item;
 
     fn update<'a>(&mut self, view: &'a Item, ctx: &mut DeclContext<'a, '_, Slot>) -> UpdateResult {
+        // A declaration revives an exiting item even if no Active poll runs before its next exit.
+        self.exit_at = None;
         view.declare(ctx);
         UpdateResult::empty()
-    }
-
-    fn removal_requested(&mut self, ctx: &mut Context) -> Removal {
-        self.trace.lock().unwrap().removals += 1;
-        if self.retain {
-            self.exit_at = Some(ctx.frame_time() + DELAY);
-            Removal::Retain
-        } else {
-            Removal::RemoveNow
-        }
     }
 
     fn poll(&mut self, info: PollInfo, ctx: &mut Context) -> Lifecycle {
@@ -126,13 +117,15 @@ impl Widget for ItemWidget {
                 ControlFlow::WaitUntil(deadline)
             }
             WidgetPhase::Active => self.wake,
-            WidgetPhase::Exiting => {
-                let deadline = self.exit_at.unwrap();
-                if deadline <= ctx.frame_time() {
+            WidgetPhase::Exiting if self.retain => {
+                let now = ctx.frame_time();
+                let deadline = *self.exit_at.get_or_insert(now + DELAY);
+                if deadline <= now {
                     return Lifecycle::FinishExit;
                 }
                 ControlFlow::WaitUntil(deadline)
             }
+            phase => return phase.default_lifecycle(),
         };
         Lifecycle::Keep {
             next_poll: wake,
@@ -255,13 +248,16 @@ fn retirement_keeps_slot_and_order_blocks_subtree_input_and_discards_subtree_wak
 
     root.children.remove(1);
     tree.update(&root, &mut ctx);
+    assert_eq!(
+        tree.poll(&mut ctx).next_poll,
+        ControlFlow::WaitUntil(now + DELAY)
+    );
     let mut early = ctx.reborrow().with_frame_time(now + DELAY / 2);
     tree.update(&root, &mut early);
     assert_eq!(
         tree.poll(&mut early).next_poll,
         ControlFlow::WaitUntil(now + DELAY)
     );
-    assert_eq!(departing.lock().unwrap().removals, 1);
     assert_eq!(
         root.trace.lock().unwrap().polls.last(),
         Some(&(WidgetPhase::Active, false))
@@ -329,6 +325,61 @@ fn redeclaring_same_key_revives_original_widget_and_cancels_its_old_deadline() {
 }
 
 #[test]
+fn redeclaration_before_first_exit_poll_keeps_the_keyed_instance() {
+    let mut registry = WindowRegistry::default();
+    let mut ctx = Context::new(&mut registry);
+    let mut tree = UiTree::new();
+    let mut root = Item::new(0);
+    let item = Item::new(1);
+    let trace = item.trace.clone();
+    root.children.push((10, item));
+    tree.update(&root, &mut ctx);
+    let (_, item) = root.children.pop().unwrap();
+    tree.update(&root, &mut ctx);
+    root.children.push((20, item));
+    tree.update(&root, &mut ctx);
+    let _ = tree.poll(&mut ctx);
+    let trace = trace.lock().unwrap();
+    assert_eq!((trace.builds, trace.drops), (1, 0));
+    assert_eq!(trace.polls, [(WidgetPhase::Active, false)]);
+}
+
+#[test]
+fn revival_then_second_omission_before_poll_restarts_the_exit_deadline() {
+    let now = Instant::now();
+    let mut registry = WindowRegistry::default();
+    let mut ctx = Context::new(&mut registry).with_frame_time(now);
+    let mut tree = UiTree::new();
+    let mut root = Item::new(0);
+    let mut item = Item::new(1);
+    item.retain = true;
+    let trace = item.trace.clone();
+    root.children.push((10, item));
+    tree.update(&root, &mut ctx);
+    let (_, item) = root.children.pop().unwrap();
+    tree.update(&root, &mut ctx);
+    assert_eq!(
+        tree.poll(&mut ctx).next_poll,
+        ControlFlow::WaitUntil(now + DELAY)
+    );
+
+    root.children.push((10, item));
+    tree.update(&root, &mut ctx);
+    root.children.clear();
+    tree.update(&root, &mut ctx);
+    let mut second = ctx.reborrow().with_frame_time(now + DELAY);
+    assert_eq!(
+        tree.poll(&mut second).next_poll,
+        ControlFlow::WaitUntil(now + DELAY * 2)
+    );
+    assert_eq!(trace.lock().unwrap().drops, 0);
+
+    let mut due = ctx.reborrow().with_frame_time(now + DELAY * 2);
+    assert_eq!(tree.poll(&mut due).next_poll, ControlFlow::Wait);
+    assert_eq!(trace.lock().unwrap().drops, 1);
+}
+
+#[test]
 fn cancelling_pending_child_neither_requests_exit_nor_changes_active_children() {
     let now = Instant::now();
     let mut registry = WindowRegistry::default();
@@ -353,11 +404,12 @@ fn cancelling_pending_child_neither_requests_exit_nor_changes_active_children() 
         Some(&(WidgetPhase::Active, false))
     );
     let item = item.lock().unwrap();
-    assert_eq!((item.removals, item.drops), (0, 1));
+    assert_eq!(item.drops, 1);
+    assert_eq!(item.polls, [(WidgetPhase::PendingEnter, false)]);
 }
 
 #[test]
-fn removing_parent_forces_retained_descendants_to_drop_without_a_final_poll() {
+fn finishing_parent_discards_its_retained_descendants_and_their_wake() {
     let now = Instant::now();
     let mut registry = WindowRegistry::default();
     let mut ctx = Context::new(&mut registry).with_frame_time(now);
@@ -379,9 +431,11 @@ fn removing_parent_forces_retained_descendants_to_drop_without_a_final_poll() {
     );
     root.children.clear();
     tree.update(&root, &mut ctx);
+    assert_eq!(trace.lock().unwrap().drops, 0);
     assert_eq!(tree.poll(&mut ctx).next_poll, ControlFlow::Wait);
     let trace = trace.lock().unwrap();
-    assert_eq!((trace.removals, trace.drops, trace.polls.len()), (1, 1, 1));
+    assert_eq!(trace.drops, 1);
+    assert_eq!(trace.polls, [(WidgetPhase::Exiting, false); 2]);
 }
 
 #[test]
@@ -430,7 +484,10 @@ fn replacing_window_with_declaration_host_does_not_leave_reused_content_waiting_
     tree.update(&crate::ui_tree::window::Window::new(item), &mut ctx);
     let root = tree.root.unwrap();
     let child = child_at(&tree, root, 0);
-    assert_eq!(tree.node_ref(child).unwrap().phase, WidgetPhase::PendingEnter);
+    assert_eq!(
+        tree.node_ref(child).unwrap().phase,
+        WidgetPhase::PendingEnter
+    );
 
     let mut host = Item::new(0);
     host.children.push((0, Item::new(1)));
@@ -456,14 +513,18 @@ fn finishing_adjacent_exits_does_not_skip_the_next_sibling() {
     tree.update(&root, &mut ctx);
     root.children.drain(..2);
     tree.update(&root, &mut ctx);
+    assert_eq!(
+        tree.poll(&mut ctx).next_poll,
+        ControlFlow::WaitUntil(now + DELAY)
+    );
 
     let mut due = ctx.reborrow().with_frame_time(now + DELAY);
     assert_eq!(tree.poll(&mut due).next_poll, ControlFlow::Wait);
     for trace in &traces[..2] {
         let trace = trace.lock().unwrap();
-        assert_eq!((trace.drops, trace.polls.len()), (1, 1));
+        assert_eq!((trace.drops, trace.polls.len()), (1, 2));
     }
-    assert_eq!(traces[2].lock().unwrap().polls.len(), 1);
+    assert_eq!(traces[2].lock().unwrap().polls.len(), 2);
     tree.layout(bounds(), &mut due);
     assert_eq!(root.trace.lock().unwrap().layouts.last(), Some(&vec![3]));
 }

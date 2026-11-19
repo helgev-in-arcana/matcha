@@ -7,8 +7,7 @@ use matcha_better_tree::UiTree;
 use matcha_better_tree::metrics::{Bounds, Constraints, Position};
 use matcha_better_tree::ui_tree::context::Context;
 use matcha_better_tree::ui_tree::widget::{
-    ControlFlow, Draw, InputResult, WidgetPhase, PollInfo, Lifecycle, Removal, UpdateResult, View,
-    Widget,
+    ControlFlow, Draw, InputResult, Lifecycle, PollInfo, UpdateResult, View, Widget, WidgetPhase,
 };
 use matcha_better_tree::ui_tree::window::WindowRegistry;
 use matcha_better_tree::ui_tree::{Children, DeclContext};
@@ -19,7 +18,8 @@ const DELAY: Duration = Duration::from_millis(300);
 
 struct Notice;
 struct NoticeWidget {
-    deadline: Instant,
+    enter_at: Instant,
+    exit_at: Option<Instant>,
 }
 
 impl View for Notice {
@@ -36,7 +36,8 @@ impl View for Notice {
     fn build<'a>(&'a self, ctx: &mut DeclContext<'a, '_>) -> impl Widget<V = Self> {
         ctx.start_inactive();
         NoticeWidget {
-            deadline: ctx.context().frame_time() + DELAY,
+            enter_at: ctx.context().frame_time() + DELAY,
+            exit_at: None,
         }
     }
 }
@@ -45,26 +46,25 @@ impl Widget for NoticeWidget {
     type V = Notice;
 
     fn update<'a>(&mut self, _: &'a Notice, _: &mut DeclContext<'a, '_>) -> UpdateResult {
+        // Re-declaration cancels any previous exit, even if no poll runs before the next omission.
+        self.exit_at = None;
         UpdateResult::empty()
     }
 
-    fn removal_requested(&mut self, ctx: &mut Context) -> Removal {
-        self.deadline = ctx.frame_time() + DELAY;
-        Removal::Retain
-    }
-
     fn poll(&mut self, info: PollInfo, ctx: &mut Context) -> Lifecycle {
-        match info.phase {
-            WidgetPhase::Active => Lifecycle::default(),
-            _ if ctx.frame_time() < self.deadline => Lifecycle::Keep {
-                next_poll: ControlFlow::WaitUntil(self.deadline),
+        let now = ctx.frame_time();
+        let deadline = match info.phase {
+            WidgetPhase::PendingEnter => self.enter_at,
+            WidgetPhase::Active => return info.phase.default_lifecycle(),
+            WidgetPhase::Exiting => *self.exit_at.get_or_insert_with(|| now + DELAY),
+        };
+        if now < deadline {
+            Lifecycle::Keep {
+                next_poll: ControlFlow::WaitUntil(deadline),
                 update: UpdateResult::empty(),
-            },
-            WidgetPhase::PendingEnter => Lifecycle::Enter {
-                update: UpdateResult::empty(),
-                next_poll: ControlFlow::Wait,
-            },
-            WidgetPhase::Exiting => Lifecycle::FinishExit,
+            }
+        } else {
+            info.phase.default_lifecycle()
         }
     }
 
@@ -115,7 +115,7 @@ impl Widget for PageWidget {
         if info.active_children_changed {
             println!("  page: active children changed");
         }
-        Lifecycle::default()
+        info.phase.default_lifecycle()
     }
     fn input(&mut self, _: Bounds, _: &DeviceEvent, _: &mut Context) -> InputResult {
         InputResult::default()

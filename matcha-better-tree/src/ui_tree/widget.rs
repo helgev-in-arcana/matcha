@@ -52,28 +52,14 @@ pub trait Widget: Any + utils::MaybeSendSync {
     /// awaiting entry or exit. Read the shared pass time through `ctx.frame_time()`.
     /// Each full pass replaces previous requests, so an early poll must repeat any deadline
     /// that still matters. `WaitUntil` requests a wakeup; execution may occur later.
+    ///
+    /// An active child omitted from its parent's declaration is polled as
+    /// [`WidgetPhase::Exiting`]. Return [`Lifecycle::FinishExit`] to drop it on this pass,
+    /// or [`Lifecycle::Keep`] to keep it in layout and drawing. A new declaration with
+    /// the same explicit key and view type updates that widget and cancels its exit.
+    /// Use [`WidgetPhase::default_lifecycle`] for phases this widget does not customize.
     fn poll(&mut self, info: PollInfo, _ctx: &mut Context) -> Lifecycle {
-        match info.phase {
-            WidgetPhase::PendingEnter => Lifecycle::Enter {
-                update: UpdateResult::empty(),
-                next_poll: ControlFlow::Wait,
-            },
-            WidgetPhase::Active => Lifecycle::Keep {
-                update: UpdateResult::empty(),
-                next_poll: ControlFlow::Wait,
-            },
-            WidgetPhase::Exiting => Lifecycle::FinishExit,
-        }
-    }
-
-    /// Called once when this active child is omitted from its parent's declaration.
-    /// Return `Retain` to keep the widget for an exit until its poll returns `FinishExit`.
-    /// Re-declaring the same explicit key and view type cancels its exit and updates
-    /// the same widget. Declarations without a key cannot revive an exiting widget.
-    /// Removing the parent itself drops its subtree without waiting for child exits;
-    /// replacing a native Window's single content slot also drops the old content.
-    fn removal_requested(&mut self, _ctx: &mut Context) -> Removal {
-        Removal::RemoveNow
+        info.phase.default_lifecycle()
     }
 
     /// Observe or intercept an event from root to target (inclusive), before normal input.
@@ -160,6 +146,20 @@ pub enum WidgetPhase {
     Exiting,
 }
 
+impl WidgetPhase {
+    /// Enter or finish exiting on this poll; while active, request no work.
+    pub fn default_lifecycle(self) -> Lifecycle {
+        match self {
+            Self::PendingEnter => Lifecycle::Enter {
+                update: UpdateResult::empty(),
+                next_poll: ControlFlow::Wait,
+            },
+            Self::Active => Lifecycle::default(),
+            Self::Exiting => Lifecycle::FinishExit,
+        }
+    }
+}
+
 /// Tree state observed after polling this widget's children.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PollInfo {
@@ -198,14 +198,6 @@ impl Default for Lifecycle {
             next_poll: ControlFlow::Wait,
         }
     }
-}
-
-/// Whether to keep a child after its declaration disappears.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[must_use]
-pub enum Removal {
-    RemoveNow,
-    Retain,
 }
 
 /// Whether the current event should reach further widgets or the next dispatch phase.
