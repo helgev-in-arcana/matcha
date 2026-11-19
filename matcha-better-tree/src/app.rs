@@ -189,7 +189,7 @@ impl<M: Model + utils::MaybeSendSync + 'static> App<M> {
         let mut root = Context::with_services(&mut self.windows, &mut self.services);
         if let Err(error) = self
             .tree
-            .try_update(&view, &mut root.with_window_factory(&mut open))
+            .try_update(&view, &mut root.for_window_declarations(&mut open))
         {
             log::error!("Mounting window: {error}");
         }

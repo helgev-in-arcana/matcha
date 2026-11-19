@@ -1,5 +1,6 @@
 //! UI ownership, reconciliation, layout, and input. Storage lives in the generic arena module.
 use std::any::{Any, TypeId};
+use std::collections::HashMap;
 
 use matcha_window::event::device_event::DeviceEvent;
 use matcha_window::event::window_event::WindowEvent;
@@ -8,7 +9,8 @@ use nalgebra::{Matrix4, Vector4};
 
 use self::context::Context;
 use self::widget::{
-    Draw, InputPropagation, InputResult, PollResult, UiError, UpdateResult, View, Widget,
+    Draw, InputPropagation, InputResult, WidgetPhase, PollInfo, Lifecycle, Removal, UiError,
+    UpdateResult, View, Widget,
 };
 use crate::arena::{Arena, Id as UiId};
 use crate::metrics::{Bounds, Constraints, Point};
@@ -25,6 +27,7 @@ pub mod window;
 
 use cache::Cache;
 use env_reads::{EnvReads, NodeEnvReads, ReadPhase};
+pub use poll::PollSummary;
 
 trait AnyView: Any {
     fn label(&self) -> Option<&str>;
@@ -34,7 +37,7 @@ trait AnyView: Any {
         tree: &mut UiTree,
         parent: Option<UiId>,
         id: UiId,
-        old_children: Vec<(UiKey, UiId)>,
+        old_children: Vec<Candidate>,
         context: &mut Context,
     ) -> UiNode;
 }
@@ -56,17 +59,20 @@ impl<V: View> AnyView for V {
         tree: &mut UiTree,
         parent: Option<UiId>,
         id: UiId,
-        old_children: Vec<(UiKey, UiId)>,
+        old_children: Vec<Candidate>,
         context: &mut Context,
     ) -> UiNode {
         let label = View::label(self).map(str::to_owned);
         let key = self.ui_key();
-        let mut declaration = Declaration::new(id, old_children);
-        let (body, reads) = context.observe_env_reads(|context| {
+        let mut declaration = Declaration::new(id, old_children, Some(WidgetPhase::Active));
+        let ((body, phase), reads) = context.observe_env_reads(|context| {
             let widget = self.build(&mut declaration.context(context));
-            let mut children = Vec::with_capacity(declaration.queued.len());
+            let phase = declaration
+                .initial_phase
+                .expect("build supplies initial phase");
+            let mut children = Vec::new();
             declaration.finish(tree, context, &mut children);
-            Mounted { widget, children }.into_body()
+            (Mounted { widget, children }.into_body(), phase)
         });
         let mut env_reads = NodeEnvReads::default();
         env_reads.record(ReadPhase::Build, reads);
@@ -74,6 +80,8 @@ impl<V: View> AnyView for V {
             label,
             key,
             parent,
+            phase,
+            active_children_changed: false,
             placement: None,
             measure_cache: Cache::default(),
             layout_cache: Cache::default(),
@@ -142,6 +150,7 @@ trait AnyWindow: AnyWidget {
 trait AnyWidget: utils::MaybeSendSync {
     fn child_count(&self) -> usize;
     fn child_id(&self, index: usize) -> UiId;
+    fn retain_children(&mut self, keep: &mut dyn FnMut(UiId) -> bool);
     fn try_update(
         &mut self,
         view: &dyn AnyView,
@@ -156,7 +165,8 @@ trait AnyWidget: utils::MaybeSendSync {
         ctx: &mut Context,
     ) -> InputResult;
     fn input(&mut self, bounds: Bounds, event: &DeviceEvent, ctx: &mut Context) -> InputResult;
-    fn poll(&mut self, ctx: &mut Context) -> PollResult;
+    fn poll(&mut self, info: PollInfo, ctx: &mut Context) -> Lifecycle;
+    fn removal_requested(&mut self, ctx: &mut Context) -> Removal;
     fn is_inside(&self, b: Bounds, p: Point, ctx: &mut Context) -> bool;
     fn measure(&self, constraints: Constraints, tree: &mut UiTree, ctx: &mut Context) -> Bounds;
     fn layout(&self, bounds: Bounds, tree: &mut UiTree, ctx: &mut Context);
@@ -179,6 +189,10 @@ impl<W: Widget> AnyWidget for Mounted<W> {
         self.children[index].node
     }
 
+    fn retain_children(&mut self, keep: &mut dyn FnMut(UiId) -> bool) {
+        self.children.retain(|link| keep(link.node));
+    }
+
     fn try_update(
         &mut self,
         view: &dyn AnyView,
@@ -188,7 +202,7 @@ impl<W: Widget> AnyWidget for Mounted<W> {
     ) -> Option<(UpdateResult, EnvReads)> {
         let view = (view as &dyn Any).downcast_ref::<W::V>()?;
         let old_children = tree.child_candidates(self);
-        let mut declaration = Declaration::new(id, old_children);
+        let mut declaration = Declaration::new(id, old_children, None);
         let (mut result, reads) = context
             .observe_env_reads(|ctx| self.widget.update(view, &mut declaration.context(ctx)));
         if declaration.finish(tree, context, &mut self.children) {
@@ -210,8 +224,12 @@ impl<W: Widget> AnyWidget for Mounted<W> {
         self.widget.input(bounds, event, ctx)
     }
 
-    fn poll(&mut self, ctx: &mut Context) -> PollResult {
-        self.widget.poll(ctx)
+    fn poll(&mut self, info: PollInfo, ctx: &mut Context) -> Lifecycle {
+        self.widget.poll(info, ctx)
+    }
+
+    fn removal_requested(&mut self, ctx: &mut Context) -> Removal {
+        self.widget.removal_requested(ctx)
     }
 
     fn is_inside(&self, b: Bounds, p: Point, ctx: &mut Context) -> bool {
@@ -278,6 +296,8 @@ struct UiNode {
 
     // tree
     parent: Option<UiId>,
+    phase: WidgetPhase,
+    active_children_changed: bool,
 
     // Current placement assigned by the parent, independent of layout cache validity.
     placement: Option<Placement>,
@@ -453,23 +473,43 @@ impl UiTree {
         id
     }
 
-    fn child_candidates(&self, widget: &dyn AnyWidget) -> Vec<(UiKey, UiId)> {
+    fn child_candidates(&self, widget: &dyn AnyWidget) -> Vec<Candidate> {
         // Matching normally consumes siblings in declaration order. Keep the next
         // candidate at the end so claiming an unchanged child takes constant time.
         widget
             .child_ids()
+            .enumerate()
             .rev()
-            .map(|id| (self.node_ref(id).expect("live child").key, id))
+            .map(|(index, id)| {
+                let node = self.node_ref(id).expect("live child");
+                Candidate {
+                    node: id,
+                    key: node.key,
+                    index,
+                    exiting: node.phase == WidgetPhase::Exiting,
+                }
+            })
             .collect()
     }
 
     // Return whether this subtree changed so callers invalidate ancestors on the way back up.
-    fn update_node(&mut self, id: UiId, view: &dyn AnyView, context: &mut Context<'_>) -> bool {
+    fn update_node(
+        &mut self,
+        id: UiId,
+        view: &dyn AnyView,
+        context: &mut Context<'_>,
+    ) -> Reconciled {
         let node = self.node_ref_mut(id).expect("live update node");
+        let was_exiting = node.phase == WidgetPhase::Exiting;
         let mut body = node.body.take().expect("body restored after callbacks");
         let was_window = body.is_window();
         if let Some((result, reads)) = body.as_widget_mut().try_update(view, self, id, context) {
             let node = self.node_ref_mut(id).expect("live update node");
+            // A Window -> ordinary host replacement may preserve its children's identities.
+            // Outside a poll driver there is no callback that could finish a pending entry.
+            if was_exiting || !context.can_poll_widgets() {
+                node.phase = WidgetPhase::Active;
+            }
             node.env_reads.record(ReadPhase::Update, reads);
             if node.label.as_deref() != view.label() {
                 node.label = view.label().map(str::to_owned);
@@ -478,13 +518,26 @@ impl UiTree {
             node.body = Some(body);
             node.invalidate_caches(result);
             // A native window's content cannot affect its parent's size.
-            result.contains(UpdateResult::LAYOUT) && !was_window
+            Reconciled {
+                layout_changed: result.contains(UpdateResult::LAYOUT) && !was_window,
+                replaced: false,
+            }
         } else {
             if was_window {
                 context.window_registry().remove_node(id);
             }
             // A replacement takes over child identities and declares its own typed properties.
-            let old_children = self.child_candidates(body.as_widget());
+            let mut old_children = self.child_candidates(body.as_widget());
+            // The new parent cannot own the old parent's typed links for retiring children.
+            // A replaced retiree itself is never revived by reusing one of its descendants.
+            old_children.retain(|child| {
+                if was_exiting || child.exiting {
+                    self.remove_reverse_scan_order(child.node, context);
+                    false
+                } else {
+                    true
+                }
+            });
             let parent = self.node_ref(id).expect("live replacement node").parent;
             let node = view.build_node(self, parent, id, old_children, context);
             let environment_changed = was_window || node.body().is_window();
@@ -492,8 +545,60 @@ impl UiTree {
             if environment_changed {
                 self.invalidate_caches_from(id, UpdateResult::LAYOUT | UpdateResult::RENDER);
             }
-            true
+            Reconciled {
+                layout_changed: true,
+                replaced: true,
+            }
         }
+    }
+
+    fn request_removal(&mut self, id: UiId, ctx: &mut Context) -> Removal {
+        let node = self.node_ref_mut(id).expect("live omitted child");
+        match node.phase {
+            WidgetPhase::Exiting => Removal::Retain,
+            WidgetPhase::PendingEnter => Removal::RemoveNow,
+            WidgetPhase::Active => {
+                let Some(NodeBody::Widget(widget)) = &mut node.body else {
+                    return Removal::RemoveNow;
+                };
+                let decision = widget.removal_requested(ctx);
+                if matches!(decision, Removal::Retain) {
+                    node.phase = WidgetPhase::Exiting;
+                }
+                decision
+            }
+        }
+    }
+
+    // A native window has its own input, polling, and drawing lifetime. Close it when
+    // its declaration disappears, even if an ordinary ancestor stays for its exit.
+    fn remove_nested_windows(&mut self, id: UiId, ctx: &mut Context) -> bool {
+        let mut body = self
+            .node_ref_mut(id)
+            .expect("live retiree")
+            .body
+            .take()
+            .expect("mounted");
+        let mut child_removed = false;
+        let mut layout_changed = false;
+        body.as_widget_mut().retain_children(&mut |child| {
+            if self.node_ref(child).expect("live child").body().is_window() {
+                self.remove_reverse_scan_order(child, ctx);
+                child_removed = true;
+                false
+            } else {
+                layout_changed |= self.remove_nested_windows(child, ctx);
+                true
+            }
+        });
+        let node = self.node_ref_mut(id).expect("live retiree");
+        node.body = Some(body);
+        node.active_children_changed |= child_removed;
+        if child_removed || layout_changed {
+            node.invalidate_caches(UpdateResult::LAYOUT);
+            return node.phase != WidgetPhase::PendingEnter;
+        }
+        false
     }
 
     fn remove_reverse_scan_order(&mut self, id: UiId, context: &mut Context<'_>) {
@@ -514,6 +619,20 @@ impl UiTree {
 
     fn node_ref_mut(&mut self, id: UiId) -> Option<&mut UiNode> {
         self.nodes.get_mut(id)
+    }
+
+    fn participates(&self, id: UiId) -> bool {
+        self.node_ref(id).expect("live child link").phase != WidgetPhase::PendingEnter
+    }
+
+    fn participating_ids<'a, P>(
+        &'a self,
+        links: &'a [ChildLink<P>],
+    ) -> impl Iterator<Item = UiId> + 'a {
+        links
+            .iter()
+            .map(|link| link.node)
+            .filter(|&id| self.participates(id))
     }
 }
 
@@ -544,15 +663,35 @@ pub struct DeclContext<'a, 'env, P = ()> {
 /// Context-free reconciliation data, retained after the observed callback returns.
 struct Declaration<'a, P> {
     current: UiId,
-    old_children: Vec<(UiKey, UiId)>,
+    old_children: Vec<Candidate>,
     queued: Vec<QueuedView<'a, P>>,
+    // Only build may choose how its node first participates.
+    initial_phase: Option<WidgetPhase>,
     // Only used while reconciling this declaration's children into their native window.
-    child_window: Option<WindowId>,
+    child_scope: ChildScope,
+}
+
+enum ChildScope {
+    Inherited,
+    Native(WindowId),
+    UnmountedWindow,
+}
+
+struct Candidate {
+    key: UiKey,
+    node: UiId,
+    index: usize,
+    exiting: bool,
+}
+
+struct Reconciled {
+    layout_changed: bool,
+    replaced: bool,
 }
 
 struct QueuedView<'a, P> {
     key: UiKey,
-    existing: Option<UiId>,
+    existing: Option<Candidate>,
     view: &'a dyn AnyView,
     data: P,
 }
@@ -564,12 +703,13 @@ struct ChildLink<P> {
 }
 
 impl<'a, P> Declaration<'a, P> {
-    fn new(current: UiId, old_children: Vec<(UiKey, UiId)>) -> Self {
+    fn new(current: UiId, old_children: Vec<Candidate>, initial_phase: Option<WidgetPhase>) -> Self {
         Self {
             current,
             old_children,
             queued: Vec::new(),
-            child_window: None,
+            initial_phase,
+            child_scope: ChildScope::Inherited,
         }
     }
 
@@ -580,48 +720,109 @@ impl<'a, P> Declaration<'a, P> {
         }
     }
 
-    /// Reconcile into the parent's existing link buffer. The result includes both link changes
-    /// and layout changes reported by retained descendants.
+    /// Reconcile declared children and retiring links. Only participating children affect
+    /// the parent's layout, even though every retained child receives its declaration updates.
     fn finish(self, tree: &mut UiTree, context: &mut Context, links: &mut Vec<ChildLink<P>>) -> bool
     where
         P: PartialEq,
     {
         let mut scoped = context.unobserved();
-        if let Some(id) = self.child_window {
+        if let ChildScope::Native(id) = self.child_scope {
             scoped = scoped.with_window(id);
         }
-        for (_, id) in self.old_children {
-            tree.remove_reverse_scan_order(id, &mut scoped);
+        let previous_active: Vec<_> = tree.participating_ids(links).collect();
+        let mut retained_exits = false;
+        let mut layout_changed = false;
+        for old in self.old_children {
+            // A rebuilt parent has a new ChildData type. A native window has exactly one
+            // content slot. Neither can keep an omitted link from the old declaration.
+            if self.initial_phase.is_none()
+                && matches!(self.child_scope, ChildScope::Inherited)
+                && scoped.can_poll_widgets()
+                && matches!(tree.request_removal(old.node, &mut scoped), Removal::Retain)
+            {
+                retained_exits = true;
+                if !old.exiting {
+                    layout_changed |= tree.remove_nested_windows(old.node, &mut scoped);
+                }
+            } else {
+                tree.remove_reverse_scan_order(old.node, &mut scoped);
+            }
         }
 
-        let mut changed = links.len() != self.queued.len();
-        links.truncate(self.queued.len());
-        for (index, child) in self.queued.into_iter().enumerate() {
+        let mut declared = Vec::with_capacity(self.queued.len());
+        let mut active_changed = false;
+        for child in self.queued {
             let node = match child.existing {
-                Some(id) => {
-                    changed |= tree.update_node(id, child.view, &mut scoped);
-                    id
+                Some(old) => {
+                    let change = tree.update_node(old.node, child.view, &mut scoped);
+                    if tree.participates(old.node) {
+                        layout_changed |= change.layout_changed
+                            || links
+                                .get(old.index)
+                                .is_some_and(|link| link.data != child.data);
+                        active_changed |= change.replaced;
+                    }
+                    old.node
                 }
                 None => tree.build_new(Some(self.current), child.view, &mut scoped),
             };
-            let link = ChildLink {
+            declared.push(ChildLink {
                 node,
                 data: child.data,
-            };
-            if let Some(old) = links.get_mut(index) {
-                changed = changed || *old != link;
-                *old = link;
-            } else {
-                links.push(link);
+            });
+        }
+        if retained_exits {
+            Self::merge_exiting(tree, links, declared);
+        } else {
+            *links = declared;
+        }
+        active_changed |= tree.participating_ids(links).ne(previous_active);
+        if active_changed && self.initial_phase.is_none() {
+            tree.node_ref_mut(self.current)
+                .expect("mounted parent")
+                .active_children_changed = true;
+        }
+        active_changed || layout_changed
+    }
+
+    // Anchor each run of retirees before its nearest surviving old successor, or at the
+    // end if none remains. Declared siblings always follow their new declaration order.
+    fn merge_exiting(tree: &UiTree, links: &mut Vec<ChildLink<P>>, declared: Vec<ChildLink<P>>) {
+        let mut before = HashMap::new();
+        let mut run = Vec::new();
+        for old in links.drain(..) {
+            if let Some(node) = tree.node_ref(old.node) {
+                if node.phase == WidgetPhase::Exiting {
+                    run.push(old);
+                } else if !run.is_empty() {
+                    before.insert(old.node, std::mem::take(&mut run));
+                }
             }
         }
-        changed
+        for child in declared {
+            if let Some(mut retirees) = before.remove(&child.node) {
+                links.append(&mut retirees);
+            }
+            links.push(child);
+        }
+        links.append(&mut run);
     }
 }
 
 impl<'a, 'env, P> DeclContext<'a, 'env, P> {
     pub fn context(&mut self) -> &mut Context<'env> {
         &mut self.context
+    }
+
+    /// Build this widget in `PendingEnter`: it can poll but takes no part in layout, drawing,
+    /// or input until it returns `PollResult::Enter`. Has no effect in `Widget::update`.
+    pub fn start_inactive(&mut self) {
+        if self.context.can_poll_widgets()
+            && let Some(phase) = &mut self.declaration.initial_phase
+        {
+            *phase = WidgetPhase::PendingEnter;
+        }
     }
 
     /// Declare a child and the properties this parent uses for its measurement and layout.
@@ -636,8 +837,8 @@ impl<'a, 'env, P> DeclContext<'a, 'env, P> {
         let existing = declaration
             .old_children
             .iter()
-            .rposition(|(k, _)| *k == key)
-            .map(|index| declaration.old_children.remove(index).1);
+            .rposition(|old| old.key == key && (!old.exiting || matches!(key, UiKey::Key(_))))
+            .map(|index| declaration.old_children.remove(index));
         declaration.queued.push(QueuedView {
             key,
             existing,
@@ -654,7 +855,8 @@ impl<'a> DeclContext<'a, '_> {
     }
 }
 
-/// This parent's children in declaration order. Each visit borrows one link for the call.
+/// Participating children in layout order. A retiring child keeps its last declared data;
+/// a child awaiting entry is not part of this collection.
 pub struct Children<'a, P = ()> {
     links: &'a [ChildLink<P>],
     tree: &'a mut UiTree,
@@ -662,11 +864,11 @@ pub struct Children<'a, P = ()> {
 
 impl<P> Children<'_, P> {
     pub fn len(&self) -> usize {
-        self.links.len()
+        self.tree.participating_ids(self.links).count()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.links.is_empty()
+        self.tree.participating_ids(self.links).next().is_none()
     }
 
     /// The order is stable across multiple passes within a widget callback. A child handle
@@ -683,6 +885,9 @@ impl<P> Children<'_, P> {
     /// ```
     pub fn for_each(&mut self, mut visit: impl for<'child> FnMut(&'child P, Child<'child>)) {
         for link in self.links {
+            if !self.tree.participates(link.node) {
+                continue;
+            }
             visit(
                 &link.data,
                 Child {
@@ -705,6 +910,9 @@ impl Child<'_> {
     /// the child has no placement or the point cannot be mapped into its coordinates.
     pub fn is_inside(&mut self, point: Point, ctx: &mut Context) -> Option<bool> {
         let node = self.tree.node_ref(self.id).expect("live child");
+        if node.phase == WidgetPhase::Exiting {
+            return Some(false);
+        }
         let placement = node.placement?;
         let point = placement.local_point(point)?;
         let mut scoped = ctx.unobserved();

@@ -28,7 +28,7 @@ impl UiTree {
 
     fn check_render_layout(&self, id: UiId) -> Result<(), UiError> {
         let node = self.node_ref(id).expect("live render tree");
-        if node.body().is_window() {
+        if node.body().is_window() || node.phase == WidgetPhase::PendingEnter {
             return Ok(());
         }
         if node
@@ -53,6 +53,9 @@ impl UiTree {
         scene: &mut Scene,
     ) -> Result<(), UiError> {
         let node = self.node_ref_mut(id).expect("live render tree");
+        if node.phase == WidgetPhase::PendingEnter {
+            return Ok(());
+        }
         let mut scoped = ctx.unobserved();
         let ctx = &mut scoped;
         let NodeBody::Widget(widget) = node.body.as_ref().expect("widget restored after layout")

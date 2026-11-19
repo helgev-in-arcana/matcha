@@ -99,6 +99,10 @@ impl UiTree {
     /// explicit render-mask/clip policy will need to be shared with rendering when it is added.
     pub(super) fn hit_test(&self, id: UiId, point: Point, ctx: &mut Context) -> Option<UiId> {
         let node = self.node_ref(id)?;
+        // Retiring widgets still paint, but the entire subtree stops receiving new input.
+        if node.phase != WidgetPhase::Active {
+            return None;
+        }
         let mut scoped = ctx.unobserved();
         let ctx = &mut scoped;
         let NodeBody::Widget(widget) = node.body() else {

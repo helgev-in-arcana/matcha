@@ -6,7 +6,7 @@ use std::time::Duration;
 use matcha_better_tree::metrics::{Bounds, Constraints};
 use matcha_better_tree::ui_tree::context::Context;
 use matcha_better_tree::ui_tree::widget::{
-    Color, ControlFlow, Draw, InputResult, PollResult, UpdateResult, View, Widget,
+    Color, ControlFlow, Draw, InputResult, PollInfo, Lifecycle, UpdateResult, View, Widget,
 };
 use matcha_better_tree::ui_tree::window::{Apply, Window, WindowConfig};
 use matcha_better_tree::ui_tree::{Children, DeclContext};
@@ -62,7 +62,7 @@ impl Widget for Square {
         UpdateResult::empty()
     }
 
-    fn poll(&mut self, ctx: &mut Context) -> PollResult {
+    fn poll(&mut self, _: PollInfo, ctx: &mut Context) -> Lifecycle {
         let elapsed = ctx.frame_time().duration_since(self.start);
         let frame = (elapsed.as_millis() / FRAME.as_millis()).min(LAST_FRAME.into()) as u32;
         let update = if frame != self.frame {
@@ -78,7 +78,7 @@ impl Widget for Square {
         } else {
             ControlFlow::Wait
         };
-        PollResult { update, next_poll }
+        Lifecycle::Keep { update, next_poll }
     }
 
     fn input(&mut self, _: Bounds, _: &DeviceEvent, _: &mut Context) -> InputResult {

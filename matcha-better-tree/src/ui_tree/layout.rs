@@ -22,6 +22,10 @@ impl UiTree {
         let Some(node) = self.node_ref_mut(id) else {
             return;
         };
+        // Direct roots (including a Window's content) have no Children iterator to filter them.
+        if node.phase == WidgetPhase::PendingEnter {
+            return;
+        }
         let mut scoped = ctx.unobserved();
         let ctx = &mut scoped;
         if node

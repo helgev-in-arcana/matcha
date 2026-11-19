@@ -5,7 +5,7 @@ use matcha_window::application::Application;
 use web_time::Instant;
 
 use super::*;
-use crate::ui_tree::widget::PollResult;
+use crate::ui_tree::widget::{PollInfo, Lifecycle};
 
 struct State {
     next_poll: ControlFlow,
@@ -56,7 +56,7 @@ impl Widget for Probe {
         UpdateResult::empty()
     }
 
-    fn poll(&mut self, ctx: &mut Context) -> PollResult {
+    fn poll(&mut self, _: PollInfo, ctx: &mut Context) -> Lifecycle {
         let now = ctx.frame_time();
         let mut state = self.0.lock().unwrap();
         state.polls.push(now);
@@ -65,7 +65,7 @@ impl Widget for Probe {
             state.next_poll = ControlFlow::Wait;
             update |= state.deadline_update;
         }
-        PollResult {
+        Lifecycle::Keep {
             update,
             next_poll: state.next_poll,
         }

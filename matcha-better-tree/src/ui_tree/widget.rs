@@ -48,14 +48,32 @@ pub trait Widget: Any + utils::MaybeSendSync {
     ) -> UpdateResult;
 
     /// Advance local state before measurement, layout, and rendering.
-    /// The framework polls every widget in the current window, children first, including
-    /// widgets with valid caches. Read the shared pass time through `ctx.frame_time()`.
-    /// Return invalidation requests for this widget and the next requested poll time.
+    /// Every retained widget in the current window is polled, children first, even while
+    /// awaiting entry or exit. Read the shared pass time through `ctx.frame_time()`.
     /// Each full pass replaces previous requests, so an early poll must repeat any deadline
     /// that still matters. `WaitUntil` requests a wakeup; execution may occur later.
-    fn poll(&mut self, ctx: &mut Context) -> PollResult {
-        let _ = ctx;
-        PollResult::default()
+    fn poll(&mut self, info: PollInfo, _ctx: &mut Context) -> Lifecycle {
+        match info.phase {
+            WidgetPhase::PendingEnter => Lifecycle::Enter {
+                update: UpdateResult::empty(),
+                next_poll: ControlFlow::Wait,
+            },
+            WidgetPhase::Active => Lifecycle::Keep {
+                update: UpdateResult::empty(),
+                next_poll: ControlFlow::Wait,
+            },
+            WidgetPhase::Exiting => Lifecycle::FinishExit,
+        }
+    }
+
+    /// Called once when this active child is omitted from its parent's declaration.
+    /// Return `Retain` to keep the widget for an exit until its poll returns `FinishExit`.
+    /// Re-declaring the same explicit key and view type cancels its exit and updates
+    /// the same widget. Declarations without a key cannot revive an exiting widget.
+    /// Removing the parent itself drops its subtree without waiting for child exits;
+    /// replacing a native Window's single content slot also drops the old content.
+    fn removal_requested(&mut self, _ctx: &mut Context) -> Removal {
+        Removal::RemoveNow
     }
 
     /// Observe or intercept an event from root to target (inclusive), before normal input.
@@ -130,23 +148,64 @@ bitflags::bitflags! {
     }
 }
 
-/// Cache invalidation and the requested timing of the next full polling pass.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[must_use]
-pub struct PollResult {
-    pub update: UpdateResult,
-    /// `Wait` requests no further pass, `Poll` requests the next event-loop iteration,
-    /// and `WaitUntil` requests a pass at or after the given time.
-    pub next_poll: ControlFlow,
+/// This widget's participation in its parent's layout. An inactive ancestor can still
+/// hide an active descendant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WidgetPhase {
+    /// Mounted and polled, but not yet included in layout, drawing, or hit testing.
+    PendingEnter,
+    /// Declared and participating in the tree.
+    Active,
+    /// No longer declared. Still included in layout and drawing, but not in hit testing.
+    Exiting,
 }
 
-impl Default for PollResult {
+/// Tree state observed after polling this widget's children.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PollInfo {
+    pub phase: WidgetPhase,
+    /// A direct child joined, left, or changed position in the active child list since
+    /// mounting or the previous poll. Multiple changes are reported once. Descendant
+    /// cache changes and updates to a child's properties alone do not set this flag.
+    pub active_children_changed: bool,
+}
+
+/// This widget's requested action. Only the cache and timing requests are aggregated;
+/// entry and exit apply to this node alone.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[must_use]
+pub enum Lifecycle {
+    /// Keep the current phase. In particular, `ControlFlow::Wait` does not remove a widget.
+    Keep {
+        update: UpdateResult,
+        next_poll: ControlFlow,
+    },
+    /// Join the active children. The tree handles relayout. In any other phase
+    /// this behaves like `Keep` with the same work.
+    Enter {
+        update: UpdateResult,
+        next_poll: ControlFlow,
+    },
+    /// Release this subtree, including its wake requests. In any phase other than
+    /// `Exiting`, this has no effect.
+    FinishExit,
+}
+
+impl Default for Lifecycle {
     fn default() -> Self {
-        Self {
+        Self::Keep {
             update: UpdateResult::empty(),
             next_poll: ControlFlow::Wait,
         }
     }
+}
+
+/// Whether to keep a child after its declaration disappears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum Removal {
+    RemoveNow,
+    Retain,
 }
 
 /// Whether the current event should reach further widgets or the next dispatch phase.

@@ -15,6 +15,7 @@ mod child_properties;
 mod env_reads;
 mod input;
 mod poll;
+mod presence;
 mod updates;
 mod windows;
 

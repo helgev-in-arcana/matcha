@@ -1,5 +1,5 @@
 use super::*;
-use crate::ui_tree::widget::ControlFlow;
+use crate::ui_tree::widget::{ControlFlow, PollInfo, Lifecycle};
 use crate::ui_tree::window::{Apply, Window, WindowConfig, WindowRegistry};
 use matcha_window::headless_interface::HeadlessEventLoop;
 use std::time::Duration;
@@ -7,7 +7,7 @@ use web_time::Instant;
 
 #[derive(Default)]
 struct PollState {
-    response: PollResult,
+    response: PollSummary,
     width: f32,
     scopes: Vec<(Instant, f64, [f32; 2])>,
     measures: usize,
@@ -73,14 +73,17 @@ impl Widget for PollWidget {
         UpdateResult::empty()
     }
 
-    fn poll(&mut self, ctx: &mut Context) -> PollResult {
+    fn poll(&mut self, _: PollInfo, ctx: &mut Context) -> Lifecycle {
         self.order.lock().unwrap().push(self.name);
         let mut state = self.state.lock().unwrap();
         self.width = state.width;
         state
             .scopes
             .push((ctx.frame_time(), ctx.dpi(), ctx.viewport_size()));
-        state.response
+        Lifecycle::Keep {
+            update: state.response.update,
+            next_poll: state.response.next_poll,
+        }
     }
 
     fn input(&mut self, _: Bounds, _: &DeviceEvent, _: &mut Context) -> InputResult {
@@ -150,7 +153,7 @@ fn full_poll_visits_cached_widgets_in_postorder_without_invalidating_them() {
     tree.render(&mut ctx).unwrap();
 
     let (result, reads) = ctx.observe_env_reads(|ctx| tree.poll(ctx));
-    assert_eq!(result, PollResult::default());
+    assert_eq!(result, PollSummary::default());
     assert_eq!(*order.lock().unwrap(), ["leaf", "sibling", "parent"]);
     assert!(reads.is_empty());
     tree.measure_node(root, Constraints::default(), &mut ctx);
@@ -282,10 +285,10 @@ fn native_poll_uses_window_scope_and_skips_nested_windows() {
     tree.measure_node(outer_content, Constraints::default(), &mut ctx);
     tree.layout_window(outer_id, &mut ctx);
     tree.layout_window(inner_id, &mut ctx);
-    assert_eq!(tree.poll(&mut ctx), PollResult::default());
+    assert_eq!(tree.poll(&mut ctx), PollSummary::default());
     assert_eq!(
         tree.poll_window(outer_id, &mut ctx),
-        Some(PollResult::default())
+        Some(PollSummary::default())
     );
     assert!(order.lock().unwrap().is_empty());
 
@@ -302,5 +305,5 @@ fn native_poll_uses_window_scope_and_skips_nested_windows() {
     }
     tree.clear(&mut ctx);
     assert_eq!(tree.poll_window(inner_id, &mut ctx), None);
-    assert_eq!(tree.poll(&mut ctx), PollResult::default());
+    assert_eq!(tree.poll(&mut ctx), PollSummary::default());
 }

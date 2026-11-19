@@ -79,13 +79,21 @@ impl ServicesStorage<'_> {
 
 type WindowFactory<'a> = dyn FnMut(&WindowConfig) -> Result<Window, WindowError> + 'a;
 
+#[derive(Clone, Copy)]
+enum TreeScope {
+    Standalone,
+    /// App drives polling from each native window, never from this declaration root.
+    WindowDeclarations,
+    Window(WindowId),
+}
+
 /// Environment getters take exclusive access to record the current callback's reads.
 pub struct Context<'a> {
     windows: &'a mut WindowRegistry,
     viewport_size: [f32; 2],
     dpi: f64,
     frame_time: Instant,
-    window: Option<WindowId>,
+    scope: TreeScope,
     window_factory: Option<&'a mut WindowFactory<'a>>,
     window_error: Option<&'a mut Option<WindowError>>,
     services: ServicesStorage<'a>,
@@ -110,7 +118,7 @@ impl<'a> Context<'a> {
             viewport_size: [0.0, 0.0],
             dpi: 1.0,
             frame_time: Instant::now(),
-            window: None,
+            scope: TreeScope::Standalone,
             window_factory: None,
             window_error: None,
             services,
@@ -128,6 +136,19 @@ impl<'a> Context<'a> {
         let mut scoped = self.reborrow();
         scoped.window_factory = Some(open);
         scoped
+    }
+
+    pub(crate) fn for_window_declarations<'b>(
+        &'b mut self,
+        open: &'b mut WindowFactory<'b>,
+    ) -> Context<'b> {
+        let mut scoped = self.with_window_factory(open);
+        scoped.scope = TreeScope::WindowDeclarations;
+        scoped
+    }
+
+    pub(super) fn can_poll_widgets(&self) -> bool {
+        !matches!(self.scope, TreeScope::WindowDeclarations)
     }
 
     /// Infallible widget callbacks can declare multiple windows. Report the first failure
@@ -183,7 +204,7 @@ impl<'a> Context<'a> {
             viewport_size: self.viewport_size,
             dpi: self.dpi,
             frame_time: self.frame_time,
-            window: self.window,
+            scope: self.scope,
             window_factory: self
                 .window_factory
                 .as_mut()
@@ -228,7 +249,7 @@ impl<'a> Context<'a> {
         let native = self.windows.window(window).expect("mounted window");
         self.dpi = native.dpi();
         self.viewport_size = native.inner_size().map(|size| size as f32);
-        self.window = Some(window);
+        self.scope = TreeScope::Window(window);
         self
     }
 
@@ -255,16 +276,18 @@ impl<'a> Context<'a> {
     }
 
     fn platform(&self) -> &PlatformState {
-        match self.window {
-            Some(id) => self.windows.platform(id),
-            None => &self.services.get().platform,
+        match self.scope {
+            TreeScope::Window(id) => self.windows.platform(id),
+            TreeScope::Standalone | TreeScope::WindowDeclarations => &self.services.get().platform,
         }
     }
 
     fn platform_mut(&mut self) -> &mut PlatformState {
-        match self.window {
-            Some(id) => self.windows.platform_mut(id),
-            None => &mut self.services.get_mut().platform,
+        match self.scope {
+            TreeScope::Window(id) => self.windows.platform_mut(id),
+            TreeScope::Standalone | TreeScope::WindowDeclarations => {
+                &mut self.services.get_mut().platform
+            }
         }
     }
 }

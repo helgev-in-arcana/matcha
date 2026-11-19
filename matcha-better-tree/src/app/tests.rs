@@ -14,6 +14,7 @@ use crate::ui_tree::window::{Apply, Window, WindowConfig};
 use crate::ui_tree::{Children, DeclContext};
 
 mod polling;
+mod presence;
 
 fn noop_gpu() -> Gpu {
     futures::executor::block_on(Gpu::new(GpuDescriptor::noop())).unwrap()

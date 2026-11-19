@@ -8,8 +8,8 @@ use super::Window;
 use crate::arena::Id as UiId;
 use crate::metrics::{Bounds, Position};
 use crate::ui_tree::context::Context;
-use crate::ui_tree::widget::{InputResult, PollResult, UiError, UpdateResult, View};
-use crate::ui_tree::{DeclContext, NodeBody, UiTree};
+use crate::ui_tree::widget::{InputResult, UiError, UpdateResult, View};
+use crate::ui_tree::{ChildScope, DeclContext, NodeBody, PollSummary, UiTree};
 
 impl<'a> DeclContext<'a, '_, ()> {
     /// Mount with the current declaration, or apply its controlled settings to the live window.
@@ -22,12 +22,13 @@ impl<'a> DeclContext<'a, '_, ()> {
             window.id()
         } else {
             let Some(window) = self.context.open_window(&view.config) else {
+                self.declaration.child_scope = ChildScope::UnmountedWindow;
                 return;
             };
             window.request_redraw();
             self.context.window_registry().register(node, window)
         };
-        self.declaration.child_window = Some(id);
+        self.declaration.child_scope = ChildScope::Native(id);
         self.child(&view.view);
     }
 }
@@ -104,7 +105,7 @@ impl UiTree {
     /// Poll one window's content before its measurement/layout/rendering passes.
     /// Nested native windows are polled separately. All callbacks share this Context's
     /// frame time and receive the target window's environment.
-    pub fn poll_window(&mut self, id: WindowId, ctx: &mut Context) -> Option<PollResult> {
+    pub fn poll_window(&mut self, id: WindowId, ctx: &mut Context) -> Option<PollSummary> {
         let (child, mut scoped) = self.window_content_context(id, ctx)?;
         Some(self.poll_from(child, &mut scoped))
     }
