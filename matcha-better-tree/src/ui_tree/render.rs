@@ -31,9 +31,12 @@ impl UiTree {
         if node.body().is_window() || node.phase == WidgetPhase::PendingEnter {
             return Ok(());
         }
+        // A layout entry is published for the last placement, including any local
+        // environment supplied by its parent. Rendering uses that completed placement.
+        let laid_out_bounds = node.layout_cache.key().map(|(bounds, _)| bounds);
         if node
             .placement
-            .is_none_or(|p| node.layout_cache.get(&p.bounds).is_none())
+            .is_none_or(|p| laid_out_bounds != Some(&p.bounds))
         {
             return Err(UiError::LayoutRequired);
         }
@@ -67,11 +70,11 @@ impl UiTree {
         let world = parent_transform * placement.affine;
         let child_count = node.child_ids().len();
         let env_reads = &mut node.env_reads;
-        let draw = node.render_cache.get_or_try_insert_with((), backdrop, || {
+        let (draw, _) = node.render_cache.get_or_try_insert_with((), backdrop, || {
             let (draw, reads) = ctx.observe_env_reads(|ctx| widget.render(placement.bounds, ctx));
             // Record the callback even if resource preparation rejects its Draw afterwards.
             env_reads.record(ReadPhase::Render, reads);
-            resources::manage(draw)
+            resources::manage(draw).map(|draw| (draw, reads))
         })?;
 
         // All generators for this widget see the snapshot before its own colors. Later

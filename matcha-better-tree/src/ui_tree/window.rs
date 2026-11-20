@@ -9,7 +9,6 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use matcha_window::event::device_event::DeviceEvent;
-use matcha_window::event::window_event::WindowEvent;
 use matcha_window::window::{Fullscreen, Position, Size, Theme, Window as OsWindow, WindowButtons};
 
 use crate::metrics::{Bounds, Constraints, Point};
@@ -107,19 +106,9 @@ impl<V: View> MountKind<WindowWidget<V>> {
 }
 
 impl<V: View> AnyWindow for Mounted<WindowWidget<V>> {
-    fn window_event(&self, event: &WindowEvent) -> UpdateResult {
-        match event {
-            WindowEvent::CloseRequested => {
-                if let Some(callback) = &self.widget.on_close_requested {
-                    callback();
-                }
-                UpdateResult::empty()
-            }
-            WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Resized { .. } => {
-                UpdateResult::LAYOUT | UpdateResult::RENDER
-            }
-            WindowEvent::Theme(_) => UpdateResult::RENDER,
-            _ => UpdateResult::empty(),
+    fn close_requested(&self) {
+        if let Some(callback) = &self.widget.on_close_requested {
+            callback();
         }
     }
 }

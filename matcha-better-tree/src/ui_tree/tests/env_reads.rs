@@ -329,6 +329,40 @@ fn skipped_callbacks_keep_observations_and_executed_callbacks_replace_them() {
 }
 
 #[test]
+fn child_shape_queries_contribute_to_the_callers_cached_result() {
+    let (mut tree, _, leaf) = setup(ReadView::new(1, [EnvReads::empty(); 5], vec![]));
+    let mut registry = WindowRegistry::default();
+    let mut ctx = Context::new(&mut registry);
+    let mut geometry = ChildGeometry::default();
+    let query = |tree: &mut UiTree, ctx: &mut Context, geometry: &mut ChildGeometry| {
+        ctx.observe_env_reads(|ctx| {
+            Child {
+                tree,
+                id: leaf,
+                geometry,
+            }
+            .is_inside(Point::default(), ctx)
+        })
+    };
+    // The query can depend on the child's previous placement even when it has none yet.
+    assert_eq!(
+        query(&mut tree, &mut ctx, &mut geometry),
+        (None, EnvReads::empty())
+    );
+    assert_eq!(
+        geometry.dependencies,
+        EnvReads::DPI | EnvReads::VIEWPORT_SIZE
+    );
+    tree.layout(bounds(), &mut ctx);
+    assert_eq!(
+        query(&mut tree, &mut ctx, &mut geometry),
+        (Some(true), EnvReads::empty())
+    );
+    // ReadWidget::is_inside also reads frame_time; all three affect the caller's result.
+    assert_eq!(geometry.dependencies, EnvReads::all());
+}
+
+#[test]
 fn reordering_keeps_node_observations_and_replacement_starts_a_new_record() {
     let mut view = ReadView::new(
         1,
@@ -421,6 +455,128 @@ fn window_setup_and_tree_bookkeeping_do_not_add_widget_reads() {
 }
 
 #[test]
+fn window_poll_invalidates_only_the_results_that_used_the_notified_metric() {
+    use matcha_window::event::window_event::WindowEvent;
+    use matcha_window::headless_interface::HeadlessEventLoop;
+
+    let empty = EnvReads::empty();
+    let measured = ReadView::new(2, [empty, empty, EnvReads::DPI, empty, empty], vec![]);
+    let drawn = ReadView::new(
+        3,
+        [empty, empty, empty, empty, EnvReads::VIEWPORT_SIZE],
+        vec![],
+    );
+    let idle = ReadView::new(
+        4,
+        [EnvReads::DPI, empty, empty, empty, EnvReads::FRAME_TIME],
+        vec![],
+    );
+    let window = Window::new(ReadView::new(1, [empty; 5], vec![measured, drawn, idle]));
+    let mut tree = UiTree::new();
+    let event_loop = HeadlessEventLoop::new();
+    let mut open = super::windows::headless_factory(&event_loop);
+    let mut registry = WindowRegistry::default();
+    let mut root_ctx = Context::new(&mut registry);
+    let mut ctx = root_ctx.with_window_factory(&mut open);
+    tree.try_update(&window, &mut ctx).unwrap();
+    let id = ctx.window_registry().ids()[0];
+    let parent = find(&tree, 1);
+    tree.measure_node(
+        parent,
+        Constraints::default(),
+        &mut ctx.reborrow().with_window(id),
+    );
+    tree.layout_window(id, &mut ctx);
+    tree.render_window(id, &mut ctx).unwrap();
+
+    let warm = |tree: &UiTree, key| {
+        let node = tree.node_ref(find(tree, key)).unwrap();
+        (
+            node.measure_cache.value().is_some(),
+            node.layout_cache.value().is_some(),
+            node.render_cache.value().is_some(),
+        )
+    };
+    let dpi = WindowEvent::ScaleFactorChanged { scale_factor: 2.0 };
+    tree.window_event(id, &dpi, &mut ctx);
+    tree.window_event(id, &dpi, &mut ctx);
+    assert_eq!(
+        tree.poll_window(id, &mut ctx).unwrap().update,
+        UpdateResult::LAYOUT
+    );
+    assert_eq!(warm(&tree, 1), (false, false, true)); // Parent consumed the child's measure in both callbacks.
+    assert_eq!(warm(&tree, 2), (false, true, true));
+    assert_eq!(warm(&tree, 3), (true, true, true));
+    assert_eq!(warm(&tree, 4), (true, true, true));
+    assert!(matches!(
+        tree.render_window(id, &mut ctx),
+        Err(UiError::LayoutRequired)
+    ));
+    tree.measure_node(
+        parent,
+        Constraints::default(),
+        &mut ctx.reborrow().with_window(id),
+    );
+    tree.layout_window(id, &mut ctx);
+    assert!(tree.poll_window(id, &mut ctx).unwrap().update.is_empty());
+
+    // Notify a resize without changing physical bounds, to isolate the getter dependency.
+    let size = ctx
+        .window_registry()
+        .window(id)
+        .unwrap()
+        .inner_size()
+        .map(|n| n as f32);
+    tree.window_event(
+        id,
+        &WindowEvent::Resized {
+            inner_size: size,
+            outer_size: size,
+        },
+        &mut ctx,
+    );
+    assert_eq!(
+        tree.poll_window(id, &mut ctx).unwrap().update,
+        UpdateResult::RENDER
+    );
+    assert_eq!(warm(&tree, 1), (true, true, true));
+    assert_eq!(warm(&tree, 2), (true, true, true));
+    assert_eq!(warm(&tree, 3), (true, true, false));
+    assert_eq!(warm(&tree, 4), (true, true, true));
+    tree.render_window(id, &mut ctx).unwrap();
+}
+
+#[test]
+fn direct_window_render_requires_layout_at_the_live_viewport_even_without_readers() {
+    use matcha_window::headless_interface::HeadlessEventLoop;
+
+    let event_loop = HeadlessEventLoop::new();
+    let mut open = super::windows::headless_factory(&event_loop);
+    let mut registry = WindowRegistry::default();
+    let mut root_ctx = Context::new(&mut registry);
+    let mut ctx = root_ctx.with_window_factory(&mut open);
+    let mut tree = UiTree::new();
+    tree.try_update(
+        &Window::new(ReadView::new(1, [EnvReads::empty(); 5], vec![])),
+        &mut ctx,
+    )
+    .unwrap();
+    let id = ctx.window_registry().ids()[0];
+    tree.layout_window(id, &mut ctx);
+    tree.render_window(id, &mut ctx).unwrap();
+    // A direct caller can see new OS dimensions before its queued WindowEvent.
+    let window = ctx.window_registry().window(id).unwrap();
+    let [w, h] = window.inner_size();
+    window.request_inner_size(w + 1, h + 1);
+    assert!(matches!(
+        tree.render_window(id, &mut ctx),
+        Err(UiError::LayoutRequired)
+    ));
+    tree.layout_window(id, &mut ctx);
+    tree.render_window(id, &mut ctx).unwrap();
+}
+
+#[test]
 fn completed_render_reads_are_recorded_even_when_resource_preparation_fails() {
     use crate::ui_tree::widget::Color;
     use render_interface::{MeshDescriptor, MeshSource, TextureDescriptor, TextureSource};
@@ -451,6 +607,7 @@ fn completed_render_reads_are_recorded_even_when_resource_preparation_fails() {
         .render_cache
         .get(&())
         .unwrap()
+        .0
         .color[0]
         .mesh
         .id();
@@ -468,9 +625,10 @@ fn completed_render_reads_are_recorded_even_when_resource_preparation_fails() {
             Some(EnvReads::VIEWPORT_SIZE)
         );
         assert_eq!(
-            node.render_cache.get(&()).unwrap().color[0].mesh.id(),
+            node.render_cache.get(&()).unwrap().0.color[0].mesh.id(),
             old_mesh
         );
+        assert_eq!(node.render_cache.get(&()).unwrap().1, EnvReads::DPI);
     }
     view.draw.color.pop();
     view.reads[4] = EnvReads::empty();

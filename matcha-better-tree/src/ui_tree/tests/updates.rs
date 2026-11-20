@@ -126,7 +126,7 @@ fn refresh(tree: &mut UiTree, view: &NodeView) {
 fn warm(tree: &mut UiTree, child: UiId) -> Bounds {
     let mut registry = crate::ui_tree::window::WindowRegistry::default();
     let mut context = Context::new(&mut registry);
-    let measured = tree.measure_node(child, Constraints::default(), &mut context);
+    let (measured, _) = tree.measure_node(child, Constraints::default(), &mut context);
     tree.layout_node(child, position(Matrix4::identity()), &mut context);
     measured
 }

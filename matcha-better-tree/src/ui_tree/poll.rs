@@ -28,12 +28,18 @@ impl UiTree {
         let Some(root) = self.root else {
             return PollSummary::default();
         };
-        self.poll_from(root, ctx)
+        self.poll_from(root, ctx, EnvReads::empty())
     }
 
-    pub(super) fn poll_from(&mut self, root: UiId, ctx: &mut Context) -> PollSummary {
+    pub(super) fn poll_from(
+        &mut self,
+        root: UiId,
+        ctx: &mut Context,
+        changed: EnvReads,
+    ) -> PollSummary {
         // The tree root (or a window's single content root) is always declared.
-        let result = match self.poll_node(root, &mut ctx.unobserved()) {
+        let (lifecycle, env_update) = self.poll_node(root, &mut ctx.unobserved(), changed);
+        let mut result = match lifecycle {
             Lifecycle::Keep { update, next_poll } | Lifecycle::Enter { update, next_poll } => {
                 PollSummary { update, next_poll }
             }
@@ -43,21 +49,32 @@ impl UiTree {
             // Descendants have already propagated to this root. Complete its boundary once.
             self.invalidate_node(root, UpdateResult::LAYOUT);
         }
+        // Environment dependencies were applied independently to each cached result.
+        // Only widget-requested layout work needs the unconditional ancestor invalidation above.
+        result.update |= env_update.update_result();
         result
     }
 
-    // Return the transition of this node alone, carrying aggregate work for surviving children.
-    fn poll_node(&mut self, id: UiId, ctx: &mut Context) -> Lifecycle {
+    // The lifecycle carries widget requests. Selective environment changes are reported
+    // separately because they must not trigger blanket ancestor layout invalidation.
+    fn poll_node(
+        &mut self,
+        id: UiId,
+        ctx: &mut Context,
+        changed: EnvReads,
+    ) -> (Lifecycle, InvalidatedCaches) {
         let node = self.node_ref_mut(id).expect("live poll tree");
         if node.body().is_window() {
-            return Lifecycle::default();
+            return (Lifecycle::default(), InvalidatedCaches::empty());
         }
+        let mut env_update = InvalidatedCaches::empty();
         let mut body = node.body.take().expect("live widget during poll");
         let mut membership_changed = false;
         let mut update = UpdateResult::empty();
         let mut next_poll = ControlFlow::Wait;
         body.as_widget_mut().retain_children(&mut |child| {
-            let result = self.poll_node(child, ctx);
+            let (result, child_env_update) = self.poll_node(child, ctx, changed);
+            env_update |= child_env_update;
             membership_changed |= !matches!(result, Lifecycle::Keep { .. });
             match result {
                 Lifecycle::Keep {
@@ -96,7 +113,7 @@ impl UiTree {
                 (update, next_poll, node.phase == WidgetPhase::PendingEnter)
             }
             Lifecycle::FinishExit if node.phase == WidgetPhase::Exiting => {
-                return Lifecycle::FinishExit;
+                return (Lifecycle::FinishExit, InvalidatedCaches::empty());
             }
             Lifecycle::FinishExit => (UpdateResult::empty(), ControlFlow::Wait, false),
         };
@@ -106,6 +123,7 @@ impl UiTree {
         if membership_changed || entered {
             update |= UpdateResult::LAYOUT;
         }
+        node.invalidate_env(changed, &mut env_update);
         // Hidden widgets can invalidate local caches and wake the Window. Their work
         // doesn't affect the visible layout or request a redraw until they participate.
         node.invalidate_caches(local_update | (update & UpdateResult::LAYOUT));
@@ -113,11 +131,13 @@ impl UiTree {
         next_poll = next_poll.merge(local_poll);
         if node.phase == WidgetPhase::PendingEnter {
             update = UpdateResult::empty();
+            env_update = InvalidatedCaches::empty();
         }
-        if entered {
+        let lifecycle = if entered {
             Lifecycle::Enter { update, next_poll }
         } else {
             Lifecycle::Keep { update, next_poll }
-        }
+        };
+        (lifecycle, env_update)
     }
 }

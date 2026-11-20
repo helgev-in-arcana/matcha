@@ -202,7 +202,9 @@ fn poll_invalidates_only_local_drawing_and_applies_layout_before_the_same_frame(
     assert!(tree.node_ref(root).unwrap().measure_cache.value().is_none());
     assert!(tree.node_ref(leaf).unwrap().render_cache.get(&()).is_some());
     assert_eq!(
-        tree.measure_node(root, Constraints::default(), &mut ctx).x,
+        tree.measure_node(root, Constraints::default(), &mut ctx)
+            .0
+            .x,
         45.0
     );
     tree.layout(bounds(), &mut ctx);

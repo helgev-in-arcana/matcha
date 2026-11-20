@@ -88,6 +88,10 @@ pub trait Widget: Any + utils::MaybeSendSync {
         (0.0 <= p.x && p.x <= b.x) && (0.0 <= p.y && p.y <= b.y) && (0.0 <= p.z && p.z <= b.z)
     }
 
+    /// Measure local bounds. A cached result includes the environment dependencies of
+    /// every child result used by this call, including repeated or cached measurements.
+    /// Placing children during measurement also makes this work sensitive to window
+    /// metric changes, since a subsequent layout can choose a different placement order.
     fn measure(
         &self,
         constraints: Constraints,
@@ -97,6 +101,7 @@ pub trait Widget: Any + utils::MaybeSendSync {
 
     /// Lay out this widget's children using its assigned local bounds.
     /// Any child placements passed to [`Child::layout`](super::Child::layout) are relative to this widget.
+    /// Child measurements and layouts contribute their dependencies to this layout's cache.
     /// Re-running layout alone does not invalidate this widget's drawing. Updates affecting
     /// both child layout and this widget's appearance must also request RENDER.
     fn layout(

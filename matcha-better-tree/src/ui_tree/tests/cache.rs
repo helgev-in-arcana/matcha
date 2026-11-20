@@ -2,7 +2,7 @@ use super::*;
 use crate::ui_tree::window::WindowRegistry;
 
 fn measure_child(tree: &mut UiTree, child: UiId, ctx: &mut Context) -> Bounds {
-    tree.measure_node(child, Constraints::default(), ctx)
+    tree.measure_node(child, Constraints::default(), ctx).0
 }
 
 #[test]

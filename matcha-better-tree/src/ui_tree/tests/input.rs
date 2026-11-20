@@ -256,6 +256,7 @@ fn target_stop_does_not_stop_cache_invalidation_to_root() {
             Constraints::default(),
             &mut Context::new(&mut crate::ui_tree::window::WindowRegistry::default())
         )
+        .0
         .x,
         11.0
     );

@@ -20,6 +20,23 @@ impl<K, V> Cache<K, V> {
         self.entry = None;
     }
 
+    pub(super) fn invalidate_if(&mut self, predicate: impl FnOnce(&V) -> bool) -> bool {
+        self.entry.take_if(|(_, value)| predicate(value)).is_some()
+    }
+
+    pub(super) fn get_if(&self, matches: impl FnOnce(&K, &V) -> bool) -> Option<&V> {
+        let (key, value) = self.entry.as_ref()?;
+        matches(key, value).then_some(value)
+    }
+
+    pub(super) fn key(&self) -> Option<&K> {
+        self.entry.as_ref().map(|(key, _)| key)
+    }
+
+    pub(super) fn value_mut(&mut self) -> Option<&mut V> {
+        self.entry.as_mut().map(|(_, value)| value)
+    }
+
     #[cfg(test)]
     pub(super) fn value(&self) -> Option<&V> {
         self.entry.as_ref().map(|(_, value)| value)
@@ -28,8 +45,7 @@ impl<K, V> Cache<K, V> {
 
 impl<K: PartialEq, V> Cache<K, V> {
     pub(super) fn get(&self, key: &K) -> Option<&V> {
-        let (stored_key, value) = self.entry.as_ref()?;
-        (stored_key == key).then_some(value)
+        self.get_if(|stored_key, _| stored_key == key)
     }
 
     /// Reuse a matching entry unless refresh is requested. Failure preserves the previous

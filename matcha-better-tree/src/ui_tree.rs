@@ -3,7 +3,6 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
 use matcha_window::event::device_event::DeviceEvent;
-use matcha_window::event::window_event::WindowEvent;
 use matcha_window::window::{WindowError, WindowId};
 use nalgebra::{Matrix4, Vector4};
 
@@ -144,7 +143,7 @@ impl NodeBody {
 }
 
 trait AnyWindow: AnyWidget {
-    fn window_event(&self, event: &WindowEvent) -> UpdateResult;
+    fn close_requested(&self);
 }
 
 trait AnyWidget: utils::MaybeSendSync {
@@ -167,8 +166,13 @@ trait AnyWidget: utils::MaybeSendSync {
     fn input(&mut self, bounds: Bounds, event: &DeviceEvent, ctx: &mut Context) -> InputResult;
     fn poll(&mut self, info: PollInfo, ctx: &mut Context) -> Lifecycle;
     fn is_inside(&self, b: Bounds, p: Point, ctx: &mut Context) -> bool;
-    fn measure(&self, constraints: Constraints, tree: &mut UiTree, ctx: &mut Context) -> Bounds;
-    fn layout(&self, bounds: Bounds, tree: &mut UiTree, ctx: &mut Context);
+    fn measure(
+        &self,
+        constraints: Constraints,
+        tree: &mut UiTree,
+        ctx: &mut Context,
+    ) -> (Bounds, ChildGeometry);
+    fn layout(&self, bounds: Bounds, tree: &mut UiTree, ctx: &mut Context) -> EnvReads;
     fn uses_backdrop(&self) -> bool;
     fn render(&self, bounds: Bounds, ctx: &mut Context) -> Draw;
 }
@@ -231,26 +235,37 @@ impl<W: Widget> AnyWidget for Mounted<W> {
         self.widget.is_inside(b, p, ctx)
     }
 
-    fn measure(&self, constraints: Constraints, tree: &mut UiTree, ctx: &mut Context) -> Bounds {
-        self.widget.measure(
+    fn measure(
+        &self,
+        constraints: Constraints,
+        tree: &mut UiTree,
+        ctx: &mut Context,
+    ) -> (Bounds, ChildGeometry) {
+        let mut geometry = ChildGeometry::default();
+        let bounds = self.widget.measure(
             constraints,
             Children {
                 links: &self.children,
                 tree,
+                geometry: &mut geometry,
             },
             ctx,
-        )
+        );
+        (bounds, geometry)
     }
 
-    fn layout(&self, bounds: Bounds, tree: &mut UiTree, ctx: &mut Context) {
+    fn layout(&self, bounds: Bounds, tree: &mut UiTree, ctx: &mut Context) -> EnvReads {
+        let mut geometry = ChildGeometry::default();
         self.widget.layout(
             bounds,
             Children {
                 links: &self.children,
                 tree,
+                geometry: &mut geometry,
             },
             ctx,
-        )
+        );
+        geometry.dependencies
     }
 
     fn render(&self, bounds: Bounds, ctx: &mut Context) -> Draw {
@@ -298,9 +313,9 @@ struct UiNode {
     placement: Option<Placement>,
 
     // cache
-    measure_cache: Cache<Constraints, Bounds>,
-    layout_cache: Cache<Bounds, ()>,
-    render_cache: Cache<(), Draw>,
+    measure_cache: Cache<(Constraints, context::GeometryEnvironment), (Bounds, EnvReads)>,
+    layout_cache: Cache<(Bounds, context::GeometryEnvironment), EnvReads>,
+    render_cache: Cache<(), (Draw, EnvReads)>,
     env_reads: NodeEnvReads,
 
     // Taken during recursive callbacks to borrow the child links independently of the arena.
@@ -343,7 +358,53 @@ impl Placement {
     }
 }
 
+bitflags::bitflags! {
+    struct InvalidatedCaches: u8 {
+        const MEASURE = 1 << 0;
+        const LAYOUT = 1 << 1;
+        const RENDER = 1 << 2;
+    }
+}
+
+impl InvalidatedCaches {
+    fn update_result(self) -> UpdateResult {
+        let mut update = UpdateResult::empty();
+        update.set(
+            UpdateResult::LAYOUT,
+            self.intersects(Self::MEASURE | Self::LAYOUT),
+        );
+        update.set(UpdateResult::RENDER, self.contains(Self::RENDER));
+        update
+    }
+}
+
 impl UiNode {
+    /// Each entry records the environment used to compute that particular result.
+    fn invalidate_env(&mut self, changed: EnvReads, affected: &mut InvalidatedCaches) {
+        if changed.is_empty() {
+            return;
+        }
+        if self
+            .measure_cache
+            .invalidate_if(|(_, reads)| reads.intersects(changed))
+        {
+            affected.insert(InvalidatedCaches::MEASURE);
+        }
+        // A child's current placement can survive a more recent parent layout that did not
+        // place it. Reopen the layout path even when that parent observed no dependency.
+        if self.layout_cache.invalidate_if(|reads| {
+            affected.contains(InvalidatedCaches::LAYOUT) || reads.intersects(changed)
+        }) {
+            affected.insert(InvalidatedCaches::LAYOUT);
+        }
+        if self
+            .render_cache
+            .invalidate_if(|(_, reads)| reads.intersects(changed))
+        {
+            affected.insert(InvalidatedCaches::RENDER);
+        }
+    }
+
     fn body(&self) -> &NodeBody {
         self.body.as_ref().expect("live node has a mounted body")
     }
@@ -436,12 +497,23 @@ impl UiTree {
 
     /// Invalidate one environment scope, stopping at nested native windows.
     fn invalidate_caches_from(&mut self, id: UiId, flags: UpdateResult) {
-        if flags.is_empty() {
-            return;
+        if !flags.is_empty() {
+            self.node_ref_mut(id)
+                .expect("live invalidation root")
+                .invalidate_caches(flags);
+            self.for_each_child_in_scope(id, |tree, child| {
+                tree.invalidate_caches_from(child, flags)
+            });
         }
-        let node = self.node_ref_mut(id).expect("live invalidation root");
-        node.invalidate_caches(flags);
-        let child_count = node.child_ids().len();
+    }
+
+    /// Descend within this window without holding a borrow across a recursive call.
+    fn for_each_child_in_scope(&mut self, id: UiId, mut visit: impl FnMut(&mut Self, UiId)) {
+        let child_count = self
+            .node_ref(id)
+            .expect("live invalidation root")
+            .child_ids()
+            .len();
         for index in 0..child_count {
             let child = self
                 .node_ref(id)
@@ -450,7 +522,7 @@ impl UiTree {
                 .nth(index)
                 .expect("live child");
             if !self.node_ref(child).expect("live child").body().is_window() {
-                self.invalidate_caches_from(child, flags);
+                visit(self, child);
             }
         }
     }
@@ -840,11 +912,19 @@ impl<'a> DeclContext<'a, '_> {
     }
 }
 
+/// Results consumed and placement performed by a single geometry callback.
+#[derive(Default)]
+struct ChildGeometry {
+    dependencies: EnvReads,
+    placed: bool,
+}
+
 /// Participating children in layout order. A retiring child keeps its last declared data;
 /// a child awaiting entry is not part of this collection.
 pub struct Children<'a, P = ()> {
     links: &'a [ChildLink<P>],
     tree: &'a mut UiTree,
+    geometry: &'a mut ChildGeometry,
 }
 
 impl<P> Children<'_, P> {
@@ -878,6 +958,7 @@ impl<P> Children<'_, P> {
                 Child {
                     tree: self.tree,
                     id: link.node,
+                    geometry: self.geometry,
                 },
             );
         }
@@ -888,24 +969,28 @@ impl<P> Children<'_, P> {
 pub struct Child<'a> {
     tree: &'a mut UiTree,
     id: UiId,
+    geometry: &'a mut ChildGeometry,
 }
 
 impl Child<'_> {
     /// Test the child's own shape in parent-local coordinates. Returns `None` when
     /// the child has no placement or the point cannot be mapped into its coordinates.
     pub fn is_inside(&mut self, point: Point, ctx: &mut Context) -> Option<bool> {
+        // Placement can reflect an earlier layout, even if no child callback runs here.
+        self.geometry.dependencies |= EnvReads::DPI | EnvReads::VIEWPORT_SIZE;
         let node = self.tree.node_ref(self.id).expect("live child");
         if node.phase == WidgetPhase::Exiting {
             return Some(false);
         }
         let placement = node.placement?;
         let point = placement.local_point(point)?;
-        let mut scoped = ctx.unobserved();
-        Some(
+        let (inside, reads) = ctx.observe_env_reads(|ctx| {
             node.body()
                 .as_widget()
-                .is_inside(placement.bounds, point, &mut scoped),
-        )
+                .is_inside(placement.bounds, point, ctx)
+        });
+        self.geometry.dependencies |= reads;
+        Some(inside)
     }
 }
 

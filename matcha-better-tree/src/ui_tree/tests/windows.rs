@@ -376,7 +376,7 @@ fn parent_passes_do_not_visit_window_content_even_with_existing_placement() {
     let child = child_at(&tree, window, 0);
     let mut ctx = Context::new(&mut registry);
     let native = native_id(&tree, window, &mut ctx);
-    let measured = tree.measure_node(window, Constraints::default(), &mut ctx);
+    let (measured, _) = tree.measure_node(window, Constraints::default(), &mut ctx);
     assert_eq!(measured, Bounds::default());
     tree.layout(bounds(), &mut ctx);
     assert_eq!(observed.lock().unwrap().layout_calls, 0);
@@ -427,6 +427,7 @@ fn measure_content(tree: &mut UiTree, window: UiId, ctx: &mut Context) -> Bounds
     let id = native_id(tree, window, ctx);
     let mut scoped = ctx.unobserved().with_window(id);
     tree.measure_node(child, Constraints::default(), &mut scoped)
+        .0
 }
 
 #[test]
@@ -469,6 +470,11 @@ fn native_events_refresh_only_the_target_window_and_selected_caches() {
             &mut ctx
         ),
         Some(UpdateResult::LAYOUT | UpdateResult::RENDER)
+    );
+    // The event requests a redraw. Its environment changes are applied by the next window pass.
+    assert_eq!(
+        tree.poll_window(native_a, &mut ctx).unwrap().update,
+        UpdateResult::LAYOUT | UpdateResult::RENDER
     );
     assert!(
         tree.node_ref(child_a)
@@ -608,11 +614,11 @@ fn environment_changes_reach_descendants_behind_unchanged_bounds() {
         &WindowEvent::ScaleFactorChanged { scale_factor: 2.0 },
         &mut ctx,
     );
-    assert_eq!(measure_content(&mut tree, root, &mut ctx).x, 10.0);
     assert!(matches!(
         tree.render_window(native, &mut ctx),
         Err(UiError::LayoutRequired)
     ));
+    assert_eq!(measure_content(&mut tree, root, &mut ctx).x, 10.0);
     tree.layout_window(native, &mut ctx);
     tree.render_window(native, &mut ctx).unwrap();
     let resize = WindowEvent::Resized {
@@ -629,8 +635,8 @@ fn environment_changes_reach_descendants_behind_unchanged_bounds() {
             tree.window_event(native, &resize, &mut ctx),
             Some(UpdateResult::LAYOUT | UpdateResult::RENDER)
         );
-        assert_eq!(measure_content(&mut tree, root, &mut ctx).x, 10.0);
         tree.layout_window(native, &mut ctx);
+        assert_eq!(measure_content(&mut tree, root, &mut ctx).x, 10.0);
         tree.render_window(native, &mut ctx).unwrap();
     }
     // A later model update can also run before the next size notification.
@@ -773,7 +779,9 @@ fn entering_and_leaving_a_window_invalidates_reused_descendants() {
         None
     );
     assert_eq!(
-        tree.measure_node(child, Constraints::default(), &mut ctx).x,
+        tree.measure_node(child, Constraints::default(), &mut ctx)
+            .0
+            .x,
         20.0
     );
     tree.layout(bounds(), &mut ctx);

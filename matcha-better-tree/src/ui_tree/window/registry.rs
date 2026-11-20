@@ -5,6 +5,7 @@ use matcha_window::window::{Window as OsWindow, WindowId};
 
 use crate::arena::Id as UiId;
 use crate::ui_tree::context::PlatformState;
+use crate::ui_tree::env_reads::EnvReads;
 
 /// Removing a window declaration releases its OS window. A suspended window
 /// remains registered while its presentation surface is detached.
@@ -17,6 +18,10 @@ struct WindowEntry {
     node: UiId,
     window: OsWindow,
     platform: PlatformState,
+    // Metrics that the tree last applied to this window's caches.
+    applied_dpi: f64,
+    applied_viewport: [f32; 2],
+    pending_changes: EnvReads,
 }
 
 impl WindowRegistry {
@@ -27,6 +32,9 @@ impl WindowRegistry {
             id,
             WindowEntry {
                 node,
+                applied_dpi: window.dpi(),
+                applied_viewport: window.inner_size().map(|size| size as f32),
+                pending_changes: EnvReads::empty(),
                 window,
                 platform: PlatformState::default(),
             },
@@ -36,6 +44,34 @@ impl WindowRegistry {
 
     pub(super) fn unregister(&mut self, id: WindowId) {
         self.entries.remove(&id);
+    }
+
+    pub(super) fn note_env_change(&mut self, id: WindowId, changed: EnvReads) {
+        self.entries
+            .get_mut(&id)
+            .expect("registered window")
+            .pending_changes |= changed;
+    }
+
+    /// Consume notifications and compare the actual inputs of the upcoming pass. A queued
+    /// resize or scale notification may describe an older state than the live window.
+    pub(super) fn take_env_changes(
+        &mut self,
+        id: WindowId,
+        dpi: f64,
+        viewport: [f32; 2],
+    ) -> EnvReads {
+        let entry = self.entries.get_mut(&id).expect("registered window");
+        let mut changes = std::mem::take(&mut entry.pending_changes);
+        if entry.applied_dpi != dpi {
+            changes |= EnvReads::DPI;
+            entry.applied_dpi = dpi;
+        }
+        if entry.applied_viewport != viewport {
+            changes |= EnvReads::VIEWPORT_SIZE;
+            entry.applied_viewport = viewport;
+        }
+        changes
     }
 
     pub(in crate::ui_tree) fn remove_node(&mut self, node: UiId) {

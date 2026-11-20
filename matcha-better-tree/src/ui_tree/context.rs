@@ -87,6 +87,28 @@ enum TreeScope {
     Window(WindowId),
 }
 
+/// Extra geometry cache inputs supplied by a widget when it calls into a child.
+/// Ordinary pass metrics are invalidated by the owner of the tree or native window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct GeometryEnvironment {
+    overridden: EnvReads,
+    dpi_bits: u64,
+    viewport_bits: [u32; 2],
+    frame_time: Instant,
+}
+
+impl GeometryEnvironment {
+    pub(super) fn matches(&self, other: &Self, dependencies: EnvReads) -> bool {
+        // The pass owner handles inherited changes. Compare the effective values of
+        // inputs supplied locally on either call, if this result actually used them.
+        let local = (self.overridden | other.overridden) & dependencies;
+        (!local.contains(EnvReads::DPI) || self.dpi_bits == other.dpi_bits)
+            && (!local.contains(EnvReads::VIEWPORT_SIZE)
+                || self.viewport_bits == other.viewport_bits)
+            && (!local.contains(EnvReads::FRAME_TIME) || self.frame_time == other.frame_time)
+    }
+}
+
 /// Environment getters take exclusive access to record the current callback's reads.
 pub struct Context<'a> {
     windows: &'a mut WindowRegistry,
@@ -98,6 +120,7 @@ pub struct Context<'a> {
     window_error: Option<&'a mut Option<WindowError>>,
     services: ServicesStorage<'a>,
     env_reads: Option<&'a mut EnvReads>,
+    overrides: EnvReads,
 }
 
 impl<'a> Context<'a> {
@@ -123,6 +146,7 @@ impl<'a> Context<'a> {
             window_error: None,
             services,
             env_reads: None,
+            overrides: EnvReads::empty(),
         }
     }
 
@@ -212,6 +236,7 @@ impl<'a> Context<'a> {
             window_error: self.window_error.as_deref_mut(),
             services: ServicesStorage::Borrowed(self.services.get_mut()),
             env_reads: self.env_reads.as_deref_mut(),
+            overrides: self.overrides,
         }
     }
 
@@ -245,26 +270,57 @@ impl<'a> Context<'a> {
         }
     }
 
+    fn mark_override(&mut self, metric: EnvReads) {
+        if self.env_reads.is_some() {
+            self.overrides.insert(metric);
+        }
+    }
+
+    /// A context passed to a child normally carries its parent's callback recorder.
+    /// A widget may instead supply an independent Context, including its own defaults.
+    pub(super) fn with_child_geometry<R>(&mut self, run: impl FnOnce(&mut Context<'_>) -> R) -> R {
+        if self.env_reads.is_some() {
+            return run(self);
+        }
+        let mut independent = self.reborrow();
+        independent.overrides = EnvReads::all();
+        run(&mut independent)
+    }
+
+    pub(super) fn geometry_environment(&self) -> GeometryEnvironment {
+        GeometryEnvironment {
+            overridden: self.overrides,
+            dpi_bits: self.dpi.to_bits(),
+            viewport_bits: self.viewport_size.map(f32::to_bits),
+            frame_time: self.frame_time,
+        }
+    }
+
     pub(crate) fn with_window(mut self, window: WindowId) -> Self {
         let native = self.windows.window(window).expect("mounted window");
         self.dpi = native.dpi();
         self.viewport_size = native.inner_size().map(|size| size as f32);
+        self.overrides
+            .remove(EnvReads::DPI | EnvReads::VIEWPORT_SIZE);
         self.scope = TreeScope::Window(window);
         self
     }
 
     pub fn with_viewport_size(mut self, viewport_size: [f32; 2]) -> Self {
         self.viewport_size = viewport_size;
+        self.mark_override(EnvReads::VIEWPORT_SIZE);
         self
     }
 
     pub fn with_dpi(mut self, dpi: f64) -> Self {
         self.dpi = dpi;
+        self.mark_override(EnvReads::DPI);
         self
     }
 
     pub fn with_frame_time(mut self, frame_time: Instant) -> Self {
         self.frame_time = frame_time;
+        self.mark_override(EnvReads::FRAME_TIME);
         self
     }
 
@@ -390,6 +446,66 @@ mod tests {
     use crate::arena::Arena;
     use matcha_window::headless_interface::HeadlessEventLoop;
     use matcha_window::window::WindowConfig as OsWindowConfig;
+
+    #[test]
+    fn child_geometry_inputs_follow_widget_overrides_across_reborrows() {
+        let mut registry = WindowRegistry::default();
+        let time = Instant::now();
+        let mut root = Context::new(&mut registry)
+            .with_dpi(1.5)
+            .with_viewport_size([80.0, 60.0])
+            .with_frame_time(time);
+        let inherited = root.geometry_environment();
+        assert!(inherited.overridden.is_empty());
+
+        let ((), reads) = root.observe_env_reads(|ctx| {
+            let mut child = ctx.reborrow().with_dpi(1.5);
+            let dpi = child.geometry_environment();
+            assert_eq!(dpi.overridden, EnvReads::DPI);
+            assert!(dpi.matches(&inherited, EnvReads::all()));
+            assert_eq!(child.unobserved().geometry_environment(), dpi);
+            assert_ne!(child.reborrow().with_dpi(2.0).geometry_environment(), dpi);
+            let viewport = child
+                .reborrow()
+                .with_viewport_size([80.0, 60.0])
+                .geometry_environment();
+            assert_ne!(viewport, dpi);
+            assert_ne!(
+                child
+                    .reborrow()
+                    .with_frame_time(time)
+                    .geometry_environment(),
+                dpi
+            );
+            assert_eq!(child.geometry_environment(), dpi);
+        });
+        assert!(reads.is_empty());
+        assert_eq!(root.geometry_environment(), inherited);
+    }
+
+    #[test]
+    fn native_window_replaces_local_metrics_and_inherits_pass_time() {
+        let mut arena = Arena::<()>::new();
+        let mut registry = WindowRegistry::default();
+        let event_loop = HeadlessEventLoop::new();
+        let window = Window::new(&OsWindowConfig::default(), &event_loop).unwrap();
+        let id = registry.register(arena.reserve(), window);
+        let mut root = Context::new(&mut registry);
+        let time = Instant::now();
+        let ((), reads) = root.observe_env_reads(|ctx| {
+            let mut scoped = ctx.reborrow().with_frame_time(time);
+            let inherited_time = scoped.geometry_environment();
+            let native = scoped
+                .reborrow()
+                .with_dpi(2.0)
+                .with_viewport_size([9.0, 9.0])
+                .with_window(id);
+            let native = native.geometry_environment();
+            assert_eq!(native.overridden, EnvReads::FRAME_TIME);
+            assert!(native.matches(&inherited_time, EnvReads::all()));
+        });
+        assert!(reads.is_empty());
+    }
 
     #[test]
     fn scopes_borrow_services_and_preserve_resource_updates_after_returning() {
